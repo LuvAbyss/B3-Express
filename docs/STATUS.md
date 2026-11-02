@@ -4,6 +4,10 @@
 
 Hardware: desktop Ryzen 7 5700X3D, RTX 3080, driver 621.01. Laptop i5-12450H, RTX 4050 6 GB. Numbers are from the desktop unless noted. Fuller notes: `RESUME-ON-DESKTOP.md` and the READMEs under `diagnostics/`.
 
+## Release 0.1.0 (2026-11-02)
+
+`B3-Express-0.1.0-windows-x64.zip`, 82.6 MB, built by `diagnostics/release-0.1/make-release.py`, runtime c2. No game files or compiled game code. Guide: `docs/INSTALL.md`, in the zip as `INSTALL.txt`. Tested as a new player on this PC: unzipped to an empty folder, the package's own Python ran Install from an extracted dump in 202 s, the module came out the same as the installed one (`85df1689...`), and the game started and exited 0. Not tested on another PC, or with a dump from another tool.
+
 ## What builds
 
 | step | result |
@@ -198,7 +202,7 @@ In order of work:
 3. A/B of ASTC as BC3 where textures stream, in chapter 12.
 4. A measure of whether a render thread pays.
 5. GPU time in combat, 16.4 against 10.3 ms. Reads from system memory are the first lead, which brings back VRAM step 3.
-6. A package with this launcher, then a packaged `.exe`. `make-laptop-nogame.py` still ships `hactool.exe` and a compiled module.
+6. A packaged `.exe` for the launcher. The zip release is done.
 7. Texture hitches, 100-270 ms at loads and camera cuts.
 8. Cutscenes at 60: built, needs the user's play and a launcher setting.
 9. FSR 2/3, DLSS and HDR only if time allows.

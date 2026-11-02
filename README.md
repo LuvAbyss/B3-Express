@@ -17,11 +17,13 @@ Current state, measurements and what's left: [docs/STATUS.md](docs/STATUS.md).
 
 ## Use
 
+Players: download a release and follow [docs/INSTALL.md](docs/INSTALL.md). To build it yourself:
+
 1. Build the runtime from `source/` (`source/docs/BUILD.md`).
 2. Extract your own 1.2.0 dump into a folder holding `exefs` and `romfs`.
 3. Start `Launch-Bayonetta3.cmd`, then Install on that folder. It checks the version against `game-files.txt`, copies the files and compiles the game code on your PC. It never asks for keys.
 
-The launcher's bundled Python isn't in this repo yet, so a packaged release is still to come.
+The launcher's bundled Python isn't in this repo. Releases include it.
 
 ## Credits
 
