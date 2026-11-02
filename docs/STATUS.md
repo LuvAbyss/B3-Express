@@ -6,6 +6,8 @@ Hardware: desktop Ryzen 7 5700X3D, RTX 3080, driver 621.01. Laptop i5-12450H, RT
 
 ## Release 0.1.0 (2026-11-02)
 
+Published by the user on GitHub, repo public, tag `release`. The user judges the build playable from start to finish. Measured here so far: see "What runs".
+
 `B3-Express-0.1.0-windows-x64.zip`, 82.6 MB, built by `diagnostics/release-0.1/make-release.py`, runtime c2. No game files or compiled game code. Guide: `docs/INSTALL.md`, in the zip as `INSTALL.txt`. Tested as a new player on this PC: unzipped to an empty folder, the package's own Python ran Install from an extracted dump in 202 s, the module came out the same as the installed one (`85df1689...`), and the game started and exited 0. Not tested on another PC, or with a dump from another tool.
 
 ## What builds
@@ -163,7 +165,7 @@ Built, tested on scripted scenes and played, **installed at the user's request w
 | title loop, in-engine | 39.96 s | 40.05 s at 52-59 FPS |
 | movie | 79.66 s | 79.87 s |
 
-The user played chapter 12 on c1: in-engine scenes 29.9 to 54.8 FPS, gameplay unchanged once the route is allowed for, no crash. Its lower pipeline waits come from caches filled by the run before. Rides aren't tested, and two scenes ran 2-3 s longer, unexplained. The user heard slight audio desync when a cutscene fell to 28-35 FPS. c2 pays a late scene off faster, by calculation from about 150 to about 50 ms behind at a steady 30 FPS, not yet heard. Skips work, by the user's play. **New first target: stretches of GPU 19-29 ms at 300-860 draws, 89% of c1's frames over 33.4 ms, on both builds. The user reports them on returning from the verse maps, 15-16 FPS for 5-7 s. ASTC causes the single spikes of up to 348 ms at those loads, not the 8-9 s at 16-18 FPS that follow, where the GPU reads 32 ms and fades over about a minute. Witch Time has the same heavy phase, 44.7-50 FPS for 45-90 s after each load, GPU 14-17 ms, with no holds at these loads, so the phase is the game's. The 8-12 s at about 17 FPS (GPU about 55 ms, 92-94% use) are ours alone. The long phase nearly matches: 41-44 against 45-46 FPS. New lead: the game has dynamic resolution, seen from 1638x922 to 2560x1434 in the scripted fight, so the peak may be a resolution controller settling after a load. Not proven, see `diagnostics/passtime-20261102/README.md`.**
+The user played chapter 12 on c1: in-engine scenes 29.9 to 54.8 FPS, gameplay unchanged once the route is allowed for, no crash. Its lower pipeline waits come from caches filled by the run before. Rides aren't tested, and two scenes ran 2-3 s longer, unexplained. The user heard slight audio desync when a cutscene fell to 28-35 FPS. c2 pays a late scene off faster, by calculation from about 150 to about 50 ms behind at a steady 30 FPS, not yet heard. Skips work, by the user's play. **New first target: stretches of GPU 19-29 ms at 300-860 draws, 89% of c1's frames over 33.4 ms, on both builds. The user reports them on returning from the verse maps, 15-16 FPS for 5-7 s. ASTC causes the single spikes of up to 348 ms at those loads, not the 8-9 s at 16-18 FPS that follow, where the GPU reads 32 ms and fades over about a minute. Witch Time has the same heavy phase, 44.7-50 FPS for 45-90 s after each load, GPU 14-17 ms, with no holds at these loads, so the phase is the game's. The 8-12 s at about 17 FPS (GPU about 55 ms, 92-94% use) are ours alone. The long phase nearly matches: 41-44 against 45-46 FPS. Named by GPU timing, c2: in the worst seconds one game compute job (613xN) takes about 20 ms and one group of passes 13-16 ms, against 0 and 3 ms when settled. The game has dynamic resolution, but it stayed at the usual size, so it isn't the cause. Which shader, and why it costs this much here, isn't known yet. See `diagnostics/passtime-20261102/README.md`.**
 
 ## Game and source identity
 
@@ -196,7 +198,7 @@ Open from that period, unseen since but not proven gone: intermittent native acc
 
 In order of work:
 
-1. Measure GPU time by pass in the heavy stretches. A texture pack made at install would fix load spikes only.
+1. Name the compute shader (613xN) and the pass group behind the drops after loads, and what they read. A texture pack made at install would fix load spikes only.
 1a. Hold loading screens until queued shader preparation and pipelines are done.
 2. Log real frame percentiles, ASTC per window, and the key of any wait over 100 ms.
 3. A/B of ASTC as BC3 where textures stream, in chapter 12.
