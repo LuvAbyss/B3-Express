@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright 2026 the ScarletNX contributors
+# Format with clang-format 23 (scripts/format.sh checks the version). The whole history is formatted with this file:
+# change it only together with a reformat of the tree.
+BasedOnStyle: LLVM
+Language: Cpp
+IndentWidth: 4
+ContinuationIndentWidth: 4
+ColumnLimit: 120
+UseTab: Never
+BreakBeforeBraces: Attach
+PointerAlignment: Left
+ReferenceAlignment: Left
+# The runtime is full of one-line helpers and switch tables; keep the short ones on one line
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Always
+AllowShortEnumsOnASingleLine: true
+AlignTrailingComments:
+  Kind: Always
+  OverEmptyLines: 0
+AlignConsecutiveMacros: AcrossComments
+IndentCaseLabels: true
+# Include order matters in places (a header that needs another's definitions first): never reorder
+SortIncludes: Never
+# Formatting only changes whitespace: LLVM style would also add `// namespace` comments and sort using-declarations
+FixNamespaceComments: false
+SortUsingDeclarations: Never
+ReflowComments: false
+# Splitting a long string into adjacent literals changes no code but is more than whitespace
+BreakStringLiterals: false
+SpaceAfterCStyleCast: false
+Cpp11BracedListStyle: true
+KeepEmptyLines:
+  AtStartOfBlock: false
+MaxEmptyLinesToKeep: 1

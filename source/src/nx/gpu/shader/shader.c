@@ -1,0 +1,418 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+   Copyright 2026 the ScarletNX contributors
+   Ported from Eden (src/shader_recompiler/frontend/maxwell/control_flow.cpp, indirect_branch_table_track.cpp,
+   translate_program.cpp):
+   SPDX-FileCopyrightText: Copyright 2025 Eden Emulator Project
+   SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+   SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project */
+/* Maxwell program structure: length and hash, branch targets and jump tables, the CRS stack resolved statically,
+   and VertexA + VertexB merged into one program. */
+#include "nx/gpu/shader/translator.h"
+
+/* Instruction words are 64-bit. Words 0-9 hold the 80-byte SPH, word 10 is the first scheduling word, and every
+   fourth word after it is another one (IDX_OK). */
+#define SH_SCAN_WORDS 16384 /* the length scan never looks further */
+#define CRS_DEPTH     16    /* static resolution gives up on a deeper stack */
+
+int (*g_shader_cb_read)(u32 idx, u32 off, u32* out);
+
+/* each stage binds its own constant buffers in its own descriptor set; compute runs alone and shares the vertex
+   stage's number */
+int shader_vk_set(int stage) {
+    switch (stage) {
+        case ST_FS: return 1;
+        case ST_TCS: return 2;
+        case ST_TES: return 3;
+        case ST_GS: return 4;
+        default: return 0;
+    }
+}
+
+static i32 sext(u32 value, int bits) {
+    return (i32)(value & ((1u << (bits - 1)) - 1)) - (i32)(value & (1u << (bits - 1)));
+}
+
+/* the code word after i */
+static u32 next_code(u32 i) {
+    i++;
+    if (i >= 10 && (i - 10) % 4 == 0) i++;
+    return i;
+}
+
+/* a relative branch: a signed 24-bit byte offset from the next instruction. A target on a scheduling word means the
+   instruction after it, as the hardware fetches bundles */
+u32 bra_target(u64 w, u32 idx) {
+    i32 t = (i32)idx + 1 + sext(B(w, 20, 24), 24) / 8;
+    if (t >= 10 && (t - 10) % 4 == 0) t++;
+    return (u32)t;
+}
+
+/* predicate PT, not negated, and flow condition T (15): the instruction always takes effect */
+int flow_always(u64 w) { return B(w, 16, 4) == 7 && B(w, 0, 5) == 15; }
+
+/* instructions that move control elsewhere, where a backward search for a register's writer has to stop */
+static int moves_control(int id) {
+    return id == O_BRA || id == O_BRX || id == O_JMP || id == O_CAL || id == O_RET || id == O_EXIT || id == O_KIL ||
+           id == O_SYNC || id == O_BRK || id == O_CONT;
+}
+
+/* The nearest instruction before from that writes reg, within limit instructions (0 for no limit), or -1. With
+   stop_at_flow the search ends at a flow instruction. An undecodable word ends it too. */
+static int find_writer(const u64* words, u32 from, u32 reg, u32 limit, int stop_at_flow) {
+    u32 j, seen = 0;
+    if (reg == 255) return -1;
+    for (j = from; j-- > 11;) {
+        const Op* op;
+        if (!IDX_OK(j)) continue;
+        if (limit && seen++ == limit) return -1;
+        op = decode(words[j]);
+        if (!op || (stop_at_flow && moves_control(op->id))) return -1;
+        if (shader_writes_reg(words[j], op->id, reg)) return (int)j;
+    }
+    return -1;
+}
+
+/* The compiler bounds a switch index before it loads the jump table: IMNMX Ri, Rx, max; SHL Rj, Ri, 2;
+   LDC.B32 Rk, c[bank][Rj + offset]. Gives the table's entry count, or 0 when the load isn't that idiom (as Eden's
+   TrackIndirectBranchTable finds it). */
+static int clamped_entries(const u64* words, u32 load) {
+    u64 w;
+    int at = find_writer(words, load, B(words[load], 8, 8), 32, 0);
+    if (at < 0) return 0;
+    w = words[at];
+    if (decode(w)->id != O_SHL_I || B(w, 16, 4) != 7 || B(w, 20, 19) != 2 || B(w, 56, 1)) return 0;
+    at = find_writer(words, (u32)at, B(w, 8, 8), 32, 0);
+    if (at < 0) return 0;
+    w = words[at];
+    if (decode(w)->id != O_IMNMX_I || B(w, 16, 4) != 7 || B(w, 56, 1)) return 0;
+    return (int)B(w, 20, 19) + 1;
+}
+
+/* The targets of the BRX at index, read from its jump table through g_shader_cb_read: up to max_targets, or -1 when
+   the table can't be found or read. The table address comes from the 32-bit LDC that last wrote the BRX's register
+   in its block, with no other way into the code between the two. With the clamp idiom every entry it allows has to
+   be a valid target; without it the valid entries up to the first invalid one are taken. */
+int shader_brx_targets(const u64* words, u32 index, u32 count, u32* targets, int max_targets) {
+    u64 brx, load;
+    u32 bank, j;
+    i32 offset, imm;
+    int at, exact, limit, k, n = 0;
+    if (!g_shader_cb_read || index >= count || !IDX_OK(index) || max_targets <= 0) return -1;
+    brx = words[index];
+    at = find_writer(words, index, B(brx, 8, 8), 0, 1);
+    if (at < 0) return -1;
+    load = words[at];
+    /* entries are word offsets: a load of another size reads them wrong. Mode 0 is the plain c[bank][reg + offset] */
+    if (decode(load)->id != O_LDC || B(load, 0, 8) != B(brx, 8, 8) || B(load, 16, 4) != 7 || B(load, 48, 3) != 4 ||
+        B(load, 44, 2) != 0)
+        return -1;
+    for (j = 11; j < count; j++) {
+        const Op* op;
+        u32 t;
+        if (!IDX_OK(j)) continue;
+        op = decode(words[j]);
+        if (!op || (op->id != O_BRA && op->id != O_SSY && op->id != O_PBK && op->id != O_PCNT && op->id != O_CAL))
+            continue;
+        t = bra_target(words[j], j);
+        if (t > (u32)at && t <= index) return -1;
+    }
+    exact = clamped_entries(words, (u32)at);
+    if (exact > max_targets) return -1;
+    limit = exact ? exact : max_targets < 64 ? max_targets : 64;
+    bank = B(load, 36, 5);
+    offset = sext(B(load, 20, 16), 16);
+    imm = sext(B(brx, 20, 24), 24);
+    for (k = 0; k < limit; k++) {
+        long long addr = (long long)offset + 4LL * k, rel;
+        u32 value;
+        long long t = 0;
+        int ok = addr >= 0 && g_shader_cb_read(bank, (u32)addr, &value);
+        if (ok) {
+            rel = (long long)value + imm;
+            ok = rel >= 0 && rel % 8 == 0;
+            if (ok) {
+                t = (long long)index + 1 + rel / 8;
+                if ((t - 10) % 4 == 0) t++;
+                ok = t >= 11 && t < (long long)count;
+            }
+        }
+        if (!ok) {
+            if (exact) return -1;
+            break;
+        }
+        targets[n++] = (u32)t;
+    }
+    return n ? n : -1;
+}
+
+/* the last nonzero code word below n, or 10 */
+static u32 last_nonzero(const u64* words, u32 n) {
+    u32 i;
+    for (i = n; i-- > 11;)
+        if (IDX_OK(i) && words[i]) return i;
+    return 10;
+}
+
+/* The program's length in bytes (out_len) and a 64-bit FNV-1a hash of that many bytes. The scan follows every
+   branch target forward and ends at an EXIT that always runs once no target lies past it, at an unconditional
+   backward BRA past every target, or at an unconditional RET past every target when the program has calls. A jump
+   table that can't be read leaves targets unknown: then only an EXIT past every known target and past the last
+   nonzero code word ends it, since the zero tail of the window can't be reached. */
+u64 shader_hash(const u8* code, u32 max_bytes, u32* out_len) {
+    const u64* words = (const u64*)code;
+    u32 n = max_bytes / 8, i, last = 10, furthest = 0, tail = 0, len;
+    int resolved = 1, calls = 0;
+    u64 h = 1469598103934665603ull;
+    if (n > SH_SCAN_WORDS) n = SH_SCAN_WORDS;
+    for (i = 11; i < n; i++) {
+        const Op* op;
+        u64 w;
+        u32 t;
+        if (!IDX_OK(i)) continue;
+        w = words[i];
+        last = i;
+        op = decode(w);
+        if (!op) continue;
+        switch (op->id) {
+            case O_CAL:
+            case O_PRET: calls = 1; /* fall through */
+            case O_BRA:
+            case O_PEXIT:
+            case O_SSY:
+            case O_PBK:
+            case O_PCNT:
+                t = bra_target(w, i);
+                if (t < n && t > furthest) furthest = t;
+                if (op->id == O_BRA && resolved && flow_always(w) && t <= i && i >= furthest) goto done;
+                break;
+            case O_BRX: {
+                u32 targets[64];
+                int k, count = shader_brx_targets(words, i, n, targets, 64);
+                if (count < 0 && resolved) {
+                    resolved = 0;
+                    tail = last_nonzero(words, n);
+                }
+                for (k = 0; k < count; k++)
+                    if (targets[k] > furthest) furthest = targets[k];
+                break;
+            }
+            case O_EXIT:
+                if (flow_always(w) && i >= furthest && (resolved || i >= tail)) goto done;
+                break;
+            case O_RET:
+                if (calls && resolved && flow_always(w) && i >= furthest) goto done;
+                break;
+            default: break;
+        }
+    }
+done:
+    len = (last + 1) * 8;
+    if (len > max_bytes) len = max_bytes;
+    for (i = 0; i < len; i++) {
+        h ^= code[i];
+        h *= 1099511628211ull;
+    }
+    if (out_len) *out_len = len;
+    return h;
+}
+
+/* One CRS stack entry: target << 2 | kind (CRS_KIND) */
+typedef struct {
+    u32 depth; /* CRS_DEPTH + 1 marks a block not reached yet */
+    u32 entry[CRS_DEPTH];
+} CrsStack;
+
+typedef struct {
+    const u64* words;
+    u32 count, blocks;
+    u8 leader[65536 / 8];
+    u32* start;      /* each block's first word, ascending */
+    u32* work;       /* blocks to walk */
+    CrsStack* stack; /* the stack each block starts with */
+    u32 nwork;
+} CrsWalk;
+
+static int is_leader(const CrsWalk* c, u32 i) { return i < c->count && (c->leader[i >> 3] >> (i & 7) & 1); }
+static void mark_leader(CrsWalk* c, u32 i) {
+    if (i < c->count) c->leader[i >> 3] |= (u8)(1u << (i & 7));
+}
+
+/* control arrives at target with stack s: the block's first arrival sets its stack, a later one must agree */
+static int crs_arrive(CrsWalk* c, u32 target, const CrsStack* s) {
+    u32 lo = 0, hi = c->blocks;
+    CrsStack* at;
+    if (!is_leader(c, target)) return 0;
+    while (lo < hi) {
+        u32 mid = (lo + hi) / 2;
+        if (c->start[mid] < target)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    at = &c->stack[lo];
+    if (at->depth > CRS_DEPTH) {
+        *at = *s;
+        c->work[c->nwork++] = lo;
+        return 1;
+    }
+    return at->depth == s->depth && !memcmp(at->entry, s->entry, s->depth * sizeof *s->entry);
+}
+
+/* Walks one block from its stack. 0 when the stack can't be known statically. */
+static int crs_block(CrsWalk* c, u32 b, u32* pop_targets) {
+    CrsStack s = c->stack[b];
+    u32 i = c->start[b];
+    for (; i < c->count; i = next_code(i)) {
+        u64 w = c->words[i];
+        const Op* op;
+        u32 t, k, kind, targets[64];
+        int count, n;
+        if (i != c->start[b] && is_leader(c, i)) return crs_arrive(c, i, &s);
+        op = decode(w);
+        if (!op || B(w, 16, 4) == 15) continue; /* predicated never */
+        switch (op->id) {
+            case O_SSY:
+            case O_PBK:
+            case O_PCNT:
+                /* a push happens whatever its predicate says */
+                if (s.depth == CRS_DEPTH) return 0;
+                s.entry[s.depth++] = bra_target(w, i) << 2 | (u32)CRS_KIND(op->id);
+                break;
+            case O_SYNC:
+            case O_BRK:
+            case O_CONT: {
+                CrsStack popped = s;
+                kind = (u32)CRS_KIND(op->id);
+                for (k = s.depth; k > 0 && (s.entry[k - 1] & 3) != kind; k--) {
+                }
+                if (!k) return 0;
+                /* the pop takes the nearest entry of its kind and drops the ones pushed after it */
+                t = s.entry[k - 1] >> 2;
+                if (pop_targets[i] && pop_targets[i] != t) return 0;
+                pop_targets[i] = t;
+                popped.depth = k - 1;
+                if (!crs_arrive(c, t, &popped)) return 0;
+                if (flow_always(w)) return 1;
+                break;
+            }
+            case O_BRA:
+                if (!crs_arrive(c, bra_target(w, i), &s)) return 0;
+                if (flow_always(w)) return 1;
+                break;
+            case O_BRX:
+                count = shader_brx_targets(c->words, i, c->count, targets, 64);
+                if (count < 0) return 0;
+                for (n = 0; n < count; n++)
+                    if (!crs_arrive(c, targets[n], &s)) return 0;
+                if (flow_always(w)) return 1;
+                break;
+            case O_EXIT:
+            case O_RET: /* without calls a RET ends the program */
+                if (flow_always(w)) return 1;
+                break;
+            default: break;
+        }
+    }
+    return 1;
+}
+
+/* The single CRS stack resolved at translation time: SSY, PBK and PCNT push a token and its target, and SYNC, BRK
+   and CONT pop down to the nearest token of their kind (Eden's control_flow.cpp Stack). Walks the control flow from
+   the entry with an empty stack and gives each pop its one target in pop_targets. Returns 0 when that can't be done
+   statically (calls, PEXIT, JMP, an unreadable jump table, a pop with no token, a block or pop reached with two
+   stacks, a deep stack, no memory): the translator then keeps the stack at run time. */
+int shader_resolve_crs(const u64* words, u32 count, u32* pop_targets) {
+    CrsWalk* c;
+    u32 i, b, targets[64];
+    int ok = 1, k, n;
+    size_t bytes;
+    if (count < 12 || count > 65536 || !words || !pop_targets) return 0;
+    c = calloc(1, sizeof *c);
+    if (!c) return 0;
+    c->words = words;
+    c->count = count;
+    mark_leader(c, 11);
+    for (i = 11; i < count && ok; i = next_code(i)) {
+        u64 w = words[i];
+        const Op* op = decode(w);
+        if (!op) continue;
+        switch (op->id) {
+            case O_CAL:
+            case O_PRET:
+            case O_PEXIT:
+            case O_JMP: ok = 0; break;
+            case O_BRA:
+            case O_SSY:
+            case O_PBK:
+            case O_PCNT: {
+                u32 t = bra_target(w, i);
+                if (t >= count || !IDX_OK(t)) ok = 0;
+                mark_leader(c, t);
+                break;
+            }
+            case O_BRX:
+                n = shader_brx_targets(words, i, count, targets, 64);
+                if (n < 0) ok = 0;
+                for (k = 0; k < n; k++) mark_leader(c, targets[k]);
+                break;
+            default: break;
+        }
+        if (op->id == O_BRA || op->id == O_BRX || op->id == O_SYNC || op->id == O_BRK || op->id == O_CONT ||
+            op->id == O_EXIT || op->id == O_RET)
+            mark_leader(c, next_code(i));
+    }
+    for (i = 0; i < count && ok; i++) c->blocks += is_leader(c, i);
+    bytes = (size_t)c->blocks * (2 * sizeof(u32) + sizeof(CrsStack));
+    if (ok) c->stack = malloc(bytes);
+    if (!c->stack) {
+        free(c);
+        return 0;
+    }
+    c->start = (u32*)(c->stack + c->blocks);
+    c->work = c->start + c->blocks;
+    for (i = 0, b = 0; i < count; i++)
+        if (is_leader(c, i)) {
+            c->start[b] = i;
+            c->stack[b++].depth = CRS_DEPTH + 1;
+        }
+    memset(pop_targets, 0, count * sizeof *pop_targets);
+    {
+        CrsStack empty;
+        memset(&empty, 0, sizeof empty);
+        crs_arrive(c, 11, &empty);
+    }
+    while (ok && c->nwork) ok = crs_block(c, c->work[--c->nwork], pop_targets);
+    free(c->stack);
+    free(c);
+    return ok;
+}
+
+/* NVN splits some vertex programs in two: VertexA (slot 0) runs first and usually writes the position, VertexB
+   (slot 1) the varyings. They become one program with B's header: A's code from word 10, then B's from the next
+   whole bundle on, where A's EXITs now branch, under the same predicate and flow condition. Branches are relative,
+   so both halves keep working where they land. Returns 0 when the result doesn't fit in max_bytes. */
+int shader_merge_dual(const u8* a, const u8* b, u8* out, u32 max_bytes) {
+    u32 len_a, len_b, words_a, start, i;
+    u64* code = (u64*)out;
+    if (!a || !b || !out || max_bytes < 96) return 0;
+    shader_hash(a, max_bytes, &len_a);
+    shader_hash(b, max_bytes, &len_b);
+    if (len_a < 88 || len_b < 88) return 0;
+    words_a = len_a / 8;
+    start = 10 + ((words_a - 10 + 3) & ~3u);
+    if ((unsigned long long)start * 8 + (len_b - 80) > max_bytes) return 0;
+    memset(out, 0, max_bytes);
+    memcpy(out, b, 80);
+    memcpy(out + 80, a + 80, len_a - 80);
+    memcpy(out + (size_t)start * 8, b + 80, len_b - 80);
+    for (i = 11; i < words_a; i++) {
+        u64 w = code[i];
+        const Op* op;
+        if (!IDX_OK(i)) continue;
+        op = decode(w);
+        if (!op || op->id != O_EXIT) continue;
+        /* BRA (opcode 0xE24) to B's first instruction, keeping the EXIT's predicate (16-19) and condition (0-4) */
+        code[i] = 0xE24ull << 52 | (u64)((start - i) * 8 & 0xFFFFFF) << 20 | (w & 0xF001Full);
+    }
+    return 1;
+}

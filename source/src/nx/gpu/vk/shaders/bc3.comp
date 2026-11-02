@@ -1,0 +1,122 @@
+#version 450
+/* SPDX-License-Identifier: GPL-3.0-or-later
+   Copyright 2026 the ScarletNX contributors */
+/* RGBA8 rows, as astc.comp writes them, to BC3 blocks, a quarter of the memory. One invocation per 4x4 block; a block
+   past the edge of an image repeats the edge's texels. Color: the texels' principal axis gives the two end colors,
+   each texel takes the nearest of the four the format offers. Alpha: lowest and highest, each texel the nearest of
+   eight. Quick and lossy, on top of ASTC's own loss. astc.c copies the blocks into a BC3 image. */
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    uint width;  /* texels in a row of the input */
+    uint height; /* rows of texels in this strip */
+};
+
+layout(binding = 0, std430) readonly restrict buffer InputTexels {
+    uint texels[];
+};
+
+layout(binding = 1, std430) writeonly restrict buffer OutputBlocks {
+    uvec4 blocks[];
+};
+
+uint to565(vec3 c) {
+    uvec3 q = uvec3(clamp(c, vec3(0.0), vec3(255.0)) * vec3(31.0, 63.0, 31.0) / 255.0 + 0.5);
+    return (q.r << 11) | (q.g << 5) | q.b;
+}
+
+vec3 from565(uint c) {
+    uint r = c >> 11, g = (c >> 5) & 63u, b = c & 31u;
+    return vec3((r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2));
+}
+
+void main() {
+    uint bx = gl_GlobalInvocationID.x, by = gl_GlobalInvocationID.y;
+    if (bx >= (width + 3u) / 4u) return; /* the groups cover whole 32s of blocks */
+    vec3 px[16];
+    float al[16];
+    vec3 lo = vec3(255.0), hi = vec3(0.0), mean = vec3(0.0);
+    float amin = 255.0, amax = 0.0;
+    for (uint i = 0u; i < 16u; i++) {
+        uint x = min(bx * 4u + (i & 3u), width - 1u), y = min(by * 4u + (i >> 2u), height - 1u);
+        uint t = texels[y * width + x];
+        px[i] = vec3(t & 255u, (t >> 8u) & 255u, (t >> 16u) & 255u);
+        al[i] = float(t >> 24u);
+        lo = min(lo, px[i]);
+        hi = max(hi, px[i]);
+        mean += px[i];
+        amin = min(amin, al[i]);
+        amax = max(amax, al[i]);
+    }
+    mean /= 16.0;
+
+    /* alpha: code 0 is a0, 1 is a1, k from 2 to 7 is ((8 - k) a0 + (k - 1) a1) / 7 */
+    uint a0 = uint(amax), a1 = uint(amin);
+    uint w0 = a0 | (a1 << 8u), w1 = 0u;
+    if (a0 > a1)
+        for (uint i = 0u; i < 16u; i++) {
+            uint t = uint((al[i] - amin) * 7.0 / (amax - amin) + 0.5);
+            uint code = t == 7u ? 0u : t == 0u ? 1u : 8u - t;
+            uint at = 16u + i * 3u;
+            if (at < 32u) w0 |= code << at;
+            if (at > 29u) w1 |= at < 32u ? code >> (32u - at) : code << (at - 32u);
+        }
+
+    /* color: the axis by a few power steps from the box's diagonal, the ends by the texels' reach along it */
+    vec3 axis = hi - lo;
+    uint c0 = 0u, c1 = 0u, indices = 0u;
+    if (dot(axis, axis) < 1.0) {
+        c0 = c1 = to565(mean);
+    } else {
+        float xx = 0.0, xy = 0.0, xz = 0.0, yy = 0.0, yz = 0.0, zz = 0.0;
+        for (uint i = 0u; i < 16u; i++) {
+            vec3 d = px[i] - mean;
+            xx += d.x * d.x;
+            xy += d.x * d.y;
+            xz += d.x * d.z;
+            yy += d.y * d.y;
+            yz += d.y * d.z;
+            zz += d.z * d.z;
+        }
+        for (uint s = 0u; s < 4u; s++) {
+            vec3 n = vec3(xx * axis.x + xy * axis.y + xz * axis.z, xy * axis.x + yy * axis.y + yz * axis.z,
+                          xz * axis.x + yz * axis.y + zz * axis.z);
+            float m = max(max(abs(n.x), abs(n.y)), abs(n.z));
+            if (m < 1e-3) break;
+            axis = n / m;
+        }
+        axis = normalize(axis);
+        float tmin = 1e9, tmax = -1e9;
+        for (uint i = 0u; i < 16u; i++) {
+            float t = dot(px[i] - mean, axis);
+            tmin = min(tmin, t);
+            tmax = max(tmax, t);
+        }
+        c0 = to565(mean + axis * tmax);
+        c1 = to565(mean + axis * tmin);
+        if (c0 < c1) {
+            uint t = c0;
+            c0 = c1;
+            c1 = t;
+        }
+        if (c0 != c1) {
+            vec3 e0 = from565(c0), e1 = from565(c1);
+            vec3 pal[4] = vec3[4](e0, e1, (2.0 * e0 + e1) / 3.0, (e0 + 2.0 * e1) / 3.0);
+            for (uint i = 0u; i < 16u; i++) {
+                uint best = 0u;
+                float bestd = 1e12;
+                for (uint k = 0u; k < 4u; k++) {
+                    vec3 d = px[i] - pal[k];
+                    float e = dot(d, d);
+                    if (e < bestd) {
+                        bestd = e;
+                        best = k;
+                    }
+                }
+                indices |= best << (i * 2u);
+            }
+        }
+    }
+    blocks[by * ((width + 3u) / 4u) + bx] = uvec4(w0, w1, c0 | (c1 << 16u), indices);
+}

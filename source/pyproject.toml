@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright 2026 the ScarletNX contributors
+# Ruff settings for optional diagnostics and developer hooks; no Python production dependency.
+[tool.ruff]
+line-length = 120
+# Optional diagnostic scripts support Python 3.12 and newer.
+target-version = "py312"
+
+[tool.ruff.format]
+quote-style = "single"

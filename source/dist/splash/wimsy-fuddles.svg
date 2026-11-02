@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Wimsy (Liz, GPL-3.0-or-later) with Fuddles's short tails and glowing circuits and colours.
+     The leaves keep Wimsy's own shapes; colours from Fuddles' own Wimsy. GPL-3.0-or-later. -->
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="512" height="512"
+     viewBox="0 0 512 512" fill="none">
+  <metadata>
+    <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:cc="http://creativecommons.org/ns#"
+             xmlns:dc="http://purl.org/dc/elements/1.1/">
+      <cc:Work rdf:about="">
+        <dc:title>Wimsy with Fuddles's short tails and glowing circuits</dc:title>
+        <dc:creator><cc:Agent><dc:title>Liz (Wimsy)</dc:title></cc:Agent></dc:creator>
+        <dc:contributor><cc:Agent><dc:title>AO55 (short tails and glowing circuits, Fuddles's colours)</dc:title></cc:Agent></dc:contributor>
+        <dc:license rdf:resource="https://spdx.org/licenses/GPL-3.0-or-later.html"/>
+        <dc:source>https://github.com/scarletnx/ScarletNX</dc:source>
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+  <defs>
+    <!-- Fuddles: navy to blue to violet wings with circuit traces, a pale blue face under a blue to pink band of hair, one cyan eye and one blue -->
+    <linearGradient id="hair" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3473DA"/>
+      <stop offset="1" stop-color="#CF51AE"/>
+    </linearGradient>
+    <linearGradient id="tail" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#71B4F8"/>
+      <stop offset="1" stop-color="#B452DF"/>
+    </linearGradient>
+    <linearGradient id="tail-dark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5E74F6"/>
+      <stop offset="1" stop-color="#8168F6"/>
+    </linearGradient>
+    <linearGradient id="far" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#67E8F9"/>
+      <stop offset="1" stop-color="#28BEF0"/>
+    </linearGradient>
+    <linearGradient id="far-dark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#28BEF0"/>
+      <stop offset="1" stop-color="#1C8FC0"/>
+    </linearGradient>
+    <linearGradient id="outfit" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#132A52"/>
+      <stop offset="1" stop-color="#7968F7"/>
+    </linearGradient>
+    <linearGradient id="ribbon" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#F7F4F5"/>
+      <stop offset="1" stop-color="#D3CCCF"/>
+    </linearGradient>
+    <linearGradient id="skin" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#DDF3FC"/>
+      <stop offset="1" stop-color="#F2FAFF"/>
+    </linearGradient>
+    <radialGradient id="iris" cx="0.5" cy="0.62" r="0.6">
+      <stop offset="0" stop-color="#A5F5FF"/>
+      <stop offset="0.7" stop-color="#37D7F0"/>
+      <stop offset="1" stop-color="#0B7A93"/>
+    </radialGradient>
+    <!-- Wimsy's head, as the original draws it -->
+    <path id="head" d="M 508.04553,190.77006 A 330.76661,330.76661 0 0 0 355.34995,220.08038 330.76661,330.76661 0 0 0 217.7827,336.65055 244.08293,244.08293 0 0 0 382.15852,323.1017 244.08293,244.08293 0 0 0 508.04553,190.77006 Z"/>
+    <clipPath id="head-clip"><use xlink:href="#head"/></clipPath>
+
+    <!-- a drill pointing down from its tie at 0,0, drawn as Wimsy's leaves are: each turn of the ringlet a leaf of two
+         arcs with a white edge, slanted as a helix winds, the turns narrowing to a curled tip, nothing between one turn and the next -->
+    <!-- two short loose tails, one of each side, where Wimsy's hanging hair goes: the far one cyan, the near one blue to violet -->
+    <g id="drill">
+      <path fill="url(#tail)" stroke="#FFFFFF" stroke-width="4.5" stroke-linejoin="round" d="M -22,6 Q -42,120 2,236 Q 34,118 22,6 Q 0,-6 -22,6 Z"/>
+      <path d="M 2,14 Q -6,120 3,214" fill="none" stroke="#FFFFFF" stroke-width="3.5" stroke-linecap="round" stroke-opacity="0.6"/>
+    </g>
+    <g id="drill-far">
+      <path fill="url(#far)" stroke="#FFFFFF" stroke-width="4.5" stroke-linejoin="round" d="M -22,6 Q -42,120 2,236 Q 34,118 22,6 Q 0,-6 -22,6 Z"/>
+      <path d="M 2,14 Q -6,120 3,214" fill="none" stroke="#FFFFFF" stroke-width="3.5" stroke-linecap="round" stroke-opacity="0.6"/>
+    </g>
+    <linearGradient id="fuddles-back" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0A122B"/><stop offset="0.5" stop-color="#152B5C"/><stop offset="1" stop-color="#1E5FA0"/></linearGradient>
+    <linearGradient id="fuddles-front" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#132A52"/><stop offset="0.5" stop-color="#3575DE"/><stop offset="1" stop-color="#7968F7"/></linearGradient>
+    <linearGradient id="fuddles-band" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#3473DA"/><stop offset="0.5" stop-color="#9160F6"/><stop offset="1" stop-color="#CF51AE"/></linearGradient>
+    <linearGradient id="fuddles-leaf-cyan" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#28BEF0"/><stop offset="1" stop-color="#67E8F9"/></linearGradient>
+    <linearGradient id="fuddles-leaf-violet" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9160F6"/><stop offset="0.5" stop-color="#5E74F6"/><stop offset="1" stop-color="#3F7FF4"/></linearGradient>
+  </defs>
+
+  <!-- the far tail, behind the head, cyan -->
+  <use xlink:href="#drill-far" transform="translate(250,300) rotate(8) scale(0.76,0.52)"/>
+
+  <!-- the wings in the outfit's grey -->
+  <path fill="url(#fuddles-back)" stroke="#FFFFFF" stroke-width="5.47474"
+        d="M 192.28931,12.793038 A 330.76661,330.76661 0 0 0 161.77932,165.25345 330.76661,330.76661 0 0 0 217.7827,336.65055 244.08293,244.08293 0 0 0 267.29749,179.3252 244.08293,244.08293 0 0 0 192.28931,12.793038 Z"/>
+  <!-- the vein and the circuit trace of the back wing, under the front wing -->
+  <clipPath id="fuddles-back-clip"><path d="M 192.28931,12.793038 A 330.76661,330.76661 0 0 0 161.77932,165.25345 330.76661,330.76661 0 0 0 217.7827,336.65055 244.08293,244.08293 0 0 0 267.29749,179.3252 244.08293,244.08293 0 0 0 192.28931,12.793038 Z"/></clipPath>
+  <g clip-path="url(#fuddles-back-clip)">
+    <path d="M 188,46 C 170,120 172,214 208,304" fill="none" stroke="#6A9BE6" stroke-width="1.6" stroke-linecap="round" stroke-opacity="0.7"/>
+    <path d="M 180,152 L 202,152 L 210,170 L 210,218" fill="none" stroke="#22D3EE" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="180" cy="152" r="2.6" fill="#FFFFFF"/><circle cx="210" cy="218" r="2.6" fill="#FFFFFF"/>
+  </g>
+  <path fill="url(#fuddles-front)" stroke="#FFFFFF" stroke-width="5.47474"
+        d="M 283.32464,18.471579 A 330.76661,330.76661 0 0 0 211.63417,156.44085 330.76661,330.76661 0 0 0 217.7827,336.65055 244.08293,244.08293 0 0 0 309.08124,199.29137 244.08293,244.08293 0 0 0 283.32464,18.471579 Z"/>
+  <!-- the outfit's cyan trim along the front wing -->
+  <path fill="none" stroke="#25CDEF" stroke-width="3" stroke-linecap="round"
+        d="M 279,40 C 246,92 226,170 224,300"/>
+
+  <!-- the circuits: a trace in each leaf, its dots, the lines of code on the front wing -->
+  <clipPath id="fuddles-front-clip"><path d="M 283.32464,18.471579 A 330.76661,330.76661 0 0 0 211.63417,156.44085 330.76661,330.76661 0 0 0 217.7827,336.65055 244.08293,244.08293 0 0 0 309.08124,199.29137 244.08293,244.08293 0 0 0 283.32464,18.471579 Z"/></clipPath>
+  <clipPath id="fuddles-upper-clip"><path d="M 3.1326032,310.41929 A 220.1792,220.1792 0 0 0 98.555722,350.50134 220.1792,220.1792 0 0 0 217.7827,336.65055 162.47705,162.47705 0 0 0 121.7011,283.52647 162.47705,162.47705 0 0 0 3.1326032,310.41929 Z"/></clipPath>
+  <clipPath id="fuddles-lower-clip"><path d="M 80.650839,503.85583 A 220.1792,220.1792 0 0 0 165.61247,444.74858 220.1792,220.1792 0 0 0 217.7827,336.65055 162.47705,162.47705 0 0 0 121.45529,389.32762 162.47705,162.47705 0 0 0 80.650839,503.85583 Z"/></clipPath>
+  <g clip-path="url(#fuddles-front-clip)">
+    <path d="M 260,92 L 248,102 L 246,128 L 238,158" fill="none" stroke="#C084FC" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="260" cy="92" r="2.6" fill="#FFFFFF"/><circle cx="238" cy="158" r="2.6" fill="#FFFFFF"/>
+    <path d="M 297,172 L 286,182 L 286,204" fill="none" stroke="#22D3EE" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="297" cy="172" r="2.6" fill="#FFFFFF"/>
+    <circle cx="270" cy="118" r="4.5" fill="#22D3EE"/><circle cx="264" cy="147" r="3.5" fill="#3B82F6"/><circle cx="261" cy="173" r="2.5" fill="#A855F7"/>
+    <path d="M 250,215 L 284,215 M 246,224 L 276,224 M 244,233 L 268,233" stroke="#C084FC" stroke-width="2" stroke-linecap="round"/>
+  </g>
+  <!-- the two leaves below, in the hair's cyan -->
+  <path fill="url(#fuddles-leaf-cyan)" stroke="#FFFFFF" stroke-width="3.64433"
+        d="M 3.1326032,310.41929 A 220.1792,220.1792 0 0 0 98.555722,350.50134 220.1792,220.1792 0 0 0 217.7827,336.65055 162.47705,162.47705 0 0 0 121.7011,283.52647 162.47705,162.47705 0 0 0 3.1326032,310.41929 Z"/>
+  <path fill="url(#fuddles-leaf-violet)" stroke="#FFFFFF" stroke-width="3.64433"
+        d="M 80.650839,503.85583 A 220.1792,220.1792 0 0 0 165.61247,444.74858 220.1792,220.1792 0 0 0 217.7827,336.65055 162.47705,162.47705 0 0 0 121.45529,389.32762 162.47705,162.47705 0 0 0 80.650839,503.85583 Z"/>
+
+  <!-- the head: a face, the hair over its back and its top in bangs, a blush -->
+  <use xlink:href="#head" fill="url(#skin)"/>
+  <g clip-path="url(#head-clip)">
+    <g transform="translate(217.8,336.7) rotate(-26.68)">
+      <path fill="url(#fuddles-band)"
+            d="M -40,-200 L 360,-200 L 360,-2 L 320,1 L 300,-2 L 260,-17 L 220,-27 L 180,-32 L 140,-31 L 100,-26 L 60,-15 L 20,0 L -40,4 Z"/>
+      <path fill="none" stroke="#C9B8FF" stroke-width="4" stroke-linecap="round" stroke-opacity="0.85"
+            d="M 40,-30 C 70,-40 110,-44 150,-40"/>
+      <ellipse cx="160" cy="34" rx="15" ry="7" fill="#F28C9C" fill-opacity="0.6"/>
+      <ellipse cx="236" cy="34" rx="12" ry="6" fill="#F28C9C" fill-opacity="0.6"/>
+    </g>
+  </g>
+  <use xlink:href="#head" stroke="#FFFFFF" stroke-width="5.47474"/>
+
+  <!-- the traces of the leaves below -->
+  <g clip-path="url(#fuddles-upper-clip)">
+    <path d="M 92,316 L 125,316 L 136,325 L 168,325" fill="none" stroke="#22D3EE" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="92" cy="316" r="2.6" fill="#FFFFFF"/>
+    <path d="M 34,306 Q 120,290 204,332" fill="none" stroke="#E0FAFF" stroke-width="1.6" stroke-linecap="round" stroke-opacity="0.75"/>
+  </g>
+  <g clip-path="url(#fuddles-lower-clip)">
+    <path d="M 165,388 L 150,400 L 146,418 L 133,430" fill="none" stroke="#22D3EE" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="165" cy="388" r="2.6" fill="#FFFFFF"/>
+    <path d="M 186,372 L 176,392 L 182,404" fill="none" stroke="#C084FC" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="186" cy="372" r="2.6" fill="#FFFFFF"/>
+    <path d="M 98,486 Q 118,404 206,346" fill="none" stroke="#C7D2FE" stroke-width="1.6" stroke-linecap="round" stroke-opacity="0.65"/>
+  </g>
+  <g clip-path="url(#head-clip)"><path transform="translate(217.8,336.7) rotate(-26.68)" d="M 14,34 Q 110,66 214,50" fill="none" stroke="#67E8F9" stroke-width="6" stroke-linecap="round" stroke-opacity="0.45"/></g>
+  <!-- the pink tuft at the end of the band of hair -->
+  <path transform="translate(217.8,336.7) rotate(-26.68)" fill="#F43F5E" d="M 268,-12 L 292,-6 L 281,6 Z"/>
+  <!-- the eyes, where Wimsy has them, Fuddles' cyan and blue, one of each, and a smile -->
+  <radialGradient id="iris2" cx="0.5" cy="0.62" r="0.6"><stop offset="0" stop-color="#A9C8FF"/><stop offset="0.7" stop-color="#4085F6"/><stop offset="1" stop-color="#1E3FA8"/></radialGradient>
+  <g transform="rotate(24.165289)">
+    <circle cx="434.99091" cy="99.701668" r="23.114985" fill="#090E1B"/>
+    <circle cx="434.99" cy="96.20" r="17.5" fill="url(#iris)"/>
+    <circle cx="430.39" cy="89.40" r="7" fill="#FFFFFF"/>
+    <circle cx="440.39" cy="103.60" r="3" fill="#FFFFFF" fill-opacity="0.85"/>
+    <circle cx="485.51288" cy="44.356552" r="23.114985" fill="#090E1B"/>
+    <circle cx="485.51" cy="40.86" r="17.5" fill="url(#iris2)"/>
+    <circle cx="480.91" cy="34.06" r="7" fill="#FFFFFF"/>
+    <circle cx="490.91" cy="48.26" r="3" fill="#FFFFFF" fill-opacity="0.85"/>
+  </g>
+  <path transform="translate(217.8,336.7) rotate(-26.68)" d="M 74,14 Q 88,27 104,16" fill="none" stroke="#050916" stroke-width="4" stroke-linecap="round"/>
+
+  <!-- the near tail, in front, blue to violet -->
+  <use xlink:href="#drill" transform="translate(322,320) rotate(-10) scale(0.72,0.44)"/>
+</svg>

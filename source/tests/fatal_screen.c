@@ -1,0 +1,104 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+   Copyright 2026 the ScarletNX contributors */
+/* What a fatal error's box says (runtime/platform/fatal_screen.c): the hint for each known error, the text cut into
+   the box's rows at spaces, a long word cut, UTF-8 counted as characters, those in the font's bytes, and Share log's
+   file */
+#include "nx/runtime/platform/fatal_screen.h"
+#include "common/utilities/common.h"
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static char rows[8][FATAL_ROW];
+
+int main(void) {
+    int n;
+    assert(strstr(fatal_hint("vulkan: the GPU device was lost (driver reset or crash)"), "driver reset it"));
+    assert(strstr(fatal_hint("Unsupported instruction 0x1ee0f800 at 0x80021c4"), "does not translate"));
+    assert(strstr(fatal_hint("Vulkan could not start (see the log). ScarletNX needs a GPU and driver with Vulkan 1.3."),
+                  "Vulkan 1.3"));
+    assert(strstr(fatal_hint("kernel: out of memory mapping 0x10000000 bytes"), "ran out of memory"));
+    assert(!fatal_hint("svc 0x7f is not implemented"));
+
+    /* at spaces, never past the width */
+    n = fatal_wrap("vulkan: the GPU device was lost (driver reset or crash)", 20, rows, 8);
+    assert(n == 4);
+    assert(!strcmp(rows[0], "vulkan: the GPU"));
+    assert(!strcmp(rows[1], "device was lost"));
+    assert(!strcmp(rows[2], "(driver reset or"));
+    assert(!strcmp(rows[3], "crash)"));
+    n = fatal_wrap("a b", 20, rows, 8);
+    assert(n == 1 && !strcmp(rows[0], "a b"));
+    /* a word as wide as the row fills it, a longer one is cut */
+    n = fatal_wrap("abcdefghij klm", 10, rows, 8);
+    assert(n == 2 && !strcmp(rows[0], "abcdefghij") && !strcmp(rows[1], "klm"));
+    n = fatal_wrap("abcdefghijklmno", 10, rows, 8);
+    assert(n == 2 && !strcmp(rows[0], "abcdefghij") && !strcmp(rows[1], "klmno"));
+    /* UTF-8: characters, not bytes, fill a row; one is never split */
+    n = fatal_wrap("\xE2\x96\xA0\xE2\x96\xA0\xE2\x96\xA0 ab", 4, rows, 8);
+    assert(n == 2 && !strcmp(rows[0], "\xE2\x96\xA0\xE2\x96\xA0\xE2\x96\xA0") && !strcmp(rows[1], "ab"));
+    /* spaces at the edges and runs of them make no empty rows */
+    n = fatal_wrap("   one     two   ", 3, rows, 8);
+    assert(n == 2 && !strcmp(rows[0], "one") && !strcmp(rows[1], "two"));
+    assert(fatal_wrap("", 10, rows, 8) == 0 && fatal_wrap("     ", 10, rows, 8) == 0);
+    /* the count goes past max, the rows past it are not written */
+    strcpy(rows[1], "kept");
+    n = fatal_wrap("aa bb cc", 2, rows, 1);
+    assert(n == 3 && !strcmp(rows[0], "aa") && !strcmp(rows[1], "kept"));
+    /* the font's bytes: CP437 for what it has, '?' for the rest and for bytes that are no UTF-8 */
+    {
+        char out[32];
+        fatal_cp437("caf\xC3\xA9 \xE2\x96\xA0 \xE6\x97\xA5", out, sizeof out);
+        assert(!strcmp(out, "caf\x82 \xFE ?"));
+        fatal_cp437("a\x80"
+                    "b\xC3",
+                    out, sizeof out);
+        assert(!strcmp(out, "a?b?"));
+        fatal_cp437("abcdef", out, 4);
+        assert(!strcmp(out, "abc"));
+    }
+    /* Share log's file, as the launcher's: the build, the error and the game's log, its last 4 MiB of a bigger one; a
+       log not there yet says so, and a folder that cannot take it fails with the path it tried */
+    {
+        enum { BIG = (4 << 20) + 100 };
+        char *root = snx_temp_dir(NULL), *log = snx_path_join(root, "0100DA801624E000.log"), saved[1024], *big;
+        char* text;
+        size_t n = 0;
+        assert(root && log && !snx_write_file(log, "[  0.10] svc: hello\n", 20));
+        assert(!fatal_share_log(root, "ScarletNX main abc1234 (clang 23, Linux x86_64)",
+                                "Unsupported instruction e78f1000", log, saved, sizeof saved));
+        text = (char*)snx_read_file(saved, &n);
+        assert(text && strstr(saved, "scarletnx.log") && !strncmp(text, "ScarletNX main abc1234", 22));
+        assert(strstr(text, "\nMessage: Unsupported instruction e78f1000\n") && strstr(text, log) &&
+               strstr(text, "svc: hello"));
+        free(text);
+        assert(!snx_remove_tree(log));
+        assert(!fatal_share_log(root, "build", "message", log, saved, sizeof saved));
+        text = (char*)snx_read_file(saved, &n);
+        assert(text && strstr(text, "(not written yet)"));
+        free(text);
+        big = (char*)malloc(BIG);
+        assert(big);
+        memset(big, 'a', BIG);
+        memcpy(big + BIG - 4, "end\n", 4);
+        big[99] = 'b'; /* the head that goes */
+        assert(!snx_write_file(log, big, BIG));
+        assert(!fatal_share_log(root, "build", "message", log, saved, sizeof saved));
+        text = (char*)snx_read_file(saved, &n);
+        /* the log's own part, after its header: the header names the log's path, which may hold a 'b' */
+        assert(text && n < (size_t)(4 << 20) + 1000 && n >= (size_t)(4 << 20) && strstr(text, "end\n") &&
+               strstr(text, " ==\n") && !strchr(strstr(text, " ==\n"), 'b'));
+        free(text);
+        free(big);
+        free(log);
+        log = snx_path_join(root, "no/such/folder");
+        assert(fatal_share_log(log, "build", "message", NULL, saved, sizeof saved) && strstr(saved, "no/such/folder"));
+        assert(fatal_share_log(NULL, "build", "message", NULL, saved, sizeof saved));
+        free(log);
+        assert(!snx_remove_tree(root));
+        free(root);
+    }
+    puts("fatal screen: hints, rows, the font's bytes and Share log's file");
+    return 0;
+}

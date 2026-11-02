@@ -1,0 +1,46 @@
+# Allowlist: everything is ignored unless named here, so game files can't reach the repo by accident.
+# Never allow: game data, keys, saves, compiled game code, captured shaders, screenshots or run logs.
+/*
+!/.gitignore
+!/README.md
+!/LICENSE
+!/Launch-Bayonetta3.cmd
+!/Launch-Bayonetta3-PassTime.cmd
+!/game-files.txt
+!/docs/
+
+!/launcher/
+/launcher/python/
+/launcher/__pycache__/
+
+!/source/
+/source/deps/
+/source/build/
+/source/.cache/
+/source/.github/
+
+# notes only: each study's README, none of its logs, captures or builds
+!/diagnostics/
+/diagnostics/*
+!/diagnostics/*/
+/diagnostics/*/*
+!/diagnostics/*/README.md
+/diagnostics/*/*/
+
+# never, wherever they are
+*.xci
+*.nsp
+*.nca
+*.nso
+*.keys
+*.exe
+*.dll
+*.so
+*.ppm
+*.dat
+*.snxs
+*.bin
+*.dmp
+*.log
+__pycache__/
+/diagnostics/resume-checkpoint-20261027-evening/

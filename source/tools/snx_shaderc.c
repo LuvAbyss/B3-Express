@@ -1,0 +1,163 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+   Copyright 2026 the ScarletNX contributors */
+/* Translate a captured shader corpus directly to SPIR-V and optionally validate the modules. */
+#include "nx/gpu/shader/shader.h"
+#include <dirent.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef _WIN32
+#include <process.h>
+#define SNX_PID _getpid()
+#else
+#include <unistd.h>
+#define SNX_PID getpid()
+#endif
+
+/* A capture of an NVN program can carry its own constant data beside it (<entry>.cb1, hle/nvn/shadow.c): constant
+   buffer 1, where its BRX jump tables are. While that entry translates, reads of buffer 1 come from it */
+static u8* g_cb1;
+static long g_cb1_size;
+static int cb1_read(u32 idx, u32 off, u32* out) {
+    if (idx != 1 || !g_cb1 || (long)off + 4 > g_cb1_size) return 0;
+    memcpy(out, g_cb1 + off, 4);
+    return 1;
+}
+static void cb1_load(const char* path) {
+    FILE* f = fopen(path, "rb");
+    free(g_cb1);
+    g_cb1 = NULL;
+    g_cb1_size = 0;
+    if (!f) return;
+    if (!fseek(f, 0, SEEK_END) && (g_cb1_size = ftell(f)) > 0 && !fseek(f, 0, SEEK_SET) &&
+        (g_cb1 = malloc((size_t)g_cb1_size)) && fread(g_cb1, 1, (size_t)g_cb1_size, f) != (size_t)g_cb1_size) {
+        free(g_cb1);
+        g_cb1 = NULL;
+    }
+    if (!g_cb1) g_cb1_size = 0;
+    fclose(f);
+}
+static int write_file(const char* path, const void* data, size_t size) {
+    FILE* file = fopen(path, "wb");
+    int ok = file && fwrite(data, 1, size, file) == size;
+    if (file && fclose(file)) ok = 0;
+    if (!ok) fprintf(stderr, "cannot write %s\n", path);
+    return ok;
+}
+static void shell_quote(char* out, size_t size, const char* path) {
+#ifdef _WIN32
+    snprintf(out, size, "\"%s\"", path);
+#else
+    size_t n = 0;
+    out[n++] = '\'';
+    for (; *path && n + 6 < size; path++) {
+        if (*path == '\'') {
+            memcpy(out + n, "'\\''", 4);
+            n += 4;
+        } else
+            out[n++] = *path;
+    }
+    out[n++] = '\'';
+    out[n] = 0;
+#endif
+}
+int main(int argc, char** argv) {
+    const char *dir = NULL, *out = NULL;
+    int validate = 0, verbose = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--out") && i + 1 < argc)
+            out = argv[++i];
+        else if (!strcmp(argv[i], "--validate"))
+            validate = 1;
+        else if (!strcmp(argv[i], "--verbose"))
+            verbose = 1;
+        else if (!strcmp(argv[i], "--direct")) { /* accepted for older corpus commands */
+        } else if (argv[i][0] != '-' && !dir)
+            dir = argv[i];
+        else {
+            fprintf(stderr, "usage: %s CORPUS_DIR [--out DIR] [--validate] [--verbose]\n", argv[0]);
+            return 2;
+        }
+    }
+    if (!dir) {
+        fprintf(stderr, "usage: %s CORPUS_DIR [--out DIR] [--validate] [--verbose]\n", argv[0]);
+        return 2;
+    }
+    /* Match a renderer with non-uniform sampled image array indexing. Otherwise indexed
+       LDC handles look like plain bindless textures and corpus validation misses them. */
+    g_shader_texture_arrays = 1;
+    DIR* directory = opendir(dir);
+    if (!directory) {
+        fprintf(stderr, "cannot open %s\n", dir);
+        return 2;
+    }
+    const char* tmp = getenv("TMPDIR");
+    if (!tmp) tmp = getenv("TEMP");
+    if (!tmp) tmp = getenv("TMP");
+#ifdef _WIN32
+    if (!tmp) tmp = ".";
+#else
+    if (!tmp) tmp = "/tmp";
+#endif
+    int total = 0, failed = 0, unsupported = 0;
+    struct dirent* entry;
+    while ((entry = readdir(directory))) {
+        size_t len = strlen(entry->d_name);
+        if (len < 6 || strcmp(entry->d_name + len - 5, ".snxs")) continue;
+        total++;
+        char path[2200], base[1024];
+        snprintf(path, sizeof path, "%s/%s", dir, entry->d_name);
+        snprintf(base, sizeof base, "%.*s", (int)(len - 5), entry->d_name);
+        u32 max_bytes;
+        int stage;
+        ShaderInfo info;
+        u8* code = shader_corpus_load(path, &max_bytes, &stage, &info);
+        if (!code) {
+            failed++;
+            if (verbose) printf("%s: unreadable corpus entry\n", base);
+            continue;
+        }
+        size_t words = 0;
+        char cb1[2200];
+        snprintf(cb1, sizeof cb1, "%s/%s.cb1", dir, base);
+        cb1_load(cb1);
+        g_shader_cb_read = g_cb1 ? cb1_read : NULL;
+        u32* spv = shader_to_spirv(code, max_bytes, stage, &info, &words, 1, 1, 1, 1);
+        g_shader_cb_read = NULL;
+        free(code);
+        if (!spv) {
+            unsupported++;
+            if (verbose) printf("%s: unsupported: %s\n", base, info.first_unsupported);
+            continue;
+        }
+        if (out || validate) {
+            char output[2200];
+            if (out)
+                snprintf(output, sizeof output, "%s/%s.spv", out, base);
+            else
+                snprintf(output, sizeof output, "%s/snx-shaderc-%d-%s.spv", tmp, (int)SNX_PID, base);
+            int written = write_file(output, spv, words * sizeof *spv);
+            if (written && validate) {
+                char quoted[4500], command[4600];
+                shell_quote(quoted, sizeof quoted, output);
+                snprintf(command, sizeof command, "spirv-val --target-env vulkan1.3 %s 2>&1", quoted);
+                FILE* proc = popen(command, "r");
+                char message[1024] = "";
+                size_t got = proc ? fread(message, 1, sizeof message - 1, proc) : 0;
+                message[got] = 0;
+                int rc = proc ? pclose(proc) : -1;
+                if (rc) {
+                    failed++;
+                    printf("%s: spirv-val: %s\n", base, message);
+                }
+            }
+            if (!out) remove(output);
+            if (!written) failed++;
+        }
+        free(spv);
+    }
+    closedir(directory);
+    printf("%d shaders: %d translated, %d unsupported, %d failed\n", total, total - unsupported - failed, unsupported,
+           failed);
+    return failed ? 1 : 0;
+}
