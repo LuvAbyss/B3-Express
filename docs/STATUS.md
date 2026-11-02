@@ -207,7 +207,7 @@ In order of work:
 8. Cutscenes at 60: built, needs the user's play and a launcher setting.
 9. FSR 2/3, DLSS and HDR only if time allows.
 
-Also open: merging upstream. The project has a git repo since 2026-11-02, by allowlist in `.gitignore`: no game files, keys, saves, logs or captures. ScarletNX has agreed to the project on that condition. The launcher doesn't install `control.nacp`. A future ABI change shows ready and then stops at Play.
+Also open: merging upstream, now 1,872 commits ahead of our base, with NVN as its only GPU path and a hook system (`docs/HOOKS.md` there). Hooks match exported symbols, and the game's main exports 25, none of the cutscene functions. Tested unchanged on the scripted fight: 25.2 FPS against our 58.5, about 4.9 against 2.3 GB of video memory, no crash, `diagnostics/upstream-20261102/README.md`. One scene, not studied further. Decision: no renderer merge now. The project has a git repo since 2026-11-02, by allowlist in `.gitignore`: no game files, keys, saves, logs or captures. ScarletNX has agreed to the project on that condition. The launcher doesn't install `control.nacp`. A future ABI change shows ready and then stops at Play.
 
 ## Not tested
 
