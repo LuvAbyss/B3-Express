@@ -18,6 +18,7 @@
 /source/build/
 /source/.cache/
 /source/.github/
+/source/.omc/
 
 # notes only: each study's README, none of its logs, captures or builds
 !/diagnostics/
