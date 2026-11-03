@@ -1104,6 +1104,7 @@ void video_poll(void) {
             g_pad_extra[i].buttons &= ~g_menu_held_extra[i];
         }
     }
+    input_record_replay(&b, &lx, &ly, &rx, &ry);
     g_pad.buttons = b;
     g_pad.lx = lx;
     g_pad.ly = ly;

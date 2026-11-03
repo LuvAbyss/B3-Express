@@ -36,4 +36,11 @@ void input_key_sticks(u64 k, i32 st[4]);
    32767, pulled in along its direction */
 void input_stick_clamp(i32* x, i32* y);
 
+/* Player 1's input, recorded and played back. SNX_INPUT_RECORD=file writes each change of the final state (buttons
+   and sticks, after the menu has taken its share) as "frame ms buttons lx ly rx ry". SNX_INPUT_REPLAY=file puts a
+   recording back in place of what the pads give, step by step at the frame (the present) it was recorded at, or at
+   its time with SNX_INPUT_REPLAY_BY=ms. When the recording ends, the pads have player 1 again. Called once per input
+   poll with the state about to go to the game, which it may replace */
+void input_record_replay(u64* buttons, i32* lx, i32* ly, i32* rx, i32* ry);
+
 #endif

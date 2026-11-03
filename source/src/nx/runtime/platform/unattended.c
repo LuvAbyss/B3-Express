@@ -218,3 +218,111 @@ void input_stick_clamp(i32* x, i32* y) {
         *y = (i32)(*y * (32767.0 / r));
     }
 }
+
+/* ------------------------------------------------------------ input recording and playback */
+typedef struct {
+    u32 frame, ms;
+    u64 buttons;
+    i32 st[4];
+} InputStep;
+
+static struct {
+    int mode; /* -1 not looked at yet, 0 off, 1 recording, 2 playing back */
+    int by_ms;
+    FILE* out;
+    u64 t0;
+    InputStep last;
+    InputStep* step; /* playback: the whole recording, one allocation */
+    size_t n, at;
+} g_rec = {.mode = -1};
+
+static void rec_open(void) {
+    const char* rec = getenv("SNX_INPUT_RECORD");
+    const char* play = getenv("SNX_INPUT_REPLAY");
+    const char* by = getenv("SNX_INPUT_REPLAY_BY");
+    g_rec.mode = 0;
+    g_rec.t0 = plat_ns();
+    if (play && *play) {
+        FILE* f = fopen(play, "r");
+        char line[256];
+        size_t cap = 0;
+        if (!f) {
+            WARN("input: can't open the recording %s, the pads have player 1\n", play);
+            return;
+        }
+        while (fgets(line, sizeof line, f)) {
+            InputStep s;
+            unsigned long long b;
+            if (line[0] == '#') continue;
+            if (sscanf(line, "%u %u %llx %d %d %d %d", &s.frame, &s.ms, &b, &s.st[0], &s.st[1], &s.st[2], &s.st[3]) !=
+                7)
+                continue;
+            s.buttons = (u64)b;
+            if (g_rec.n == cap) {
+                InputStep* grown;
+                cap = cap ? cap * 2 : 4096;
+                grown = (InputStep*)realloc(g_rec.step, cap * sizeof *grown);
+                if (!grown) break;
+                g_rec.step = grown;
+            }
+            g_rec.step[g_rec.n++] = s;
+        }
+        fclose(f);
+        g_rec.by_ms = by && !strcmp(by, "ms");
+        g_rec.mode = g_rec.n ? 2 : 0;
+        LOG("input: playing back %s, %lu steps to frame %u (%u ms), by %s\n", play, (unsigned long)g_rec.n,
+            g_rec.n ? g_rec.step[g_rec.n - 1].frame : 0, g_rec.n ? g_rec.step[g_rec.n - 1].ms : 0,
+            g_rec.by_ms ? "time" : "frame");
+        return;
+    }
+    if (rec && *rec) {
+        g_rec.out = fopen(rec, "w");
+        if (!g_rec.out) {
+            WARN("input: can't write the recording %s\n", rec);
+            return;
+        }
+        fprintf(g_rec.out, "# snx input 1: frame ms buttons lx ly rx ry, player 1, each change\n");
+        fflush(g_rec.out);
+        g_rec.mode = 1;
+        g_rec.last.buttons = ~0ull; /* the first poll is always written */
+        LOG("input: recording player 1 to %s\n", rec);
+    }
+}
+
+void input_record_replay(u64* buttons, i32* lx, i32* ly, i32* rx, i32* ry) {
+    int frame = frames_now();
+    u32 f = frame > 0 ? (u32)frame : 0, ms;
+    if (g_rec.mode < 0) rec_open();
+    if (!g_rec.mode) return;
+    ms = (u32)((plat_ns() - g_rec.t0) / 1000000u);
+    if (g_rec.mode == 1) {
+        if (*buttons == g_rec.last.buttons && *lx == g_rec.last.st[0] && *ly == g_rec.last.st[1] &&
+            *rx == g_rec.last.st[2] && *ry == g_rec.last.st[3])
+            return;
+        g_rec.last.buttons = *buttons;
+        g_rec.last.st[0] = *lx;
+        g_rec.last.st[1] = *ly;
+        g_rec.last.st[2] = *rx;
+        g_rec.last.st[3] = *ry;
+        /* each line on its own: a run closed from the window or a crash keeps everything up to it */
+        fprintf(g_rec.out, "%u %u %llx %d %d %d %d\n", f, ms, (unsigned long long)*buttons, *lx, *ly, *rx, *ry);
+        fflush(g_rec.out);
+        return;
+    }
+    /* playback: the last step at or before now holds until the next */
+    while (g_rec.at + 1 < g_rec.n &&
+           (g_rec.by_ms ? g_rec.step[g_rec.at + 1].ms <= ms : g_rec.step[g_rec.at + 1].frame <= f))
+        g_rec.at++;
+    if (g_rec.by_ms ? g_rec.step[0].ms > ms : g_rec.step[0].frame > f) return; /* before the first step */
+    if (g_rec.at + 1 == g_rec.n &&
+        (g_rec.by_ms ? ms : f) > (g_rec.by_ms ? g_rec.step[g_rec.at].ms + 1000u : g_rec.step[g_rec.at].frame + 60u)) {
+        LOG("input: the recording ended at frame %u, the pads have player 1 again\n", f);
+        g_rec.mode = 0;
+        return;
+    }
+    *buttons = g_rec.step[g_rec.at].buttons;
+    *lx = g_rec.step[g_rec.at].st[0];
+    *ly = g_rec.step[g_rec.at].st[1];
+    *rx = g_rec.step[g_rec.at].st[2];
+    *ry = g_rec.step[g_rec.at].st[3];
+}
