@@ -281,6 +281,38 @@ void snx_save_before_exit(void) {
 
 /* ---- the frontend's loop ---- */
 
+/* The pipeline cache is written on a thread of its own. Copying it out of the driver and writing it (about 500 MB
+   after a few sessions) took 200-300 ms in this loop at each scene change, where the game had made new pipelines,
+   and this loop also ticks the vsync the game waits for: the game's frame waited with it. vk_pipeline_save takes
+   its own lock, so the save at exit waits for one in progress */
+static PMutex g_saver_lk = PMUTEX_INIT;
+static PCond g_saver_cv;
+static int g_saver_wanted, g_saver_state; /* state: 0 not started, 1 running, -1 couldn't start */
+static void saver(void* arg) {
+    (void)arg;
+    pm_lock(&g_saver_lk);
+    for (;;) {
+        while (!g_saver_wanted) pc_wait(&g_saver_cv, &g_saver_lk, -1);
+        g_saver_wanted = 0;
+        pm_unlock(&g_saver_lk);
+        g_renderer->save();
+        pm_lock(&g_saver_lk);
+    }
+}
+static void save_in_background(void) {
+    int state;
+    pm_lock(&g_saver_lk);
+    if (!g_saver_state) {
+        pc_init(&g_saver_cv);
+        g_saver_state = plat_thread(saver, NULL, 0) == 0 ? 1 : -1;
+    }
+    state = g_saver_state;
+    g_saver_wanted = 1;
+    if (state > 0) pc_signal(&g_saver_cv);
+    pm_unlock(&g_saver_lk);
+    if (state < 0) g_renderer->save(); /* no thread: here, as before */
+}
+
 #define STALL_NS ((u64)15000000000u) /* this long without a new frame is worth a line and a dump */
 
 static void write_threads(u64 second) {
@@ -307,10 +339,11 @@ static void frontend_loop(void) {
         vi_vsync_tick();
         if (++tick % 60 == 0) ini_poll(0);
         frontend_frame();
-        /* here and not on the GPU thread, where writing the pipeline cache would hold up every channel */
+        /* not on the GPU thread, where writing the pipeline cache would hold up every channel, nor in this loop,
+           which ticks vsync (save_in_background) */
         if (tick % 300 == 0) {
             save_hints();
-            if (g_renderer->save) g_renderer->save();
+            if (g_renderer->save) save_in_background();
         }
         if (tick % 900 == 0) write_threads(tick / VI_REFRESH_HZ);
         now = plat_ns();

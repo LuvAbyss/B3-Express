@@ -137,6 +137,10 @@ extern int (*g_shader_cb_read)(u32 idx, u32 off, u32* out);
 /* 1 (the default): an FTZ float instruction that the device can't flush by mode is flushed with integer bits. 0
    (SNX_SOFT_FTZ=0, a test): it isn't, and the driver's own denormal behaviour applies, as in Witch Time */
 extern int g_shader_soft_ftz;
+/* 1 (the default): a program whose every jump goes forward, and whose lanes needn't reconverge, runs its blocks in
+   order instead of in the dispatch loop (spirv_translate.c). 0 (SNX_SHADER_LINEAR=0, a test): every program with
+   jumps uses the loop. The order of blocks and the design are Witch Time's (issue 92) */
+extern int g_shader_linear;
 /* the targets of the BRX at word index from its jump table, at most max_targets, or -1 */
 int shader_brx_targets(const u64* words, u32 index, u32 count, u32* targets, int max_targets);
 /* the program's hash, and its length in bytes in out_len */

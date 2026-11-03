@@ -26,6 +26,7 @@ static NvnFn g_fn[NVN_SLOTS];
 static PMutex g_lk = PMUTEX_INIT;
 /* SNX_NVN_TRACE, SNX_NVN_SHADOW (shadow.c's handlers), SNX_NVN_CMDLIST (cmdlist.c's, ahead of the shadow's) */
 static int g_trace, g_shadow, g_cmdlist;
+static int g_slow; /* SNX_NVN_SLOW=1: calls of 50 ms or more are logged (nvn_entry) */
 static u32 g_routed;
 static u64 g_total, g_next_dump = 1u << 24;
 static GuestFn g_boot_guest, g_getproc_guest;
@@ -209,6 +210,15 @@ static void nvn_entry(CPU* RESTRICT c, u64 pc) {
         kick_leave(f, prev);
         return;
     }
+    if (__atomic_load_n(&g_slow, __ATOMIC_RELAXED)) { /* SNX_NVN_SLOW=1 (a test): calls of 50 ms or more, by name */
+        u64 t0 = plat_ns(), a0 = c->x[0], a1 = c->x[1], ns;
+        f->handler(c, f);
+        ns = plat_ns() - t0;
+        if (ns >= 50000000)
+            LOG_LIMIT(200, "nvn-slow: %s(%llx, %llx) took %.1f ms\n", f->name, (unsigned long long)a0,
+                      (unsigned long long)a1, (double)ns / 1e6);
+        return;
+    }
     f->handler(c, f);
 }
 static NvnHandler handler_for(const char* name, int* op) {
@@ -283,6 +293,7 @@ void nvn_init(void) {
     const char* cmdlist = getenv("SNX_NVN_CMDLIST");
     u64 boot;
     g_trace = trace && trace[0] == '1';
+    g_slow = getenv("SNX_NVN_SLOW") && getenv("SNX_NVN_SLOW")[0] == '1';
     g_shadow = shadow && shadow[0] == '1';
     g_cmdlist = (cmdlist && cmdlist[0] == '1') || (front && front[0] == '2');
     kick_init();

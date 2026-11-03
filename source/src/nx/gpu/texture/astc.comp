@@ -4,7 +4,11 @@
    Ported from Eden (src/video_core/host_shaders/astc_decoder.comp):
    SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
    SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project */
-/* ASTC decoding as a compute shader, one invocation per 128 bit block. Eden's decoder reads the blocks in
+/* ASTC decoding as a compute shader, in two phases per workgroup of 32 blocks in a row. First each invocation
+   decodes its block's header, endpoints and weights, as Eden's decoder does, into workgroup memory (s_*); then the
+   32 invocations make the texels of all 32 blocks together, row by row, so neighbouring invocations write
+   neighbouring texels and a 10x10 block's 100 texels are not one invocation's loop. Error and void-extent blocks
+   still fill themselves in the first phase. Eden's decoder reads the blocks in
    block-linear order and stores floats into an image; here texture.c has already deswizzled them into rows of
    blocks, and the texels go out as packed RGBA8 words (R in the low byte) in rows of width words, which
    vk/astc.c copies into a UNORM or SRGB image. The byte conversions are integer arithmetic so that the CPU
@@ -27,6 +31,18 @@ layout(binding = 1, std430) writeonly restrict buffer OutputTexels {
     uint texels[];
 };
 
+#define WG 32u
+#define MAX_WEIGHTS 64u
+/* a block's decode for the second phase, by its invocation's index in the workgroup. s_state: 0 nothing to do (out
+   of the image, or the first phase filled it), 1 texels to make */
+shared uint s_state[WG];
+shared uint s_info[WG];  /* partitions - 1 (bits 0-1), dual plane (2), plane index (3-4), weight grid x (8-15), y (16-23) */
+shared uint s_seed[WG];  /* the partition index */
+shared uint s_cem[WG];   /* the color endpoint modes, 8 bits each */
+shared uvec4 s_e0[WG * 4u];
+shared uvec4 s_e1[WG * 4u];
+shared uint s_w[WG * MAX_WEIGHTS]; /* the unquantized weights, interleaved by plane when dual */
+uint g_slot;                       /* this invocation's index in the workgroup */
 const uint JUST_BITS = 0u;
 const uint QUINT = 1u;
 const uint TRIT = 2u;
@@ -980,41 +996,120 @@ void DecompressBlock(uvec2 origin) {
     DecodeIntegerSequence(max_weight, GetNumWeightValues(size_params, dual_plane));
     UnquantizeTexelWeights(size_params, dual_plane);
 
-    for (uint j = 0; j < block_dims.y; j++) {
-        for (uint i = 0; i < block_dims.x; i++) {
-            uint local_partition = 0;
-            if (num_partitions > 1) {
-                local_partition = Select2DPartition(partition_index, i, j, num_partitions);
-            }
-            const uint local_cem = color_endpoint_mode[local_partition];
-            const uvec4 weight_vec = GetUnquantizedWeightVector(j, i, size_params, plane_index, dual_plane);
-            const uvec4 C0 = endpoints0[local_partition];
-            const uvec4 C1 = endpoints1[local_partition];
-            if (IsHDRColorEndpointMode(local_cem)) {
-                StoreTexel(origin, i, j, ERROR_COLOR);
-                continue;
-            }
-            uvec4 p; /* A, R, G, B */
-            for (uint c = 0; c < 4; c++) {
-                const uint w = weight_vec[c];
-                if (srgb != 0u && c != 0) {
-                    /* sRGB decode mode: R, G and B expand as (e << 8) | 0x80 and keep the top 8 bits */
-                    p[c] = ((((C0[c] << 8) | 0x80u) * (64 - w) + ((C1[c] << 8) | 0x80u) * w + 32) / 64) >> 8;
-                } else {
-                    p[c] = Unorm16To8((C0[c] * 0x101 * (64 - w) + C1[c] * 0x101 * w + 32) / 64);
-                }
-            }
-            StoreTexel(origin, i, j, p.y | (p.z << 8) | (p.w << 16) | (p.x << 24));
+    const uint nw = GetNumWeightValues(size_params, dual_plane);
+    for (uint k = 0; k < nw; k++) s_w[g_slot * MAX_WEIGHTS + k] = result_vector[k];
+    for (uint k = 0; k < 4; k++) {
+        s_e0[g_slot * 4u + k] = endpoints0[k];
+        s_e1[g_slot * 4u + k] = endpoints1[k];
+    }
+    s_cem[g_slot] = color_endpoint_mode.x | (color_endpoint_mode.y << 8) | (color_endpoint_mode.z << 16) |
+                    (color_endpoint_mode.w << 24);
+    s_seed[g_slot] = partition_index;
+    s_info[g_slot] = (num_partitions - 1) | (dual_plane ? 4u : 0u) | (plane_index << 3) | (size_params.x << 8) |
+                     (size_params.y << 16);
+    s_state[g_slot] = 1u;
+}
+
+/* GetUnquantizedWeightVector for block b of the workgroup, from workgroup memory */
+uint SharedWeight(uint b, uint offset_base, uint plane, bool is_dual_plane) {
+    return s_w[b * MAX_WEIGHTS + (is_dual_plane ? 2 * offset_base + plane : offset_base)];
+}
+uvec4 SharedWeightVector(uint b, uint t, uint s, uvec2 size, uint plane_index, bool is_dual_plane) {
+    const uint Ds = (1024 + block_dims.x / 2) / (block_dims.x - 1);
+    const uint Dt = (1024 + block_dims.y / 2) / (block_dims.y - 1);
+    const uint area = size.x * size.y;
+    const uint cs = Ds * s;
+    const uint ct = Dt * t;
+    const uint gs = (cs * (size.x - 1) + 32) >> 6;
+    const uint gt = (ct * (size.y - 1) + 32) >> 6;
+    const uint js = gs >> 4;
+    const uint fs = gs & 0xF;
+    const uint jt = gt >> 4;
+    const uint ft = gt & 0x0F;
+    const uint w11 = (fs * ft + 8) >> 4;
+    const uint w10 = ft - w11;
+    const uint w01 = fs - w11;
+    const uint w00 = 16 - fs - ft + w11;
+    const uvec4 w = uvec4(w00, w01, w10, w11);
+    const uint v0 = jt * size.x + js;
+    uvec4 p0 = uvec4(0);
+    uvec4 p1 = uvec4(0);
+    if (v0 < area) {
+        p0.x = SharedWeight(b, v0, 0, is_dual_plane);
+        p1.x = SharedWeight(b, v0, 1, is_dual_plane);
+    }
+    if ((v0 + 1) < area) {
+        p0.y = SharedWeight(b, v0 + 1, 0, is_dual_plane);
+        p1.y = SharedWeight(b, v0 + 1, 1, is_dual_plane);
+    }
+    if ((v0 + size.x) < area) {
+        p0.z = SharedWeight(b, v0 + size.x, 0, is_dual_plane);
+        p1.z = SharedWeight(b, v0 + size.x, 1, is_dual_plane);
+    }
+    if ((v0 + size.x + 1) < area) {
+        p0.w = SharedWeight(b, v0 + size.x + 1, 0, is_dual_plane);
+        p1.w = SharedWeight(b, v0 + size.x + 1, 1, is_dual_plane);
+    }
+    const uint primary_weight = (p0.x * w.x + p0.y * w.y + p0.z * w.z + p0.w * w.w + 8) >> 4;
+    uvec4 weight_vec = uvec4(primary_weight);
+    if (is_dual_plane) {
+        const uint secondary_weight = (p1.x * w.x + p1.y * w.y + p1.z * w.z + p1.w * w.w + 8) >> 4;
+        for (uint c = 0; c < 4; c++) {
+            const bool is_secondary = ((plane_index + 1u) & 3u) == c;
+            weight_vec[c] = is_secondary ? secondary_weight : primary_weight;
         }
     }
+    return weight_vec;
+}
+
+/* texel (i, j) of the workgroup's block b, whose texels start at origin */
+void MakeTexel(uint b, uvec2 origin, uint i, uint j) {
+    const uint info = s_info[b];
+    const uint num_partitions = (info & 3u) + 1;
+    const bool dual_plane = (info & 4u) != 0;
+    const uint plane_index = (info >> 3) & 3u;
+    const uvec2 size_params = uvec2((info >> 8) & 0xFFu, (info >> 16) & 0xFFu);
+    uint local_partition = 0;
+    if (num_partitions > 1) {
+        local_partition = Select2DPartition(s_seed[b], i, j, num_partitions);
+    }
+    const uint local_cem = (s_cem[b] >> (local_partition * 8)) & 0xFFu;
+    if (IsHDRColorEndpointMode(local_cem)) {
+        StoreTexel(origin, i, j, ERROR_COLOR);
+        return;
+    }
+    const uvec4 weight_vec = SharedWeightVector(b, j, i, size_params, plane_index, dual_plane);
+    const uvec4 C0 = s_e0[b * 4u + local_partition];
+    const uvec4 C1 = s_e1[b * 4u + local_partition];
+    uvec4 p; /* A, R, G, B */
+    for (uint c = 0; c < 4; c++) {
+        const uint w = weight_vec[c];
+        if (srgb != 0u && c != 0) {
+            /* sRGB decode mode: R, G and B expand as (e << 8) | 0x80 and keep the top 8 bits */
+            p[c] = ((((C0[c] << 8) | 0x80u) * (64 - w) + ((C1[c] << 8) | 0x80u) * w + 32) / 64) >> 8;
+        } else {
+            p[c] = Unorm16To8((C0[c] * 0x101 * (64 - w) + C1[c] * 0x101 * w + 32) / 64);
+        }
+    }
+    StoreTexel(origin, i, j, p.y | (p.z << 8) | (p.w << 16) | (p.x << 24));
 }
 
 void main() {
     const uint blocks_x = (width + block_dims.x - 1) / block_dims.x;
     const uvec2 block = gl_GlobalInvocationID.xy;
-    if (block.x >= blocks_x) {
-        return;
+    g_slot = gl_LocalInvocationID.x;
+    s_state[g_slot] = 0u;
+    if (block.x < blocks_x) {
+        local_buff = astc_data[block.y * blocks_x + block.x];
+        DecompressBlock(block * block_dims);
     }
-    local_buff = astc_data[block.y * blocks_x + block.x];
-    DecompressBlock(block * block_dims);
+    barrier();
+    /* the texels of the workgroup's blocks, across its row of blocks first */
+    const uint first = gl_WorkGroupID.x * WG;
+    const uint span = WG * block_dims.x;
+    for (uint t = g_slot; t < span * block_dims.y; t += WG) {
+        const uint tx = t % span, j = t / span;
+        const uint b = tx / block_dims.x, i = tx % block_dims.x;
+        if (s_state[b] != 0u) MakeTexel(b, uvec2((first + b) * block_dims.x, block.y * block_dims.y), i, j);
+    }
 }

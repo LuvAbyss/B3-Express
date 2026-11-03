@@ -71,6 +71,16 @@ colours, by AO55 after Liz's Wimsy, GPL-3.0-or-later.
 `src/nx/hle/scene60.c`: how Bayonetta 3's 30 FPS scenes are timed, and the design of running them at 60, come from
 [Witch Time](https://github.com/Zexyen/Witch-Time) (GPL-3.0). The code is written from its notes.
 
+`src/nx/gpu/shader/spirv_translate.c`, shaders whose jumps all go forward run their blocks in order instead of in
+the dispatch loop: the design comes from [Witch Time](https://github.com/Zexyen/Witch-Time) (GPL-3.0, `docs/STATUS.md`,
+issues 92, 100 and 107). The code is written from its notes.
+
+`src/nx/gpu/vk/prompts.c` and `prompt_art.h`, PlayStation and Xbox button prompts: ported from
+[Witch Time](https://github.com/Zexyen/Witch-Time) v0.4.5 `runtime/prompts.c` and `runtime/prompt_art.h`
+(GPL-3.0-or-later, copyright K0NL and the Witch Time authors): the atlas's cells and hash, the pictures drawn from
+shapes, and the dual-plane ASTC block. `prompt_art.h` is unchanged. The hook in this renderer's texture cache and the
+choice from the pad last used are written here.
+
 `src/nx/gpu/vk/nvn_res.c`, storage buffers the GPU writes kept in video memory (`mir_own`, `own_merge`, `own_land_now`,
 `own_idle`): the design, keeping a compute-written buffer on the GPU, landing it in guest memory only when something
 needs the bytes there, merging against the snapshot taken when it was filled so a word the game wrote meanwhile stays

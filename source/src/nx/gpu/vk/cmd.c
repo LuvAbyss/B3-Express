@@ -290,6 +290,7 @@ u8* vk_stage_back(u64 size, VkBuffer* buf, u64* off, VmaAllocation* mem) {
 static u32 g_draws_since_submit; /* draws and dispatches recorded since the last submit (vk_frame_check) */
 void vk_submit(VkSemaphore wait, VkPipelineStageFlags2 wait_stage, VkSemaphore signal) {
     vk_render_end();
+    vk_astc_flush(vk_cmd()); /* textures decoded but not copied in yet */
     Frame* f = &g_fr[g_cur];
     VkCommandBuffer cb = vk_cmd(); /* a submit with nothing recorded still has to wait and signal */
     vk_query_flush(cb);            /* the samples-passed counts of the passes ended (query.c) */

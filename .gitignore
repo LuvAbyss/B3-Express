@@ -44,6 +44,7 @@
 *.dmp
 *.log
 __pycache__/
+.omc/
 /diagnostics/resume-checkpoint-20261027-evening/
 !/diagnostics/release-0.1/
 /diagnostics/release-0.1/*

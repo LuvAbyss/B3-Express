@@ -230,6 +230,11 @@ static int create_device(void) {
     if (!g_vk_flush_denorm)
         WARN("vulkan: FP32 denormal flush mode unavailable; graphics shaders use per-instruction FTZ fallback\n");
     {
+        const char* l = getenv("SNX_SHADER_LINEAR");
+        if (l && !strcmp(l, "0")) {
+            g_shader_linear = 0;
+            WARN("vulkan: SNX_SHADER_LINEAR=0: every shader with jumps runs in the dispatch loop\n");
+        }
         const char* e = getenv("SNX_SOFT_FTZ");
         if (e && !strcmp(e, "0")) {
             g_shader_soft_ftz = 0;

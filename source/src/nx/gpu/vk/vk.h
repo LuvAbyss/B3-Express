@@ -253,6 +253,7 @@ typedef struct Surf {
        (gpu/vk/texture.c rt_crop) */
     struct Surf* crop;
     u32 crop_gen;
+    u8 astc_pending; /* its ASTC levels decoded, their copies waiting in the batch (astc.c): vk_surf_use flushes it */
     struct Surf* next;
     struct Surf* rt_next; /* real render targets, for overlapping guest-memory writes */
 } Surf;
@@ -316,6 +317,9 @@ int vk_blit2d(const Surf2D* s, const Surf2D* d, int dx, int dy, int dw, int dh, 
 /* astc.c: decode tightly packed ASTC blocks and copy to a level/layer of t.
    Caller ends rendering and transitions t to TRANSFER_DST_OPTIMAL first. */
 void vk_astc_upload(VkCommandBuffer cb, Surf* t, const u8* blocks, u32 w, u32 h, u32 depth, u32 level, u32 layer);
+/* the encodes and copies of the strips vk_astc_upload decoded since the last flush, outside rendering passes. Runs
+   when a waiting texture is first used (vk_surf_use), freed, or the commands are submitted (vk_submit) */
+void vk_astc_flush(VkCommandBuffer cb);
 
 /* vic.c: the VIC composition as a compute shader, synchronously: 1 when it composed the picture into the job's
    output planes, 0 when the job is too large for the GPU and the caller composes in guest memory. Called without

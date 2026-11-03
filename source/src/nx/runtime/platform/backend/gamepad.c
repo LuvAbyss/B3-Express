@@ -17,6 +17,8 @@ static SDL_Gamepad* g_pads[SNX_GAMEPADS];
 static char g_names[SNX_GAMEPADS][64]; /* theirs, for the game's menu, which the renderer draws on its thread */
 static int g_labels[SNX_GAMEPADS][4], g_symmetric[SNX_GAMEPADS]; /* and how its button map screen draws them */
 static unsigned g_held;                                          /* the controls held, a bit each, as last polled */
+static int g_prompts;   /* button_prompts: 0 auto, 1 Switch, 2 PlayStation, 3 Xbox */
+static int g_used = -1; /* the slot of the pad last used (a button, or a stick past half), -1 none yet */
 #define UNSET SNX_PAD_UNSET
 static SnxGamepadConfig g_cfg = {
     0,
@@ -56,6 +58,9 @@ static void map_set(const IniOpt* o, const char* v) {
 const IniOpt g_gamepad_ini[] = {
     {"gamepad_swap_ab", "0", "1 = a controller's A and B swapped: 0 = where the console's are (A right, B bottom)",
      INI_INT, 0, &g_cfg.swap_ab, 0, 1, NULL, "Swap A/B", "Off|On", 0, 0},
+    {"button_prompts", "0",
+     "The buttons the game's prompts show: 0 = as the controller last used, 1 = Switch, 2 = PlayStation, 3 = Xbox",
+     INI_INT, 0, &g_prompts, 0, 3, NULL, "Button prompts", "Auto|Switch|PlayStation|Xbox", 0, 0},
     {"gamepad_deadzone", "20", "The sticks' dead zone, in percent of their travel", INI_INT, 0, &g_cfg.deadzone, 0, 90,
      NULL, "Stick dead zone", "#%", 5, 0},
     {"gamepad_rumble", "100", "How strongly the controllers vibrate when the game asks, in percent: 0 = never", INI_INT,
@@ -515,6 +520,8 @@ void gamepad_state(u64* buttons, i32 sticks[4]) {
         if (!g) continue;
         gamepad_state_slot(i, &one, axes);
         b |= one;
+        if (one || abs(axes[0]) > 16384 || abs(axes[1]) > 16384 || abs(axes[2]) > 16384 || abs(axes[3]) > 16384)
+            __atomic_store_n(&g_used, i, __ATOMIC_RELAXED); /* a drifting stick is not use */
         for (c = 0; c < SNX_PAD_CONTROLS; c++)
             if (snx_pad_held(g, c)) held |= 1u << c;
         if (!sticks[0] && !sticks[1]) {
@@ -548,4 +555,25 @@ void gamepad_rumble_slot(int slot, u32 left, u32 right) {
     lo = lo * strength(slot) / 100;
     hi = hi * strength(slot) / 100;
     SDL_RumbleGamepad(g_pads[slot], (Uint16)lo, (Uint16)hi, 100);
+}
+
+int gamepad_prompts(int* by_letter) {
+    int want = __atomic_load_n(&g_prompts, __ATOMIC_RELAXED), slot = __atomic_load_n(&g_used, __ATOMIC_RELAXED), i;
+    const SnxPlayerConfig* p = &g_players[0];
+    *by_letter = p->swap_ab >= 0 ? p->swap_ab : g_cfg.swap_ab;
+    if (want) return want;
+    if (slot < 0 || !g_pads[slot]) /* none used yet, or it went: the first one connected */
+        for (slot = -1, i = 0; i < SNX_GAMEPADS && slot < 0; i++)
+            if (g_pads[i]) slot = i;
+    if (slot < 0) return 1;
+    switch (gamepad_slot_type(slot)) {
+        case SDL_GAMEPAD_TYPE_PS3:
+        case SDL_GAMEPAD_TYPE_PS4:
+        case SDL_GAMEPAD_TYPE_PS5: return 2;
+        case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO:
+        case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+        case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+        case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR: return 1;
+        default: /* Xbox and the standard layout most other pads take */ return 3;
+    }
 }

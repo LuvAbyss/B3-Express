@@ -11,6 +11,9 @@
 #include "nx/gpu/texture/etc2.h"
 #include "nx/runtime/platform/log.h"
 #include "nx/gpu/vk/vk.h"
+#include "nx/gpu/vk/prompts.h"
+#include "nx/gpu/vk/nvn_res.h"
+#include "nx/runtime/platform/plat.h"
 
 /* the block height and depth (log2 GOBs) of a mip level of a block-linear texture. The hardware shrinks them for
    small levels: the height from the base level on, the depth only from level 1 on and by one step a level
@@ -151,6 +154,9 @@ static void level_rows(const Surf* t, const u8* src, u64 lsz, u32 rowb, u32 th, 
 }
 
 static u32 g_tex_upload_gen;
+static struct { /* first ASTC uploads since the last report (vk_tex_frame) */
+    u64 n, ns, px, worst_ns, early, early_px, unknown;
+} g_ahead;
 static u32 g_tex_inval_gen;
 void vk_tex_invalidate_all(void) { g_tex_inval_gen++; }
 /* 1 when every subresource was copied; 0 when memory or staging ran out, and upload_valid keeps it for a retry */
@@ -178,8 +184,9 @@ static int tex_upload(Surf* t) {
     t->wgen = ++g_tex_upload_gen; /* even a new texture at a reused address invalidates an old target's copy */
     vk_render_end();              /* copies and clears happen outside rendering passes */
     VkCommandBuffer cb = vk_cmd();
-    vk_surf_use(cb, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-                VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    if (f->conv != VKC_ASTC) /* ASTC's: in vk_astc_flush, after the decodes, so no barrier comes between them */
+        vk_surf_use(cb, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                    VK_ACCESS_2_TRANSFER_WRITE_BIT);
     int packed_depth = f->depth && f->stencil;
     int is3d = t->type == VK_IMAGE_VIEW_TYPE_3D;
     u32 layers = t->layers, d3 = is3d ? t->depth3d : 1;
@@ -669,6 +676,7 @@ texture_from_memory:
     u64 sz = 0;
     for (u32 l = 0; l < levels; l++) sz += bl ? bl_level_size(w, h, d3, &f, bh, bd, tws, l, NULL, NULL) : stride;
     t->size = stride * (layers - 1) + sz;
+    vk_prompts_texture(gva, &f, w, h, bh); /* the button atlas is painted before it is hashed and loaded */
     t->wseen = vk_ww_now();
     vk_written_since(gmem_ptr(gva, t->size), t->size, 0); /* starts tracking it */
     t->wseen = vk_ww_now();
@@ -676,7 +684,24 @@ texture_from_memory:
     t->hash = mem_hash(gva, t->size);
     t->checked = g_vk_present;
     t->next_check = g_vk_present + 4;
-    return tex_upload(t) ? t : NULL;
+    if (f.conv != VKC_ASTC) return tex_upload(t) ? t : NULL;
+    { /* the ahead-of-draw measure: how long a first ASTC upload takes, and how long before it the game registered it */
+        u64 t0 = plat_ns();
+        int ok = tex_upload(t);
+        long long known = vk_nvn_tex_known(gva);
+        u64 px = (u64)w * h * layers * d3;
+        g_ahead.n++;
+        g_ahead.ns += plat_ns() - t0;
+        g_ahead.px += px;
+        if (known < 0)
+            g_ahead.unknown++;
+        else if ((long long)g_vk_present - known >= 30) {
+            g_ahead.early++;
+            g_ahead.early_px += px;
+        }
+        if (plat_ns() - t0 > g_ahead.worst_ns) g_ahead.worst_ns = plat_ns() - t0;
+        return ok ? t : NULL;
+    }
 }
 
 VkImageView vk_tex_view(Surf* s, VkImageViewType type, int srgb, const VkComponentMapping* map, int stencil) {
@@ -781,8 +806,8 @@ VkImageView vk_null_view(VkImageViewType type, int num) {
                     VK_ACCESS_2_TRANSFER_WRITE_BIT);
         VkImageSubresourceRange all = {vk_aspect(&s->f), 0, 1, 0, s->layers};
         if (num == 3) {
-            VkClearDepthStencilValue far = {1.0f, 0};
-            vkCmdClearDepthStencilImage(cb, s->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &far, 1, &all);
+            VkClearDepthStencilValue far_depth = {1.0f, 0};
+            vkCmdClearDepthStencilImage(cb, s->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &far_depth, 1, &all);
         } else {
             VkClearColorValue z = {{0, 0, 0, 0}};
             vkCmdClearColorImage(cb, s->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &z, 1, &all);
@@ -922,6 +947,15 @@ VkSampler vk_sampler(const u32* tsc, int raise, int integer) {
 }
 
 void vk_tex_frame(void) {
+    vk_prompts_frame();
+    if (g_vk_present % 600 == 0 && g_ahead.n) { /* every 10 s at 60 */
+        LOG("astc-ahead: %llu first uploads, %.1f Mpx, %.1f ms on the render thread (worst %.1f); %llu (%.1f Mpx) "
+            "registered 30+ frames before, %llu never registered\n",
+            (unsigned long long)g_ahead.n, (double)g_ahead.px / 1e6, (double)g_ahead.ns / 1e6,
+            (double)g_ahead.worst_ns / 1e6, (unsigned long long)g_ahead.early, (double)g_ahead.early_px / 1e6,
+            (unsigned long long)g_ahead.unknown);
+        memset(&g_ahead, 0, sizeof g_ahead);
+    }
     /* textures and render targets not used for ten seconds go; textures come back from memory if they are needed
        again */
     if (g_vk_present % 60 == 0 && g_vk_present > 600) vk_surf_evict(g_vk_present - 600);

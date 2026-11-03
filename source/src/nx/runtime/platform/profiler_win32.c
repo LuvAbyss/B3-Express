@@ -86,7 +86,18 @@ static const ProfFn* fn_at(u64 pc) {
     return lo && pc - g_fns[lo - 1].host < (1u << 20) ? &g_fns[lo - 1] : NULL;
 }
 
-static void record(u64 pc) {
+/* the last samples, for plat_prof_spike: when, which thread slot, and the key record gave. The sampler's own */
+#define PROF_RING 131072 /* a power of two: about 2 s of 64 threads */
+static struct {
+    u64 ns, key;
+    u32 thread;
+} g_ring[PROF_RING];
+static u32 g_ring_at;
+/* a spike to report (plat_prof_spike): set by the frame loop, read and cleared by the sampler */
+static u64 g_spike_from, g_spike_to, g_spike_frame;
+static int g_spike_req;
+
+static u64 record(u64 pc) {
     const ProfFn* f = fn_at(pc);
     u64 key = f ? f->host : pc & ~(u64)15;
     u32 i, probe;
@@ -97,10 +108,77 @@ static void record(u64 pc) {
         if (g_buckets[i].key == key || !g_buckets[i].key) {
             g_buckets[i].key = key;
             g_buckets[i].count++;
-            return;
+            return key;
         }
     }
     g_unplaced++;
+    return key;
+}
+/* key as write_profile names it: a game function's guest address, the runtime's offset, or a host address */
+static void key_text(u64 key, char* out, size_t n) {
+    u64 image = (u64)(size_t)&__ImageBase;
+    const ProfFn* fn = fn_at(key);
+    if (fn && fn->host == key)
+        snprintf(out, n, "game function %llx", (unsigned long long)fn->guest);
+    else if (key >= image && key - image < 0x10000000u)
+        snprintf(out, n, "runtime +%llx", (unsigned long long)(key - image));
+    else { /* a system or driver library's: its name and the offset in it */
+        HMODULE m = NULL;
+        char path[MAX_PATH];
+        const char* base;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)(size_t)key, &m) &&
+            GetModuleFileNameA(m, path, sizeof path)) {
+            base = strrchr(path, '\\');
+            snprintf(out, n, "%s +%llx", base ? base + 1 : path, (unsigned long long)(key - (u64)(size_t)m));
+        } else
+            snprintf(out, n, "host %llx", (unsigned long long)key);
+    }
+}
+void plat_prof_spike(u64 from_ns, u64 to_ns, u64 frame) {
+    if (__atomic_load_n(&g_spike_req, __ATOMIC_ACQUIRE)) return; /* one at a time */
+    g_spike_from = from_ns;
+    g_spike_to = to_ns;
+    g_spike_frame = frame;
+    __atomic_store_n(&g_spike_req, 1, __ATOMIC_RELEASE);
+}
+/* the sampler, between rounds (no thread suspended): each thread's samples in the spike, and its top functions */
+static void spike_report(void) {
+    enum { CELLS = 1024, TOP = 6 };
+    static struct {
+        u64 key;
+        u32 thread, count;
+    } cell[CELLS];
+    static u32 per_thread[PROF_THREADS];
+    u32 i, n = 0, k;
+    char text[64];
+    memset(per_thread, 0, sizeof per_thread);
+    for (i = 0; i < PROF_RING; i++) {
+        u32 t = g_ring[i].thread;
+        if (g_ring[i].ns < g_spike_from || g_ring[i].ns > g_spike_to || t >= PROF_THREADS) continue;
+        per_thread[t]++;
+        for (k = 0; k < n && (cell[k].key != g_ring[i].key || cell[k].thread != t); k++) {}
+        if (k == n && n < CELLS) cell[n++] = (typeof(cell[0])){g_ring[i].key, t, 0};
+        if (k < n) cell[k].count++;
+    }
+    LOG("profile: frame %llu, %.1f ms before its first window, by thread (1 ms samples):\n",
+        (unsigned long long)g_spike_frame, (double)(g_spike_to - g_spike_from) / 1e6);
+    for (i = 0; i < PROF_THREADS; i++) {
+        HANDLE h = __atomic_load_n(&g_threads[i], __ATOMIC_ACQUIRE);
+        u32 shown;
+        if (per_thread[i] < 10) continue;
+        LOG("profile:   thread %lu, %u samples:\n", h ? (unsigned long)GetThreadId(h) : 0ul, per_thread[i]);
+        for (shown = 0; shown < TOP; shown++) { /* the largest left for this thread, taken out as it is shown */
+            u32 best = CELLS;
+            for (k = 0; k < n; k++)
+                if (cell[k].thread == i && cell[k].count && (best == CELLS || cell[k].count > cell[best].count))
+                    best = k;
+            if (best == CELLS) break;
+            key_text(cell[best].key, text, sizeof text);
+            LOG("profile:     %4u  %s\n", cell[best].count, text);
+            cell[best].count = 0;
+        }
+    }
 }
 
 static int bucket_cmp(const void* a, const void* b) {
@@ -158,12 +236,20 @@ static DWORD WINAPI sampler(LPVOID unused) {
             c.ContextFlags = CONTEXT_CONTROL;
             if (GetThreadContext(h, &c)) {
 #if defined(_M_ARM64) || defined(__aarch64__)
-                record((u64)c.Pc);
+                u64 key = record((u64)c.Pc);
 #else
-                record((u64)c.Rip);
+                u64 key = record((u64)c.Rip);
 #endif
+                u32 at = g_ring_at++ & (PROF_RING - 1);
+                g_ring[at].ns = plat_ns();
+                g_ring[at].key = key;
+                g_ring[at].thread = (u32)i;
             }
             ResumeThread(h);
+        }
+        if (__atomic_load_n(&g_spike_req, __ATOMIC_ACQUIRE)) {
+            spike_report();
+            __atomic_store_n(&g_spike_req, 0, __ATOMIC_RELEASE);
         }
         if (plat_ns() >= next_write) {
             write_profile(started);

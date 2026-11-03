@@ -360,26 +360,29 @@ static u64 call1(CPU* RESTRICT c, const char* name, u64 a0) {
     return r;
 }
 static void pool_init(CPU* RESTRICT c, const NvnFn* f) { /* nvnMemoryPoolInitialize(pool, builder) -> bool */
-    u64 pool = c->x[0], builder = c->x[1], gpu, size, pool_cpu;
+    u64 pool = c->x[0], builder = c->x[1], gpu, size, pool_cpu, t0 = plat_ns(), t_guest;
     int i, slot = -1;
     nvn_guest(c, f);
+    t_guest = plat_ns() - t0;
     if (!(c->x[0] & 0xFF)) return;
     gpu = call1(c, "nvnMemoryPoolGetBufferAddress", pool);
     size = call1(c, "nvnMemoryPoolGetSize", pool);
     pool_cpu = call1(c, "nvnMemoryPoolMap", pool);
     if (!pool_cpu) pool_cpu = call1(c, "nvnMemoryPoolBuilderGetMemory", builder); /* a pool the CPU can't map */
-    if (import_on()) { /* step 3b: the pool's storage as a Vulkan buffer, checked on the GPU at two places */
+    if (import_on()) { /* step 3b: the pool's storage as a Vulkan buffer, imported off this thread */
         u64 cpu = call1(c, "nvnMemoryPoolMap", pool), flags = call1(c, "nvnMemoryPoolGetFlags", pool);
-        int n = cpu ? vk_nvn_pool_import(cpu, size) : -1;
-        int a = n >= 0 ? vk_nvn_pool_check(n, 0, 256) : -1;
-        int b = n >= 0 ? vk_nvn_pool_check(n, (size / 2) & ~(u64)255, 256) : -1;
+        const char* e = getenv("SNX_NVN_POOL_CHECK"); /* 1 (a test): the GPU copy checked at two places, waiting */
+        int n = cpu ? vk_nvn_pool_import(cpu, size) : -1, check = n >= 0 && e && e[0] == '1';
+        int a = check ? vk_nvn_pool_check(n, 0, 256) : -1;
+        int b = check ? vk_nvn_pool_check(n, (size / 2) & ~(u64)255, 256) : -1;
         if (n >= 0) vk_nvn_pool_gpu(n, gpu);
         if (n >= 0) vk_nvn_pool_mirror(n, flags);
-        LOG("nvn-cmdlist: pool %llx: GPU %llx, %llu KiB, flags %llx, CPU %llx: imported %s, GPU copy equal to guest "
-            "memory at the start %s, in the middle %s\n",
+        LOG("nvn-cmdlist: pool %llx: GPU %llx, %llu KiB, flags %llx, CPU %llx: import %s, GPU copy equal to guest "
+            "memory at the start %s, in the middle %s; %.1f ms here, %.1f of them the game's driver\n",
             (unsigned long long)pool, (unsigned long long)gpu, (unsigned long long)(size >> 10),
-            (unsigned long long)flags, (unsigned long long)cpu, n >= 0 ? "yes" : "no",
-            a < 0 ? "-" : a ? "yes" : "NO", b < 0 ? "-" : b ? "yes" : "NO");
+            (unsigned long long)flags, (unsigned long long)cpu, n >= 0 ? "queued" : "no",
+            a < 0 ? "-" : a ? "yes" : "NO", b < 0 ? "-" : b ? "yes" : "NO", (double)(plat_ns() - t0) / 1e6,
+            (double)t_guest / 1e6);
     }
     pm_lock(&g_lk);
     for (i = 0; i < POOLS && slot < 0; i++)
@@ -529,6 +532,10 @@ static void reg_texture(CPU* RESTRICT c, const NvnFn* f) { /* (pool, id, texture
     pm_lock(&g_lk);
     if (id < IDS) g_tex_id[id] = tex;
     tic_check(pool, id, tex);
+    {
+        TexRec* t = tex_slot(tex, 0);
+        if (t && t->live) vk_nvn_tex_registered(t->gpu);
+    }
     pm_unlock(&g_lk);
 }
 static void reg_image(CPU* RESTRICT c, const NvnFn* f) { /* (pool, id, texture, view) */
@@ -1752,10 +1759,15 @@ static void queue_submit(CPU* RESTRICT c, const NvnFn* f) { /* (queue, count, ha
 }
 
 static void sync_wait(CPU* RESTRICT c, const NvnFn* f) {
-    u64 t0 = plat_ns();
+    u64 t0 = plat_ns(), obj = c->x[0], timeout = c->x[1], ns;
     nvn_guest(c, f);
-    __atomic_add_fetch(&g_sync_ns, plat_ns() - t0, __ATOMIC_RELAXED);
+    ns = plat_ns() - t0;
+    __atomic_add_fetch(&g_sync_ns, ns, __ATOMIC_RELAXED);
     __atomic_add_fetch(&g_sync_n, 1, __ATOMIC_RELAXED);
+    if (ns > 50000000) /* a wait long enough to show as a hitch */
+        LOG_LIMIT(200, "nvn-cmdlist: %s(%llx, timeout %llx) took %.1f ms, result %llu, frame %llu\n", f->name,
+                  (unsigned long long)obj, (unsigned long long)timeout, (double)ns / 1e6,
+                  (unsigned long long)c->x[0], (unsigned long long)g_frames);
 }
 /* a command the host path has no case for, which release-only mode loses with the stream; or a CPU read of a texture
    the host drew, which finds guest memory unwritten */

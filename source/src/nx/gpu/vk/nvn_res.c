@@ -26,29 +26,6 @@ static int rp_fsr_on(void) { return g_opt_fsr > 1.0f && vk_fsr1_ready(); }
 static float rp_scene_scale(void) { return rp_fsr_on() ? g_vk_scale / g_opt_fsr : g_vk_scale; }
 static int rp_scaling(void) { return g_vk_scale != 1.0f || rp_fsr_on(); }
 
-#define IMPORTS 64
-static struct {
-    VkBuffer buf;
-    VkDeviceMemory mem;
-    u64 cpu, size, gpu; /* gpu: the pool's GPU address, 0 until known */
-} g_import[IMPORTS];
-static int g_nimport;
-u64 vk_nvn_import_align(void) { return g_vk.has_host_import ? g_vk.host_import_align : 0; }
-void vk_nvn_pool_gpu(int which, u64 gpu) {
-    vk_lock();
-    if (which >= 0 && which < g_nimport) g_import[which].gpu = gpu;
-    vk_unlock();
-}
-/* the imported buffer holding GPU range [a, a + n): its number and the offset in it, -1 when none does */
-static int import_of(u64 a, u64 n, u64* off) {
-    int i;
-    for (i = 0; i < g_nimport; i++)
-        if (g_import[i].gpu && a >= g_import[i].gpu && a - g_import[i].gpu + n <= g_import[i].size) {
-            *off = a - g_import[i].gpu;
-            return i;
-        }
-    return -1;
-}
 /* c7 (the video memory copies, below): the GPU's blocks of a range land in guest memory before the CPU reads it */
 static void own_land_range(int p, u64 off, u64 size);
 static void own_land_gpu(u64 gpu, u64 size);
@@ -57,20 +34,96 @@ static void own_land_gpu(u64 gpu, u64 size);
    written in the pool, 7 a buffer copy or clear, 8 a constant update */
 static int g_land_why;
 static u64 g_land_by[9];
-int vk_nvn_pool_import(u64 cpu, u64 size) {
-    u64 align = g_vk.host_import_align;
-    void* host;
-    u32 type = ~0u, i;
+#define IMPORTS 64
+/* A pool's storage imported as a Vulkan buffer. Importing pins every page of it in the driver, about 0.2 ms a MiB (300
+   ms for the 1.3 GB pool of an area load, on the game's thread in nvnMemoryPoolInitialize). So the import runs on a
+   thread of its own (import_thread): the slot is reserved at once (IMP_PENDING) and published by the renderer, under
+   vk_lock, once ready (import_publish): gpu stays 0 until then, so every walk of the table skips it. A lookup of an
+   address in a pool still importing waits for that one import (import_of), as nothing of it can be drawn or copied
+   without the buffer. The thread never takes vk_lock */
+enum { IMP_READY, IMP_PENDING, IMP_DONE, IMP_FAILED }; /* DONE: imported, not yet published */
+static struct {
+    VkBuffer buf;
+    VkDeviceMemory mem;
+    u64 cpu, size, gpu; /* gpu: the pool's GPU address, 0 until known and published */
+    u64 want_gpu;       /* the GPU address and the mirror wish given while it imported */
+    int want_mirror, state;
+} g_import[IMPORTS];
+static int g_nimport;
+static PMutex g_imp_lk = PMUTEX_INIT; /* the states and the queue */
+static PCond g_imp_cv;
+static int g_imp_queue[IMPORTS], g_imp_qn, g_imp_thread, g_imp_unpublished;
+static u64 g_imp_waits; /* lookups that waited for an import */
+static void mir_want(int which, int want); /* the video memory copies, below */
+u64 vk_nvn_import_align(void) { return g_vk.has_host_import ? g_vk.host_import_align : 0; }
+/* vk_lock held: imports finished since the last call become visible to the renderer */
+static void import_publish(void) {
+    int i;
+    if (!__atomic_load_n(&g_imp_unpublished, __ATOMIC_ACQUIRE)) return;
+    pm_lock(&g_imp_lk);
+    __atomic_store_n(&g_imp_unpublished, 0, __ATOMIC_RELAXED);
+    for (i = 0; i < g_nimport; i++)
+        if (g_import[i].state == IMP_DONE) {
+            g_import[i].state = IMP_READY;
+            g_import[i].gpu = g_import[i].want_gpu;
+            mir_want(i, g_import[i].want_mirror);
+        }
+    pm_unlock(&g_imp_lk);
+}
+/* waits for import i to end: 1 when it was made, 0 when it failed. The import thread takes no other lock */
+static int import_wait(int i) {
+    int state;
+    pm_lock(&g_imp_lk);
+    while (g_import[i].state == IMP_PENDING) pc_wait(&g_imp_cv, &g_imp_lk, -1);
+    state = g_import[i].state;
+    pm_unlock(&g_imp_lk);
+    return state != IMP_FAILED;
+}
+void vk_nvn_pool_gpu(int which, u64 gpu) {
+    vk_lock();
+    import_publish();
+    if (which >= 0 && which < g_nimport) {
+        pm_lock(&g_imp_lk);
+        g_import[which].want_gpu = gpu;
+        if (g_import[which].state == IMP_READY) g_import[which].gpu = gpu;
+        pm_unlock(&g_imp_lk);
+    }
+    vk_unlock();
+}
+/* the imported buffer holding GPU range [a, a + n): its number and the offset in it, -1 when none does. A pool still
+   importing that holds it is waited for (vk_lock held) */
+static int import_of(u64 a, u64 n, u64* off) {
+    int i;
+    import_publish();
+    for (i = 0; i < g_nimport; i++)
+        if (g_import[i].gpu && a >= g_import[i].gpu && a - g_import[i].gpu + n <= g_import[i].size) {
+            *off = a - g_import[i].gpu;
+            return i;
+        }
+    for (i = 0; i < g_nimport; i++)
+        if (!g_import[i].gpu && g_import[i].want_gpu && a >= g_import[i].want_gpu &&
+            a - g_import[i].want_gpu + n <= g_import[i].size && g_import[i].state != IMP_FAILED) {
+            g_imp_waits++;
+            if (!import_wait(i)) return -1;
+            __atomic_store_n(&g_imp_unpublished, 1, __ATOMIC_RELEASE);
+            import_publish();
+            *off = a - g_import[i].gpu;
+            return i;
+        }
+    return -1;
+}
+/* the expensive part of an import, on import_thread: the buffer over the guest's pages */
+static int import_make(int i) {
+    void* host = GP(g_import[i].cpu);
+    u64 size = g_import[i].size;
+    u32 type = ~0u, k;
     VkMemoryHostPointerPropertiesEXT hp = {.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
     VkMemoryRequirements req;
     VkBuffer buf = VK_NULL_HANDLE;
     VkDeviceMemory mem = VK_NULL_HANDLE;
-    if (!g_vk.has_host_import || !cpu || !size || !g_mem || g_nimport == IMPORTS) return -1;
-    host = GP(cpu);
-    if (((uintptr_t)host & (align - 1)) || (size & (align - 1))) return -1;
     if (vkGetMemoryHostPointerPropertiesEXT(g_vk.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, host,
                                             &hp) != VK_SUCCESS)
-        return -1;
+        return 0;
     VkExternalMemoryBufferCreateInfo eb = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
                                            .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
     VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -81,17 +134,16 @@ int vk_nvn_pool_import(u64 cpu, u64 size) {
                                        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                        VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
                               .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
-    if (vkCreateBuffer(g_vk.dev, &bci, NULL, &buf) != VK_SUCCESS) return -1;
+    if (vkCreateBuffer(g_vk.dev, &bci, NULL, &buf) != VK_SUCCESS) return 0;
     vkGetBufferMemoryRequirements(g_vk.dev, buf, &req);
     VkPhysicalDeviceMemoryProperties mp;
     vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
     VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    for (i = 0; i < mp.memoryTypeCount && type == ~0u; i++) /* host visible and coherent first */
-        if ((hp.memoryTypeBits & req.memoryTypeBits & (1u << i)) &&
-            (mp.memoryTypes[i].propertyFlags & want) == want)
-            type = i;
-    for (i = 0; i < mp.memoryTypeCount && type == ~0u; i++)
-        if (hp.memoryTypeBits & req.memoryTypeBits & (1u << i)) type = i;
+    for (k = 0; k < mp.memoryTypeCount && type == ~0u; k++) /* host visible and coherent first */
+        if ((hp.memoryTypeBits & req.memoryTypeBits & (1u << k)) && (mp.memoryTypes[k].propertyFlags & want) == want)
+            type = k;
+    for (k = 0; k < mp.memoryTypeCount && type == ~0u; k++)
+        if (hp.memoryTypeBits & req.memoryTypeBits & (1u << k)) type = k;
     VkImportMemoryHostPointerInfoEXT imp = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
                                             .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
                                             .pHostPointer = host};
@@ -103,17 +155,62 @@ int vk_nvn_pool_import(u64 cpu, u64 size) {
         vkBindBufferMemory(g_vk.dev, buf, mem, 0) != VK_SUCCESS) {
         if (mem) vkFreeMemory(g_vk.dev, mem, NULL);
         vkDestroyBuffer(g_vk.dev, buf, NULL);
+        return 0;
+    }
+    g_import[i].buf = buf; /* read by the renderer only once published */
+    g_import[i].mem = mem;
+    return 1;
+}
+static void import_thread(void* arg) {
+    (void)arg;
+    pm_lock(&g_imp_lk);
+    for (;;) {
+        int i, ok;
+        u64 t0;
+        while (!g_imp_qn) pc_wait(&g_imp_cv, &g_imp_lk, -1);
+        i = g_imp_queue[0];
+        memmove(g_imp_queue, g_imp_queue + 1, (size_t)--g_imp_qn * sizeof *g_imp_queue);
+        pm_unlock(&g_imp_lk);
+        t0 = plat_ns();
+        ok = import_make(i);
+        LOG("nvn-live: pool import %d (%llu MiB) %s in %.1f ms, off the game's thread\n", i,
+            (unsigned long long)(g_import[i].size >> 20), ok ? "made" : "FAILED", (double)(plat_ns() - t0) / 1e6);
+        pm_lock(&g_imp_lk);
+        g_import[i].state = ok ? IMP_DONE : IMP_FAILED;
+        __atomic_store_n(&g_imp_unpublished, 1, __ATOMIC_RELEASE);
+        pc_broadcast(&g_imp_cv);
+    }
+}
+/* nvnMemoryPoolInitialize (the game's thread): reserves the import and queues it. Its number, or -1 */
+int vk_nvn_pool_import(u64 cpu, u64 size) {
+    u64 align = g_vk.host_import_align;
+    void* host;
+    int i;
+    if (!g_vk.has_host_import || !cpu || !size || !g_mem) return -1;
+    host = GP(cpu);
+    if (((uintptr_t)host & (align - 1)) || (size & (align - 1))) return -1;
+    vk_lock(); /* the table's length is the renderer's */
+    pm_lock(&g_imp_lk);
+    if (g_nimport == IMPORTS) {
+        pm_unlock(&g_imp_lk);
+        vk_unlock();
         return -1;
     }
-    vk_lock(); /* the table is shared with the check */
-    g_import[g_nimport].buf = buf;
-    g_import[g_nimport].mem = mem;
-    g_import[g_nimport].cpu = cpu;
-    g_import[g_nimport].size = size;
-    g_import[g_nimport].gpu = 0;
-    i = (u32)g_nimport++;
+    i = g_nimport++;
+    memset(&g_import[i], 0, sizeof g_import[i]);
+    g_import[i].cpu = cpu;
+    g_import[i].size = size;
+    g_import[i].state = IMP_PENDING;
+    g_imp_queue[g_imp_qn++] = i;
+    if (!g_imp_thread) {
+        pc_init(&g_imp_cv);
+        g_imp_thread = 1;
+        if (plat_thread(import_thread, NULL, 0)) fatal("could not start the pool import thread");
+    }
+    pc_broadcast(&g_imp_cv);
+    pm_unlock(&g_imp_lk);
     vk_unlock();
-    return (int)i;
+    return i;
 }
 
 /* ------------------------------------------------------------ shader stages (phase 3 step 3c part 2) */
@@ -919,8 +1016,9 @@ int vk_nvn_pool_check(int which, u64 off, u32 n) {
                                    .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
                                    .queueFamilyIndex = g_vk.gfx_family};
     VkFenceCreateInfo fci = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    if (which < 0 || which >= IMPORTS || !import_wait(which)) return -1;
     vk_lock();
-    if (which < 0 || which >= g_nimport || off + n > g_import[which].size) {
+    if (which >= g_nimport || off + n > g_import[which].size) {
         vk_unlock();
         return -1;
     }
@@ -2273,10 +2371,19 @@ static void own_pq(u32 p, u32 b) {
     } else
         own_lq(p, b);
 }
+static void mir_want(int which, int want) { g_mir[which].want = want; }
 void vk_nvn_pool_mirror(int which, u64 flags) {
     const char* e = getenv("SNX_NVN_VRAM");
     /* GPU_CACHED, not shader code (0x40) or compressible render targets (0x80) */
-    if (which >= 0 && which < IMPORTS) g_mir[which].want = (flags & 0x20) && !(flags & 0xC0) && !(e && e[0] == '0');
+    int want = (flags & 0x20) && !(flags & 0xC0) && !(e && e[0] == '0');
+    if (which < 0 || which >= IMPORTS) return;
+    vk_lock();
+    import_publish();
+    pm_lock(&g_imp_lk);
+    g_import[which].want_mirror = want;
+    if (g_import[which].state == IMP_READY) mir_want(which, want);
+    pm_unlock(&g_imp_lk);
+    vk_unlock();
 }
 static void mir_queue(int pool, u64 b) {
     if (g_nmq == MIR_QUEUE) return;
@@ -3369,9 +3476,9 @@ static void rp_tex_ready(int mod, const NvnStageBind* b) {
                     inside >= 0 ? g_rp.t[inside].h : 0);
         }
         if (target >= 0 || g_tc[slot].null_view || !t) continue;
-        if (t->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || (t->access & VK_RP_WRITES) ||
+        if (t->astc_pending || t->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || (t->access & VK_RP_WRITES) ||
             (VK_SAMPLED_STAGES & ~t->stage))
-            rp_end_rendering();
+            rp_end_rendering(); /* a layout change, or the ASTC batch's encodes and copies, come outside the pass */
         vk_surf_use(vk_cmd(), t, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_SAMPLED_STAGES,
                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     }
@@ -4179,6 +4286,8 @@ void vk_nvn_live_present(u64 gpu, u64 cpu, const char* out, int all) {
                       g_rp.fr_draws, (double)(g_vk_astc_px - g_fr_astc) / 1e6,
                       g_rp.fr_first ? (double)(g_rp.fr_first - g_rp.last_present) / 1e6 : 0.0,
                       g_rp.fr_last ? (double)(now - g_rp.fr_last) / 1e6 : 0.0, g_rp.fr_gpu_busy);
+        if (g_rp.last_present && g_rp.fr_first && g_rp.fr_first - g_rp.last_present > 150000000)
+            plat_prof_spike(g_rp.last_present, g_rp.fr_first, g_rp.frame); /* what ran before the frame's first list */
         /* what a frame's picture lacked: a dark frame in play is found by its time here */
         if (g_rp.fr_deferred || g_fr_null)
             LOG_LIMIT(20000, "nvn-live: frame %llu lacks: %u draws for a pipeline (largest target %llu px), %llu textures "
@@ -4478,4 +4587,40 @@ void vk_nvn_replay_end(u64 present_gpu, u64 present_cpu, const char* out) {
     vkDestroyFence(g_vk.dev, g_rp.fence, NULL);
     vkDestroyCommandPool(g_vk.dev, g_rp.pool, NULL);
     g_rp.on = 0;
+}
+
+/* ---- when each texture address was first registered (vk_nvn_tex_registered), for the ahead-of-draw measure */
+#define KNOWN 65536
+static struct {
+    u64 gpu;
+    u32 present;
+} g_known[KNOWN];
+static PMutex g_known_lk = PMUTEX_INIT;
+static u64 g_known_count;
+void vk_nvn_tex_registered(u64 gpu) {
+    u32 i = (u32)(gpu >> 8) & (KNOWN - 1), n;
+    if (!gpu) return;
+    pm_lock(&g_known_lk);
+    for (n = 0; n < 64; n++, i = (i + 1) & (KNOWN - 1)) {
+        if (g_known[i].gpu == gpu) break; /* known already: the first registration counts */
+        if (!g_known[i].gpu) {
+            g_known[i].gpu = gpu;
+            g_known[i].present = g_vk_present;
+            g_known_count++;
+            break;
+        }
+    }
+    pm_unlock(&g_known_lk);
+}
+long long vk_nvn_tex_known(u64 gpu) {
+    u32 i = (u32)(gpu >> 8) & (KNOWN - 1), n;
+    long long at = -1;
+    pm_lock(&g_known_lk);
+    for (n = 0; n < 64 && g_known[i].gpu; n++, i = (i + 1) & (KNOWN - 1))
+        if (g_known[i].gpu == gpu) {
+            at = g_known[i].present;
+            break;
+        }
+    pm_unlock(&g_known_lk);
+    return at;
 }

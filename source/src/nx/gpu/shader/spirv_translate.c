@@ -3482,7 +3482,14 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
         for (u32 k = 0; k < 32; k++) call_stack[k] = spv_emit_function_variable_init(&c->emit, reg_ptr, c->zero);
     }
     u32 pc = 0, loop_header = 0, loop_dispatch = 0, dispatch_default = 0, dispatch_merge = 0, loop_continue = 0,
-        loop_merge = 0;
+        loop_merge = 0, block_merge = 0;
+    /* in order: a program whose every jump goes forward runs its blocks once, top to bottom, each one under
+       if (pc == its start), instead of one block per pass of the dispatch loop. A jump only sets pc, so the blocks
+       it passes over are skipped and its target runs next. Every lane whose pc is a block's start runs that block
+       in the same pass, so lanes reconverge there as the converging loop makes them (VOTE, SHFL and derivatives see
+       the same lanes), without its subgroup minimum on every pass. BAR stays in the loop: a workgroup barrier must
+       not sit in a branch only some invocations take */
+    int linear = 0;
     u32 *case_labels = NULL, *case_literals = NULL;
     u8* block_start = NULL;
     size_t case_count = 0;
@@ -3538,6 +3545,24 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                 case_literals[case_count] = i;
                 case_labels[case_count++] = spv_emit_id(&c->emit);
             }
+        linear =
+            g_shader_linear && !has_barrier && !has_calls && !has_pexit && !dynamic_stack && !unknown_brx;
+        for (u32 i = 11; linear && i < n; i++) {
+            if (!IDX_OK(i)) continue;
+            int id = decode(insn[i])->id;
+            if (id == O_PCNT || id == O_CONT || id == O_CAL || id == O_RET || id == O_PRET)
+                linear = 0;
+            else if (id == O_BRA)
+                linear = bra_target(insn[i], i) > i;
+            else if (id == O_SYNC || id == O_BRK)
+                linear = pop_targets[i] > i;
+            else if (id == O_BRX) {
+                u32 targets[64];
+                int count = shader_brx_targets(insn, i, n, targets, 64);
+                for (int k = 0; k < count; k++)
+                    if (targets[k] <= i) linear = 0;
+            }
+        }
         if (converge) {
             wait_label = spv_emit_id(&c->emit);
             case_literals[case_count] = UINT32_MAX - 1;
@@ -3552,27 +3577,29 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
             for (u32 i = 0; i < 32; i++)
                 if (output_attrs[i]) spv_emit_store(&c->emit, output_attrs[i], empty);
         }
-        spv_emit_branch(&c->emit, loop_header);
-        spv_emit_label(&c->emit, loop_header);
-        spv_emit_loop_merge(&c->emit, loop_merge, loop_continue);
-        spv_emit_branch(&c->emit, loop_dispatch);
-        spv_emit_label(&c->emit, loop_dispatch);
-        u32 selector = spv_emit_load(&c->emit, c->u32_type, pc);
-        if (converge) {
-            u32 lowest = spv_emit_subgroup_umin_u32(&c->emit, c->u32_type, selector);
-            /* Helper lanes may be inactive for subgroup arithmetic. Their minimum may be undefined; they must
-               continue at their own pc so they can still provide derivative values to their quad. */
-            if (stage == ST_FS)
-                lowest = spv_emit_select(&c->emit, c->u32_type, spv_emit_is_helper(&c->emit, c->bool_type), selector,
-                                         lowest);
-            lowest = spv_emit_select(&c->emit, c->u32_type, spv_emit_u_less(&c->emit, c->bool_type, selector, lowest),
-                                     selector, lowest);
-            selector =
-                spv_emit_select(&c->emit, c->u32_type, spv_emit_i_equal(&c->emit, c->bool_type, selector, lowest),
-                                selector, spv_emit_constant_u32(&c->emit, c->u32_type, UINT32_MAX - 1));
+        if (!linear) {
+            spv_emit_branch(&c->emit, loop_header);
+            spv_emit_label(&c->emit, loop_header);
+            spv_emit_loop_merge(&c->emit, loop_merge, loop_continue);
+            spv_emit_branch(&c->emit, loop_dispatch);
+            spv_emit_label(&c->emit, loop_dispatch);
+            u32 selector = spv_emit_load(&c->emit, c->u32_type, pc);
+            if (converge) {
+                u32 lowest = spv_emit_subgroup_umin_u32(&c->emit, c->u32_type, selector);
+                /* Helper lanes may be inactive for subgroup arithmetic. Their minimum may be undefined; they must
+                   continue at their own pc so they can still provide derivative values to their quad. */
+                if (stage == ST_FS)
+                    lowest = spv_emit_select(&c->emit, c->u32_type, spv_emit_is_helper(&c->emit, c->bool_type),
+                                             selector, lowest);
+                lowest = spv_emit_select(&c->emit, c->u32_type,
+                                         spv_emit_u_less(&c->emit, c->bool_type, selector, lowest), selector, lowest);
+                selector =
+                    spv_emit_select(&c->emit, c->u32_type, spv_emit_i_equal(&c->emit, c->bool_type, selector, lowest),
+                                    selector, spv_emit_constant_u32(&c->emit, c->u32_type, UINT32_MAX - 1));
+            }
+            spv_emit_selection_merge(&c->emit, dispatch_merge);
+            spv_emit_switch_u32(&c->emit, selector, dispatch_default, case_literals, case_labels, case_count);
         }
-        spv_emit_selection_merge(&c->emit, dispatch_merge);
-        spv_emit_switch_u32(&c->emit, selector, dispatch_default, case_literals, case_labels, case_count);
     }
     if ((stage == ST_VS || stage == ST_TES || stage == ST_GS) && !has_flow) {
         u32 one_f = spv_emit_constant_f32(&c->emit, c->f32_type, 1.0f);
@@ -3591,7 +3618,16 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
             c->sampler[c->swapped - 1] = c->texture_array;
             c->swapped = 0;
         }
-        if (has_flow && block_start[i]) { spv_emit_label(&c->emit, case_labels[case_index++]); }
+        if (has_flow && block_start[i] && linear) { /* if (pc == i) */
+            u32 body = case_labels[case_index++];
+            block_merge = spv_emit_id(&c->emit);
+            u32 here = spv_emit_i_equal(&c->emit, c->bool_type, spv_emit_load(&c->emit, c->u32_type, pc),
+                                        spv_emit_constant_u32(&c->emit, c->u32_type, i));
+            spv_emit_selection_merge(&c->emit, block_merge);
+            spv_emit_branch_conditional(&c->emit, here, body, block_merge);
+            spv_emit_label(&c->emit, body);
+        } else if (has_flow && block_start[i])
+            spv_emit_label(&c->emit, case_labels[case_index++]);
         if (has_flow && (next_instruction(i, n) >= n || block_start[next_instruction(i, n)])) {
             u32 following = spv_emit_constant_u32(&c->emit, c->u32_type, next_instruction(i, n));
             spv_emit_store(&c->emit, pc, following);
@@ -6514,10 +6550,13 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
         } else if (op == O_EXIT && !has_flow)
             break;
         u32 next = next_instruction(i, n);
-        if (has_flow && (next >= n || block_start[next]) && (guard_merge || op != O_EXIT || has_pexit))
-            spv_emit_branch(&c->emit, dispatch_merge);
+        if (has_flow && (next >= n || block_start[next])) {
+            if (guard_merge || op != O_EXIT || has_pexit)
+                spv_emit_branch(&c->emit, linear ? block_merge : dispatch_merge);
+            if (linear) spv_emit_label(&c->emit, block_merge); /* the next block's test, or the end */
+        }
     }
-    if (has_flow) {
+    if (has_flow && !linear) {
         /* A branch outside the decoded instruction range must terminate. A switch
            default that simply loops would leave a GPU invocation spinning forever. */
         if (converge) { /* lanes ahead of the subgroup's lowest pc wait for this iteration */
@@ -6535,6 +6574,8 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
         spv_emit_label(&c->emit, loop_continue);
         spv_emit_branch(&c->emit, loop_header);
         spv_emit_label(&c->emit, loop_merge);
+    }
+    if (has_flow) {
         if (passthrough)
             geometry_passthrough(c, si, in_vertices, vec4, position, position_in, output_attrs, inputs, point_size,
                                  layer_output, i32_type, clip_output, clip_count, primitive_id, primitive_id_out,

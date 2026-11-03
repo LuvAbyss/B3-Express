@@ -19,6 +19,9 @@ void gamepad_detect(u32 id);
 void gamepad_state(u64* buttons, i32 sticks[4]);
 void gamepad_state_slot(int slot, u64* buttons, i32 sticks[4]);
 int gamepad_slot_type(int slot); /* SDL_GamepadType, or SDL_GAMEPAD_TYPE_UNKNOWN */
+/* the button prompts the game shows (gpu/vk/prompts.c): 1 Switch, 2 PlayStation, 3 Xbox, from button_prompts and, for
+   auto, the pad last used; *by_letter: A and B by printed letter (gamepad_swap_ab) rather than by position */
+int gamepad_prompts(int* by_letter);
 int gamepad_slot_connected(int slot);
 u32 gamepad_slot_id(int slot); /* SDL joystick instance ID, 0 for an empty slot */
 void gamepad_motion(int slot, PadMotion out[2]);

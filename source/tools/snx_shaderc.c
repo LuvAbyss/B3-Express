@@ -86,6 +86,8 @@ int main(int argc, char** argv) {
     /* Match a renderer with non-uniform sampled image array indexing. Otherwise indexed
        LDC handles look like plain bindless textures and corpus validation misses them. */
     g_shader_texture_arrays = 1;
+    const char* linear = getenv("SNX_SHADER_LINEAR"); /* 0: every program with jumps in the dispatch loop */
+    if (linear && !strcmp(linear, "0")) g_shader_linear = 0;
     DIR* directory = opendir(dir);
     if (!directory) {
         fprintf(stderr, "cannot open %s\n", dir);

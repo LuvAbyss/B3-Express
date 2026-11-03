@@ -191,6 +191,7 @@ static void run(u32 bw, u32 bh, int srgb, u32 w, u32 h, u32 depth, u32 layers, u
                                                .imageExtent = {lw, lh, ld}};
             offset += (size_t)lw * lh * ld * 4;
         }
+    vk_astc_flush(cb); /* the batch's encodes and copies */
     if (grow) {
         VkBuffer ignored;
         u64 off;

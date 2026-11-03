@@ -39,6 +39,10 @@ VkImageAspectFlags vk_aspect(const VkFmt* f) {
 
 void vk_surf_use(VkCommandBuffer cb, Surf* s, VkImageLayout layout, VkPipelineStageFlags2 stage,
                  VkAccessFlags2 access) {
+    if (s->astc_pending) { /* its decoded levels aren't copied in yet: the batch first, outside a rendering pass */
+        vk_render_end();
+        vk_astc_flush(cb);
+    }
     int writes = (access & (VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
                             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_SHADER_WRITE_BIT |
                             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)) != 0;
@@ -630,6 +634,10 @@ int vk_rt_drawn_in(u64 lo, u64 hi, Surf** out, int max) {
 
 /* a surface's image and views go when the frame being recorded is done (descriptors in it may name them) */
 static void surf_free(Surf* s) {
+    if (s->astc_pending) { /* the batch's copies into it before it goes */
+        vk_render_end();
+        vk_astc_flush(vk_cmd());
+    }
     if (s->is_rt) {
         for (Surf** pp = &g_rt_first; *pp; pp = &(*pp)->rt_next)
             if (*pp == s) {

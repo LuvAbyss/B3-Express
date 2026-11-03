@@ -239,6 +239,10 @@ def build_code(report, started=lambda process: None):
     return None
 
 
+# the game's button_prompts values, as the Controller page names them
+PROMPTS = (('Auto', '0'), ('Switch', '1'), ('PlayStation', '2'), ('Xbox', '3'))
+
+
 def check_game(data=DATA):
     """(problems, files checked). game-files.txt comes with the launcher; without it only the two folders can be checked"""
     listing = ROOT / 'game-files.txt'
@@ -470,11 +474,16 @@ class Launcher(LauncherTheme):
         self.check(page, 'gamepad_swap_ab', 'Swap A and B', default='0')
         self.deadzone = tk.StringVar(value=ini_get(self.text, 'gamepad_deadzone', '20'))
         self.rumble = tk.StringVar(value=ini_get(self.text, 'gamepad_rumble', '100'))
+        names = [n for n, _ in PROMPTS]
+        shown = dict((v, n) for n, v in PROMPTS).get(ini_get(self.text, 'button_prompts', '0'), names[0])
+        self.prompts = tk.StringVar(value=shown)
+        self.row(page, 'Button prompts', ttk.Combobox(page, textvariable=self.prompts, state='readonly', width=20,
+                                                      values=names), 'Auto shows the buttons of the controller you use.')
         self.row(page, 'Stick dead zone (%)', ttk.Combobox(page, textvariable=self.deadzone, state='readonly', width=20,
                                                            values=('10', '15', '20', '25', '30')))
         self.row(page, 'Vibration (%)', ttk.Combobox(page, textvariable=self.rumble, state='readonly', width=20,
                                                      values=('0', '25', '50', '75', '100')))
-        for var in (self.deadzone, self.rumble):
+        for var in (self.deadzone, self.rumble, self.prompts):
             var.trace_add('write', self.changed)
 
     def check(self, parent, key, label, default='1'):
@@ -566,6 +575,7 @@ class Launcher(LauncherTheme):
             text = ini_set(text, 'anisotropy', self.aniso.get(), 'vsync')
             text = ini_set(text, 'gamepad_deadzone', self.deadzone.get(), 'gamepad_swap_ab')
             text = ini_set(text, 'gamepad_rumble', self.rumble.get(), 'gamepad_deadzone')
+            text = ini_set(text, 'button_prompts', dict(PROMPTS)[self.prompts.get()], 'gamepad_swap_ab')
             backup = INI.with_suffix('.ini.before-launcher')
             if not backup.exists():
                 shutil.copy2(INI, backup)
