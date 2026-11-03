@@ -4,12 +4,12 @@ import shutil
 import zipfile
 from pathlib import Path
 
-VERSION = '0.1.0'
+VERSION = '0.1.1'
 root = Path.cwd()
 name = f'B3-Express-{VERSION}-windows-x64'
 out = root / 'release' / name
-exe = root / 'diagnostics/cutscene60-20261102/Bayo3_120-c2.exe'
-assert hashlib.sha256(exe.read_bytes()).hexdigest().startswith('5389fc20')
+exe = root / 'diagnostics/vram-cb-20261103/Bayo3_120-c7-release.exe'
+assert hashlib.sha256(exe.read_bytes()).hexdigest().startswith('2c85ecac')
 if out.exists():
     shutil.rmtree(out)
 out.mkdir(parents=True)
