@@ -15,6 +15,7 @@
 #define CRS_DEPTH     16    /* static resolution gives up on a deeper stack */
 
 int (*g_shader_cb_read)(u32 idx, u32 off, u32* out);
+int g_shader_soft_ftz = 1;
 
 /* each stage binds its own constant buffers in its own descriptor set; compute runs alone and shares the vertex
    stage's number */

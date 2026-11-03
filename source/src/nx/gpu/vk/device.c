@@ -229,6 +229,13 @@ static int create_device(void) {
                         p12.denormBehaviorIndependence != VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE;
     if (!g_vk_flush_denorm)
         WARN("vulkan: FP32 denormal flush mode unavailable; graphics shaders use per-instruction FTZ fallback\n");
+    {
+        const char* e = getenv("SNX_SOFT_FTZ");
+        if (e && !strcmp(e, "0")) {
+            g_shader_soft_ftz = 0;
+            WARN("vulkan: SNX_SOFT_FTZ=0: FTZ instructions aren't flushed in the shader, the driver decides\n");
+        }
+    }
     if (!g_vk_preserve_infnan) WARN("vulkan: FP32 signed-zero/Inf/NaN preservation unavailable on this GPU\n");
 
     /* compute gets a queue of its own: of a compute-only family, or else a second one of the graphics family */

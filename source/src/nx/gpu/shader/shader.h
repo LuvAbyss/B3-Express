@@ -134,6 +134,9 @@ u32* shader_compute_to_spirv(const u8* code, u32 max_bytes, ShaderInfo* si, size
 /* reads word off (bytes) of constant buffer idx for jump tables: 1 when it could. Set by whoever translates, NULL
    offline */
 extern int (*g_shader_cb_read)(u32 idx, u32 off, u32* out);
+/* 1 (the default): an FTZ float instruction that the device can't flush by mode is flushed with integer bits. 0
+   (SNX_SOFT_FTZ=0, a test): it isn't, and the driver's own denormal behaviour applies, as in Witch Time */
+extern int g_shader_soft_ftz;
 /* the targets of the BRX at word index from its jump table, at most max_targets, or -1 */
 int shader_brx_targets(const u64* words, u32 index, u32 count, u32* targets, int max_targets);
 /* the program's hash, and its length in bytes in out_len */

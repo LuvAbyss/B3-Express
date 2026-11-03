@@ -440,6 +440,7 @@ static u32 float_mod(DirectCtx* c, u32 value, int absolute, int negative) {
 /* An FTZ arithmetic instruction consumes and produces signed zero instead of a subnormal. Do it with integer bits
    when the Vulkan device can't request DenormFlushToZero, or when this shader mixes FTZ and non-FTZ instructions. */
 static u32 float_ftz(DirectCtx* c, u32 value) {
+    if (!g_shader_soft_ftz) return value;
     u32 bits = spv_emit_bitcast(&c->emit, c->u32_type, value);
     u32 exponent = spv_emit_bitwise_and_u32(&c->emit, c->u32_type, bits,
                                             spv_emit_constant_u32(&c->emit, c->u32_type, 0x7f800000u));
