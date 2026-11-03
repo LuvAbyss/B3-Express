@@ -70,3 +70,10 @@ colours, by AO55 after Liz's Wimsy, GPL-3.0-or-later.
 
 `src/nx/hle/scene60.c`: how Bayonetta 3's 30 FPS scenes are timed, and the design of running them at 60, come from
 [Witch Time](https://github.com/Zexyen/Witch-Time) (GPL-3.0). The code is written from its notes.
+
+`src/nx/gpu/vk/nvn_res.c`, storage buffers the GPU writes kept in video memory (`mir_own`, `own_merge`, `own_land_now`,
+`own_idle`): the design, keeping a compute-written buffer on the GPU, landing it in guest memory only when something
+needs the bytes there, merging against the snapshot taken when it was filled so a word the game wrote meanwhile stays
+the game's, and landing idle buffers without a wait, comes from [Witch Time](https://github.com/Zexyen/Witch-Time)
+(`runtime/nvn_vk_draw.c`, its "CB" compute buffers, GPL-3.0-or-later). The code is written for this renderer's video
+memory copies.

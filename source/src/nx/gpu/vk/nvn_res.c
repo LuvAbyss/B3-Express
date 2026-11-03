@@ -49,6 +49,14 @@ static int import_of(u64 a, u64 n, u64* off) {
         }
     return -1;
 }
+/* c7 (the video memory copies, below): the GPU's blocks of a range land in guest memory before the CPU reads it */
+static void own_land_range(int p, u64 off, u64 size);
+static void own_land_gpu(u64 gpu, u64 size);
+/* why the next landing happens (own_land_now counts it): 0 the game wrote a GPU block, 1 a texture over it, 2 a CPU
+   copy of a constant buffer, 3 no memory to own, 4 no write tracking, 5 a read partly in the copy, 6 a storage buffer
+   written in the pool, 7 a buffer copy or clear, 8 a constant update */
+static int g_land_why;
+static u64 g_land_by[9];
 int vk_nvn_pool_import(u64 cpu, u64 size) {
     u64 align = g_vk.host_import_align;
     void* host;
@@ -116,6 +124,7 @@ int vk_nvn_pool_import(u64 cpu, u64 size) {
 static struct {
     VkShaderModule mod;
     ShaderInfo si;
+    u32 spv_hash; /* the same across runs, for the logs */
 } g_mod[MODULES];
 static int g_nmod;
 static const u8* g_cb1;
@@ -174,6 +183,29 @@ static u32* stage_spirv(int stage, const u8* code, u32 window, int compute_stub,
     *out = si;
     return spv;
 }
+/* SNX_NVN_SPV_DUMP=dir: each module as the renderer made it, named by the hash nvn-top logs: <hash>_<stage>.spv, the
+   game's code it came from (.bin) and its constant buffer 1 (.cb1). The renderer handles programs itself, so
+   SNX_NVN_CORPUS (the shadow path) sees none of them */
+static void spv_dump(u32 hash, int stage, const u32* spv, size_t words, const u8* code, u32 window, u64 cb1_gva,
+                     u32 cb1_size) {
+    static int on = -1;
+    static char dir[1024];
+    char path[1100];
+    const u8* cb1 = cb1_size && cb1_size <= 0x10000 ? gmem_ptr_untracked(cb1_gva, cb1_size) : NULL;
+    FILE* f;
+    if (on < 0) {
+        const char* e = getenv("SNX_NVN_SPV_DUMP");
+        on = e && *e && snprintf(dir, sizeof dir, "%s", e) < (int)sizeof dir;
+        if (on) LOG("nvn-live: shader modules saved to %s\n", dir);
+    }
+    if (!on) return;
+    snprintf(path, sizeof path, "%s/%08x_%d.spv", dir, hash, stage);
+    if ((f = fopen(path, "wb"))) fwrite(spv, 4, words, f), fclose(f);
+    snprintf(path, sizeof path, "%s/%08x_%d.bin", dir, hash, stage);
+    if (code && (f = fopen(path, "wb"))) fwrite(code, 1, window, f), fclose(f);
+    snprintf(path, sizeof path, "%s/%08x_%d.cb1", dir, hash, stage);
+    if (cb1 && (f = fopen(path, "wb"))) fwrite(cb1, 1, cb1_size, f), fclose(f);
+}
 int vk_nvn_shader(int stage, u64 code_gva, u32 window, int compute_stub, u64 cb1_gva, u32 cb1_size,
                   const u32* cs_local, u32 shared, const NvnStageKey* key, char* why, u32 why_size) {
     const u8* code = window ? gmem_ptr_untracked(code_gva, window) : NULL;
@@ -196,8 +228,12 @@ int vk_nvn_shader(int stage, u64 code_gva, u32 window, int compute_stub, u64 cb1
         VkShaderModuleCreateInfo mi = {
             .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = words * 4, .pCode = spv};
         if (vkCreateShaderModule(g_vk.dev, &mi, NULL, &g_mod[g_nmod].mod) == VK_SUCCESS) {
+            u32 h = 2166136261u, w;
+            for (w = 0; w < words; w++) h = (h ^ spv[w]) * 16777619u;
             g_mod[g_nmod].si = si;
+            g_mod[g_nmod].spv_hash = h;
             r = g_nmod++;
+            spv_dump(h, stage, spv, words, code, window, cb1_gva, cb1_size);
         } else
             snprintf(why, why_size, "vkCreateShaderModule refused it");
     }
@@ -798,6 +834,7 @@ static int pipe_key(const NvnPipeDesc* d, PipeKey* k, u32* bstream, char* why, u
     return 1;
 }
 static int g_rp_real; /* g_rp.real, which is defined further on */
+static int g_rp_win;  /* a host window is open (vk_nvn_live_window): g_rp.cb is recording and may be submitted */
 static NvnPipe* pipe_get(const NvnPipeDesc* d, int* made) { /* the cache entry for d, made now when new */
     u64 h = vk_hash(d, sizeof *d);
     NvnPipe* p;
@@ -1049,6 +1086,14 @@ static int tex_get(const NvnStageBind* b, u32 handle, const ShTex* st, int num, 
             memset(g_tc[i].tsc, 0, 32);
         else
             memcpy(g_tc[i].tsc, GP(b->smp_pool + (u64)sid * 32), 32);
+        if (g_rp_real) { /* c7: the texture cache reads guest memory: a GPU-written range under it lands first. The
+                            size is an upper bound (16 bytes a texel, every layer) */
+            const u32* t = g_tc[i].tic;
+            u64 gva = ((u64)(t[2] & 0xFFFF) << 32) | t[1];
+            u64 bytes = (u64)((t[4] & 0xFFFF) + 1) * ((t[5] & 0xFFFF) + 1) * 16 * (1 + ((t[5] >> 16) & 0x3FFF));
+            g_land_why = 1;
+            own_land_gpu(gva, bytes < (256ull << 20) ? bytes : 256ull << 20);
+        }
         vk_lock();
         g_vk_tex_later = 0;
         g_tc[i].t = st && (st->flags & 1) ? vk_tex_from_tic_raw(g_tc[i].tic) : vk_tex_from_tic(g_tc[i].tic);
@@ -1662,17 +1707,31 @@ static struct {
     int out;   /* the frame ended, its results aren't in yet */
     VkQueryPool q;
     u32 n, drawn_at;
+    int mod;         /* the shader of the job the next mark ends: a compute module, or a pass's last fragment module */
+    u64 bound;       /* the bytes of storage buffers that job bound */
+    u64 hit0, miss0; /* the reads counted at the last mark */
     u64 frame, astc;
     struct {
-        u32 kind, w, h, draws;
+        u32 kind, w, h, draws, hit, miss;
+        int mod;
+        u64 bound;
     } tag[PT_MARKS];
 } g_pt = {.every = -1};
+static u64 g_mir_hits, g_mir_miss; /* reads from a video memory copy, and from the pool */
 static void pt_mark(u32 kind, u32 w, u32 h, u32 draws) {
     if (!g_pt.open || g_pt.n == PT_MARKS) return;
     g_pt.tag[g_pt.n].kind = kind;
     g_pt.tag[g_pt.n].w = w;
     g_pt.tag[g_pt.n].h = h;
     g_pt.tag[g_pt.n].draws = draws;
+    g_pt.tag[g_pt.n].mod = g_pt.mod;
+    g_pt.tag[g_pt.n].bound = g_pt.bound;
+    g_pt.tag[g_pt.n].hit = g_mir_hits >= g_pt.hit0 ? (u32)(g_mir_hits - g_pt.hit0) : 0; /* the report zeroes them */
+    g_pt.tag[g_pt.n].miss = g_mir_miss >= g_pt.miss0 ? (u32)(g_mir_miss - g_pt.miss0) : 0;
+    g_pt.hit0 = g_mir_hits;
+    g_pt.miss0 = g_mir_miss;
+    g_pt.mod = -1;
+    g_pt.bound = 0;
     vkCmdWriteTimestamp2(g_rp.cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, g_pt.q, g_pt.n++);
 }
 static void pt_window(void) { /* a window opens, outside a pass */
@@ -1756,6 +1815,38 @@ static void pt_read(void) {
         m[best].n = 0;
     }
     LOG("%s\n", line);
+    { /* the largest single jobs */
+        char top[768];
+        double done = 1e18;
+        size_t put = (size_t)snprintf(top, sizeof top, "nvn-top: frame %llu:", (unsigned long long)g_pt.frame);
+        for (j = 0; j < 6 && put < sizeof top - 128; j++) {
+            double most = 0;
+            u32 at_most = 0;
+            for (k = 1; k < g_pt.n; k++) {
+                u32 kind = g_pt.tag[k].kind;
+                double ms = (double)(v[k] - v[k - 1]) * (double)g_vk.props.limits.timestampPeriod / 1e6;
+                if ((kind == PT_PASS || kind == PT_COMPUTE) && ms > most && ms < done) most = ms, at_most = k;
+            }
+            if (!at_most || most < 0.5) break;
+            done = most;
+            {
+                int mod = g_pt.tag[at_most].mod;
+                const ShaderInfo* si = mod >= 0 && mod < g_nmod ? &g_mod[mod].si : NULL;
+                put += (size_t)snprintf(top + put, sizeof top - put, " %s %ux%u%s%u, shader %08x",
+                                        g_pt.tag[at_most].kind == PT_PASS ? "pass" : "compute", g_pt.tag[at_most].w,
+                                        g_pt.tag[at_most].h, g_pt.tag[at_most].kind == PT_PASS ? " draws " : " local ",
+                                        g_pt.tag[at_most].kind == PT_PASS ? g_pt.tag[at_most].draws
+                                        : si                              ? si->cs_local[0]
+                                                                          : 0,
+                                        si ? g_mod[mod].spv_hash : 0);
+                put += (size_t)snprintf(
+                    top + put, sizeof top - put, ", images %d, buffers %d %.1f MiB, reads %u copies %u pools, %.1f ms;",
+                    si ? si->nimg : 0, si ? si->ngbuf : 0, (double)g_pt.tag[at_most].bound / 1048576.0,
+                    g_pt.tag[at_most].hit, g_pt.tag[at_most].miss, most);
+            }
+        }
+        LOG("%s\n", top);
+    }
     g_pt.out = 0;
 }
 static void rp_end_rendering(void) {
@@ -2098,6 +2189,8 @@ static int rp_copy(VkDescriptorBufferInfo* bi, u64 gpu, u64 have, u64 size) { /*
     int n = have ? import_of(gpu, have, &src) : -1;
     if (!p) return 0;
     memset(p, 0, size);
+    g_land_why = 2;
+    if (n >= 0) own_land_range(n, src, have < size ? have : size); /* read on the CPU: the GPU's bytes first */
     if (n >= 0) memcpy(p, GP(g_import[n].cpu + src), have < size ? have : size);
     *bi = (VkDescriptorBufferInfo){g_rp.sbuf, off, size};
     return 1;
@@ -2113,11 +2206,18 @@ static int rp_copy(VkDescriptorBufferInfo* bi, u64 gpu, u64 have, u64 size) { /*
 #define MIR_HOT    4             /* windows the GPU wrote it in that keep a block in the pool */
 #define MIR_CHUNK  (4ull << 20)  /* the write watch's unit of asking */
 #define MIR_ARENA  (16ull << 20) /* memory for a sparse copy's blocks is taken in these */
-enum { MIR_NONE, MIR_QUEUED, MIR_VALID };
+/* MIR_GPU: a block storage buffers the GPU writes are bound to (mir_own). Its copy is the truth and the pool is behind
+   until it lands (own_merge), as Witch Time keeps compute-written buffers (runtime/nvn_vk_draw.c, "CB",
+   GPL-3.0-or-later): read from the copy like a valid block, back in guest memory word by word against the snapshot
+   taken when it was filled, so a word the game wrote meanwhile stays the game's */
+enum { MIR_NONE, MIR_QUEUED, MIR_VALID, MIR_GPU };
 static struct {
     int want;
     VkBuffer buf;
     VmaAllocation mem;
+    u8** snap;   /* per block of MIR_GPU: guest memory as it was filled */
+    u32* ofr;    /* per block: the frame the GPU last wrote it in */
+    u8* landing; /* per block: an idle landing's copy is on its way (own_idle) */
     u8* st;  /* per block */
     u8* hot; /* windows it was written in, halved every so often */
     u8* at;  /* the last of them */
@@ -2137,7 +2237,42 @@ static struct {
     u32 pool, blk;
 } g_mq[MIR_QUEUE];
 static u32 g_nmq;
-static u64 g_mir_hits, g_mir_miss, g_mir_bytes, g_mir_taken, g_mir_scan_ns;
+static u64 g_mir_bytes, g_mir_taken, g_mir_scan_ns;
+static struct {
+    u32 pool, blk;
+} g_lq[MIR_QUEUE];         /* GPU blocks to land now (own_land_now) */
+static u32 g_nlq, g_own_n; /* g_own_n: blocks MIR_GPU */
+static u64 g_own_made, g_own_fill, g_own_fail, g_own_lost, g_land_forced, g_land_idle, g_land_bytes, g_land_ns;
+static int own_on(void) { /* SNX_NVN_CB=0: written storage buffers in the pools, as before c7 */
+    static int on = -1;
+    if (on < 0) {
+        const char* e = getenv("SNX_NVN_CB");
+        on = !(e && e[0] == '0');
+        LOG("nvn-live: storage buffers the GPU writes %s\n",
+            on ? "in video memory, landing in guest memory when needed" : "in the pools (SNX_NVN_CB=0)");
+    }
+    return on;
+}
+static void own_lq(u32 p, u32 b) {
+    u32 k;
+    for (k = 0; k < g_nlq; k++)
+        if (g_lq[k].pool == p && g_lq[k].blk == b) return;
+    if (g_nlq == MIR_QUEUE) return; /* more than 1 GiB owned: the rest lands at the next window */
+    g_lq[g_nlq].pool = p;
+    g_lq[g_nlq++].blk = b;
+}
+static struct {
+    u32 pool, blk;
+} g_opq[MIR_QUEUE]; /* GPU blocks the game wrote: its bytes to put into the copy (own_patch) */
+static u32 g_nopq;
+static u64 g_patch_blocks, g_patch_bytes;
+static void own_pq(u32 p, u32 b) {
+    if (g_nopq < MIR_QUEUE) {
+        g_opq[g_nopq].pool = p;
+        g_opq[g_nopq++].blk = b;
+    } else
+        own_lq(p, b);
+}
 void vk_nvn_pool_mirror(int which, u64 flags) {
     const char* e = getenv("SNX_NVN_VRAM");
     /* GPU_CACHED, not shader code (0x40) or compressible render targets (0x80) */
@@ -2154,6 +2289,13 @@ static void mir_take(int pool, u64 off, u64 n) {
     u64 b, last = (off + n - 1) >> MIR_SHIFT;
     if (!g_mir[pool].st || !n) return;
     for (b = off >> MIR_SHIFT; b <= last; b++) {
+        if (g_mir[pool].st[b] ==
+            MIR_GPU) { /* the callers land first (own_land_gpu): a write to the pool would be lost */
+            g_own_lost++;
+            LOG_LIMIT(8, "nvn-live: a GPU-owned block of pool %d written in the pool (block %llu)\n", pool,
+                      (unsigned long long)b);
+            continue;
+        }
         if (g_mir[pool].st[b] != MIR_NONE) g_mir_taken++;
         g_mir[pool].st[b] = MIR_NONE;
         if (g_mir[pool].at[b] != g_mir_window) { /* a block counts once a window */
@@ -2168,6 +2310,14 @@ static void mir_cpu_wrote(int pool, u64 off, u64 n) {
     u64 b, last = (off + n - 1) >> MIR_SHIFT;
     for (b = off >> MIR_SHIFT; b <= last; b++) {
         if (g_mir[pool].st[b] == MIR_QUEUED) continue;
+        if (g_mir[pool].st[b] == MIR_GPU) { /* lands at once, merged, so the GPU reads the game's new words */
+            u64 bo = b << MIR_SHIFT,
+                bs = bo + (1ull << MIR_SHIFT) > g_import[pool].size ? g_import[pool].size - bo : 1ull << MIR_SHIFT;
+            /* a write before the snapshot (a landing's own merge among them) left it equal: nothing to do. Else the
+               game's changed bytes go into the copy (own_patch), the GPU's stay */
+            if (memcmp(GP(g_import[pool].cpu + bo), g_mir[pool].snap[b], bs)) own_pq((u32)pool, (u32)b);
+            continue;
+        }
         if (g_mir[pool].st[b] == MIR_VALID) g_mir_taken++;
         g_mir[pool].st[b] = MIR_NONE;
         if (g_mir[pool].read[b] && g_mir[pool].hot[b] < MIR_HOT) mir_queue(pool, b);
@@ -2190,6 +2340,9 @@ static int mir_make(int i) {
     g_mir[i].read = calloc(blocks, 1);
     g_mir[i].chunk = calloc(g_import[i].size / MIR_CHUNK + 1, 1);
     g_mir[i].bound = calloc(blocks, 1);
+    g_mir[i].snap = calloc(blocks, sizeof *g_mir[i].snap);
+    g_mir[i].ofr = calloc(blocks, sizeof *g_mir[i].ofr);
+    g_mir[i].landing = calloc(blocks, 1);
     if (g_vk.has_sparse && !(e && e[0] == '0')) { /* its offsets are the pool's, memory goes only where blocks are copied */
         VkBufferCreateInfo sci = bci;
         VkBuffer b = VK_NULL_HANDLE;
@@ -2206,6 +2359,7 @@ static int mir_make(int i) {
         }
     }
     if (!g_mir[i].st || !g_mir[i].hot || !g_mir[i].at || !g_mir[i].read || !g_mir[i].chunk || !g_mir[i].bound ||
+        !g_mir[i].snap || !g_mir[i].ofr || !g_mir[i].landing ||
         (!g_mir[i].buf && vmaCreateBuffer(g_vk.vma, &bci, &aci, &g_mir[i].buf, &g_mir[i].mem, NULL) != VK_SUCCESS)) {
         LOG("nvn-live: no video memory copy of a pool of %llu MiB\n", (unsigned long long)(g_import[i].size >> 20));
         free(g_mir[i].st);
@@ -2214,6 +2368,9 @@ static int mir_make(int i) {
         free(g_mir[i].read);
         free(g_mir[i].chunk);
         free(g_mir[i].bound);
+        free(g_mir[i].snap);
+        free(g_mir[i].ofr);
+        free(g_mir[i].landing);
         memset(&g_mir[i], 0, sizeof g_mir[i]);
         return 0;
     }
@@ -2274,6 +2431,311 @@ static void mir_bind(void) {
     g_mir_bind_ns += plat_ns() - t0;
 }
 static void mir_cpu_at(int arg, u64 off, u64 n) { mir_cpu_wrote(arg >> 8, g_mir_at + off, n); }
+
+/* ---- c7: storage buffers the GPU writes, in video memory (MIR_GPU). Ported from Witch Time's compute buffers ---- */
+static u64 own_bsize(int p, u64 b) {
+    u64 off = b << MIR_SHIFT, size = 1ull << MIR_SHIFT;
+    return off + size > g_import[p].size ? g_import[p].size - off : size;
+}
+/* records the copy of block b of pool p into its video memory copy, now: 0 when there is no memory for it. Outside a
+   pass; the caller binds (mir_bind) and puts a barrier after */
+static int mir_fill_block(int p, u64 b) {
+    u64 off = b << MIR_SHIFT, size = own_bsize(p, b);
+    VkBufferCopy r = {off, off, size};
+    if (!g_mir[p].chunk[off / MIR_CHUNK]) { /* its first block: the watch starts on it, before the copy */
+        u64 at = off / MIR_CHUNK * MIR_CHUNK, n = MIR_CHUNK;
+        if (at + n > g_import[p].size) n = g_import[p].size - at;
+        g_mir[p].chunk[off / MIR_CHUNK] = 1;
+        vk_written_since(GP(g_import[p].cpu + at), n, vk_ww_now());
+    }
+    if (g_mir[p].size && !g_mir[p].bound[b]) {
+        VkDeviceMemory mem;
+        u64 at, whole = 1ull << MIR_SHIFT;
+        if (g_nmb == sizeof g_mb / sizeof g_mb[0]) mir_bind();
+        if (!mir_page(&mem, &at)) return 0;
+        if (off + whole > g_mir[p].size) whole = g_mir[p].size - off;
+        g_mir[p].bound[b] = 1;
+        g_mb[g_nmb].pool = (u32)p;
+        g_mb[g_nmb++].b = (VkSparseMemoryBind){off, whole, mem, at, 0};
+    }
+    vkCmdCopyBuffer(g_rp.cb, g_import[p].buf, g_mir[p].buf, 1, &r);
+    g_mir_bytes += size;
+    return 1;
+}
+/* the GPU's bytes of block b, res, into guest memory: a byte the GPU changed against the snapshot goes in where the
+   guest still holds the snapshot's byte (as writeback.c's vk_write_changed, on the pool's host memory). The block is
+   the pool's again */
+static void own_merge(int p, u64 b, const u8* res) {
+    u64 off = b << MIR_SHIFT, size = own_bsize(p, b), i;
+    u8* g = GP(g_import[p].cpu + off);
+    const u8* s = g_mir[p].snap[b];
+    for (i = 0; i + 8 <= size; i += 8) {
+        u64 rv, sv;
+        memcpy(&rv, res + i, 8);
+        memcpy(&sv, s + i, 8);
+        if (rv == sv) continue;
+        if (!memcmp(g + i, s + i, 8)) {
+            memcpy(g + i, res + i, 8);
+            continue;
+        }
+        for (u64 k = i; k < i + 8; k++)
+            if (res[k] != s[k] && g[k] == s[k]) g[k] = res[k];
+    }
+    for (; i < size; i++)
+        if (res[i] != s[i] && g[i] == s[i]) g[i] = res[i];
+    if (g_import[p].gpu) gpu_mem_written(g_import[p].gpu + off, size);
+    free(g_mir[p].snap[b]);
+    g_mir[p].snap[b] = NULL;
+    g_mir[p].st[b] = MIR_NONE; /* the copy may hold the GPU's byte where the game's won: copied again when read */
+    g_mir[p].landing[b] = 0;
+    g_own_n--;
+    g_land_bytes += size;
+}
+/* lands the blocks queued in g_lq now: copies to host memory, a submit and a wait, the merge. Mid-window too: what was
+   recorded before goes with the submit, and recording goes on in a new command buffer */
+static VkBuffer g_lb;
+static VmaAllocation g_lb_mem;
+static u8* g_lb_map;
+static u64 g_lb_cap;
+static int own_staging(VkBuffer* buf, VmaAllocation* mem, u8** map, u64* cap, u64 need) {
+    VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                              .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                              .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+    VmaAllocationCreateInfo aci = {.flags =
+                                       VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+                                   .usage = VMA_MEMORY_USAGE_AUTO};
+    VmaAllocationInfo info;
+    if (*cap >= need) return 1;
+    if (*buf) vk_defer_buffer(*buf, *mem); /* no copy names it any more: the last landing waited for its submit */
+    *buf = VK_NULL_HANDLE;
+    *cap = 0;
+    bci.size = (need + (4u << 20) - 1) & ~((4ull << 20) - 1);
+    if (vmaCreateBuffer(g_vk.vma, &bci, &aci, buf, mem, &info) != VK_SUCCESS) return 0;
+    *map = info.pMappedData;
+    *cap = bci.size;
+    return 1;
+}
+static void own_land_now(void) {
+    u64 t0 = plat_ns(), gate;
+    u32 k, n = g_nlq;
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                           .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+                           .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
+                           .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    if (!n || !g_rp_win) return; /* outside a window: kept for the next one's scan */
+    if (!own_staging(&g_lb, &g_lb_mem, &g_lb_map, &g_lb_cap, (u64)n << MIR_SHIFT))
+        fatal("nvn: no host memory to land %u blocks of GPU-written storage buffers\n", n);
+    rp_end_rendering();
+    rp_barrier();
+    for (k = 0; k < n; k++) {
+        VkBufferCopy r = {(u64)g_lq[k].blk << MIR_SHIFT, (u64)k << MIR_SHIFT, own_bsize(g_lq[k].pool, g_lq[k].blk)};
+        vkCmdCopyBuffer(g_rp.cb, g_mir[g_lq[k].pool].buf, g_lb, 1, &r);
+    }
+    vkCmdPipelineBarrier2(g_rp.cb, &di);
+    gate = vk_submit_number();
+    vk_submit(VK_NULL_HANDLE, 0, VK_NULL_HANDLE);
+    vk_wait_submit(gate);
+    g_rp.cb = vk_cmd();
+    rp_barrier();
+    vmaInvalidateAllocation(g_vk.vma, g_lb_mem, 0, VK_WHOLE_SIZE);
+    for (k = 0; k < n; k++)
+        if (g_mir[g_lq[k].pool].st[g_lq[k].blk] == MIR_GPU)
+            own_merge((int)g_lq[k].pool, g_lq[k].blk, g_lb_map + ((u64)k << MIR_SHIFT));
+    g_nlq = 0;
+    g_land_forced += n;
+    g_land_by[g_land_why] += n;
+    g_land_ns += plat_ns() - t0;
+}
+/* [off, off + size) of pool p is about to be read or written where the copy isn't: its GPU blocks land first */
+static void own_land_range(int p, u64 off, u64 size) {
+    u64 b, last;
+    if (!g_own_n || p < 0 || !g_mir[p].st || !size) return;
+    last = (off + size - 1) >> MIR_SHIFT;
+    for (b = off >> MIR_SHIFT; b <= last; b++)
+        if (g_mir[p].st[b] == MIR_GPU) own_lq((u32)p, (u32)b);
+    own_land_now();
+}
+static void own_land_gpu(u64 gpu, u64 size) {
+    u64 off;
+    int p;
+    if (!g_own_n || !size) return;
+    p = import_of(gpu, size, &off);
+    if (p >= 0) {
+        own_land_range(p, off, size);
+        return;
+    }
+    for (p = 0; p < g_nimport; p++) /* across pools: each one's part */
+        if (g_import[p].gpu && gpu < g_import[p].gpu + g_import[p].size && gpu + size > g_import[p].gpu) {
+            u64 lo = gpu > g_import[p].gpu ? gpu - g_import[p].gpu : 0;
+            u64 hi = gpu + size - g_import[p].gpu < g_import[p].size ? gpu + size - g_import[p].gpu : g_import[p].size;
+            own_land_range(p, lo, hi - lo);
+        }
+}
+/* The game wrote GPU blocks (the window's scan): the bytes it changed against the snapshot go into the copy from
+   staging, and into the snapshot, so the GPU reads them and a later landing doesn't take them for its own. The GPU's
+   bytes stay, no wait. A byte both changed is the game's, as the merge decides. At a window's opening, before its
+   commands */
+#define OWN_RUNS 2048u /* changed runs a block patches; more and it lands instead */
+static void own_patch(void) {
+    static VkBufferCopy r[OWN_RUNS];
+    u32 k;
+    int any = 0;
+    for (k = 0; k < g_nopq; k++) {
+        int p = (int)g_opq[k].pool;
+        u64 b = g_opq[k].blk, bo = b << MIR_SHIFT, bs = own_bsize(p, b), i = 0, total = 0, at;
+        static u8 cur[1u << MIR_SHIFT]; /* the game's bytes now: it may go on writing while this looks (vk_lock) */
+        const u8* s = g_mir[p].snap[b];
+        u32 n = 0, j;
+        u8* q;
+        if (g_mir[p].st[b] != MIR_GPU || !s) continue;
+        memcpy(cur, GP(g_import[p].cpu + bo), bs);
+        /* only the bytes the game changed: one it didn't may hold the GPU's result in the copy */
+        while (i < bs && n < OWN_RUNS) {
+            u64 start;
+            while (i + 8 <= bs && !memcmp(cur + i, s + i, 8)) i += 8;
+            while (i < bs && cur[i] == s[i]) i++;
+            if (i >= bs) break;
+            start = i;
+            while (i < bs && cur[i] != s[i]) i++;
+            r[n].srcOffset = total; /* relative to the staging bytes until they have a place */
+            r[n].dstOffset = bo + start;
+            r[n++].size = i - start;
+            total += i - start;
+        }
+        if (i < bs && n == OWN_RUNS) { /* scattered writes: it lands */
+            own_lq((u32)p, (u32)b);
+            continue;
+        }
+        if (!n) continue;
+        if (!(q = rp_alloc(total, &at))) {
+            own_lq((u32)p, (u32)b);
+            continue;
+        }
+        for (j = 0; j < n; j++) {
+            memcpy(q + r[j].srcOffset, cur + (r[j].dstOffset - bo), r[j].size);
+            memcpy(g_mir[p].snap[b] + (r[j].dstOffset - bo), cur + (r[j].dstOffset - bo), r[j].size);
+            r[j].srcOffset += at;
+        }
+        g_mir[p].landing[b] = 0; /* an idle landing's copy holds the old bytes: its merge would undo the game's */
+        if (!any) {
+            rp_end_rendering();
+            rp_barrier();
+            any = 1;
+        }
+        vkCmdCopyBuffer(g_rp.cb, g_rp.sbuf, g_mir[p].buf, n, r);
+        g_patch_blocks++;
+        g_patch_bytes += total;
+    }
+    g_nopq = 0;
+    if (any) rp_barrier();
+}
+/* 1 when [off, off + size) of pool p has a GPU block */
+static int own_touches(int p, u64 off, u64 size) {
+    u64 b, last;
+    if (!g_own_n || p < 0 || !g_mir[p].st || !size) return 0;
+    last = (off + size - 1) >> MIR_SHIFT;
+    for (b = off >> MIR_SHIFT; b <= last; b++)
+        if (g_mir[p].st[b] == MIR_GPU) return 1;
+    return 0;
+}
+/* 1 when [off, off + size) of pool p can be bound from its video memory copy for the GPU to write: its blocks are the
+   GPU's from now on, filled from the pool (with a snapshot) when they weren't. 0: bind the pool, nothing owned */
+static int mir_own(int p, u64 off, u64 size) {
+    u64 b, first, last;
+    int filled = 0;
+    if (!own_on() || !g_mir[p].buf || !g_mir[p].want || !g_mir[p].snap || !size) return 0;
+    first = off >> MIR_SHIFT;
+    last = (off + size - 1) >> MIR_SHIFT;
+    for (b = first; b <= last; b++) {
+        u64 bs;
+        if (g_mir[p].st[b] == MIR_GPU) continue;
+        bs = own_bsize(p, b);
+        if (!filled) {
+            rp_end_rendering();
+            rp_barrier();
+            filled = 1;
+        }
+        /* filled again even when valid: the snapshot has to be what the copy holds. A game write between the two
+           lands as the game's (the merge keeps a byte where guest and snapshot differ) */
+        g_mir[p].snap[b] = malloc(bs);
+        if (!g_mir[p].snap[b] || !mir_fill_block(p, b)) {
+            free(g_mir[p].snap[b]);
+            g_mir[p].snap[b] = NULL;
+            g_mir[p].st[b] = MIR_NONE;
+            g_own_fail++;
+            mir_bind();
+            rp_barrier();
+            g_land_why = 3;
+            own_land_range(p, off, size); /* what this range already owns goes back: the pool is bound */
+            return 0;
+        }
+        memcpy(g_mir[p].snap[b], GP(g_import[p].cpu + (b << MIR_SHIFT)), bs);
+        g_mir[p].st[b] = MIR_GPU;
+        g_own_n++;
+        g_own_made++;
+        g_own_fill += bs;
+    }
+    if (filled) {
+        mir_bind();
+        rp_barrier();
+    }
+    for (b = first; b <= last; b++) {
+        g_mir[p].ofr[b] = (u32)g_rp.frame;
+        g_mir[p].landing[b] = 0; /* written again: an idle landing on its way is out of date */
+    }
+    return 1;
+}
+/* An idle GPU block (no write for two frames) lands without a wait: its copy goes to host memory with this window,
+   and once that submit is done the merge, at a later window. The game reading compute's output from guest memory
+   finds it there two frames after the last write at most */
+#define OWN_IDLE 64u
+static VkBuffer g_ib;
+static VmaAllocation g_ib_mem;
+static u8* g_ib_map;
+static u64 g_ib_cap;
+static struct {
+    u32 pool, blk;
+    u64 gate;     /* 0: merged or dropped */
+} g_il[OWN_IDLE]; /* entry k's copy is in slot k of g_ib */
+static u32 g_nil;
+static void own_idle(void) {
+    u32 k, open = 0;
+    int p;
+    for (k = 0; k < g_nil; k++) { /* landings whose copy is done */
+        u32 pl = g_il[k].pool, b = g_il[k].blk;
+        if (!g_il[k].gate) continue;
+        if (!vk_submit_done(g_il[k].gate)) {
+            open++;
+            continue;
+        }
+        g_il[k].gate = 0;
+        if (g_mir[pl].st[b] == MIR_GPU && g_mir[pl].landing[b]) { /* not written since, not landed otherwise */
+            vmaInvalidateAllocation(g_vk.vma, g_ib_mem, (u64)k << MIR_SHIFT, 1ull << MIR_SHIFT);
+            own_merge((int)pl, b, g_ib_map + ((u64)k << MIR_SHIFT));
+            g_land_idle++;
+        }
+    }
+    if (open) return; /* the slots are given out again only when all are free */
+    g_nil = 0;
+    if (!g_own_n || !own_staging(&g_ib, &g_ib_mem, &g_ib_map, &g_ib_cap, (u64)OWN_IDLE << MIR_SHIFT)) return;
+    for (p = 0; p < g_nimport && g_nil < OWN_IDLE; p++) {
+        u64 b, blocks;
+        if (!g_mir[p].st || !g_mir[p].snap) continue;
+        blocks = (g_import[p].size + (1u << MIR_SHIFT) - 1) >> MIR_SHIFT;
+        for (b = 0; b < blocks && g_nil < OWN_IDLE; b++) {
+            VkBufferCopy r;
+            if (g_mir[p].st[b] != MIR_GPU || g_mir[p].landing[b] || (u32)g_rp.frame - g_mir[p].ofr[b] < 2) continue;
+            r = (VkBufferCopy){b << MIR_SHIFT, (u64)g_nil << MIR_SHIFT, own_bsize(p, b)};
+            vkCmdCopyBuffer(g_rp.cb, g_mir[p].buf, g_ib, 1, &r);
+            g_mir[p].landing[b] = 1;
+            g_il[g_nil].pool = (u32)p;
+            g_il[g_nil].blk = (u32)b;
+            g_il[g_nil++].gate = vk_submit_number();
+        }
+    }
+}
 /* a window opens: what the CPU wrote goes back to the pool, and the blocks asked for are copied. Under vk_lock, outside
    a pass */
 static void rp_mirror_window(void) {
@@ -2300,13 +2762,22 @@ static void rp_mirror_window(void) {
             g_mir_at = at;
             w = vk_written_since(GP(g_import[i].cpu + at), n, seen);
             if (w < 0) { /* no tracking: nothing can be known equal */
-                memset(g_mir[i].st, MIR_NONE, (g_import[i].size + (1u << MIR_SHIFT) - 1) >> MIR_SHIFT);
+                u64 b, blocks = (g_import[i].size + (1u << MIR_SHIFT) - 1) >> MIR_SHIFT;
+                for (b = 0; b < blocks; b++)
+                    if (g_mir[i].st[b] == MIR_GPU) own_lq((u32)i, (u32)b);
+                g_land_why = 4;
+                own_land_now(); /* the GPU's blocks first: they are the truth */
+                memset(g_mir[i].st, MIR_NONE, blocks);
                 g_mir[i].want = 0;
             } else if (w)
                 vk_written_each(GP(g_import[i].cpu + at), n, seen, mir_cpu_at, i << 8);
         }
     }
     g_mir_scan_ns += plat_ns() - t0;
+    own_patch(); /* GPU blocks the game wrote: its bytes into the copy */
+    g_land_why = 0;
+    own_land_now(); /* those that couldn't be patched: merged, its words stay */
+    own_idle();
     for (k = 0; k < g_nmq; k++) {
         u32 p = g_mq[k].pool, b = g_mq[k].blk;
         u64 off = (u64)b << MIR_SHIFT, size = 1ull << MIR_SHIFT;
@@ -2445,15 +2916,34 @@ static void rp_mirror_check(void) {
 /* the buffer to read [off, off + size) of a pool from: its copy when every block is there, else the pool */
 static VkBuffer rp_read_buf(int pool, u64 off, u64 size) {
     u64 b, last;
-    int all = 1;
+    int all = 1, gpu = 0;
     if (!g_mir[pool].buf || !g_mir[pool].want || !size) return g_import[pool].buf;
     last = (off + size - 1) >> MIR_SHIFT;
     for (b = off >> MIR_SHIFT; b <= last; b++) {
         g_mir[pool].read[b] = 1;
-        if (g_mir[pool].st[b] != MIR_VALID) {
+        gpu |= g_mir[pool].st[b] == MIR_GPU;
+        if (g_mir[pool].st[b] != MIR_VALID && g_mir[pool].st[b] != MIR_GPU) {
             all = 0;
             if (g_mir[pool].st[b] == MIR_NONE && g_mir[pool].hot[b] < MIR_HOT) mir_queue(pool, b);
         }
+    }
+    if (!all && gpu) { /* part of it only in the copy: the rest is copied there now, else the GPU's blocks land */
+        int ok = 1;
+        rp_end_rendering();
+        rp_barrier();
+        for (b = off >> MIR_SHIFT; b <= last && ok; b++)
+            if (g_mir[pool].st[b] != MIR_VALID && g_mir[pool].st[b] != MIR_GPU) {
+                ok = mir_fill_block(pool, b);
+                if (ok) g_mir[pool].st[b] = MIR_VALID;
+            }
+        mir_bind();
+        rp_barrier();
+        if (!ok) {
+            g_land_why = 5;
+            own_land_range(pool, off, size);
+            return g_import[pool].buf;
+        }
+        all = 1;
     }
     if (all)
         g_mir_hits++;
@@ -2587,6 +3077,18 @@ static int rp_stage_set(int mod, const NvnStageBind* b, int stage, VkDescriptorS
         delta = at & (salign - 1);
         sb_addr[i] = b->ssbo[k].addr - delta;
         sb_size[i] = b->ssbo[k].size + delta;
+        if (g_rp.real && (si->gbuf_wmask >> i & 1)) {
+            /* c7: written, so from the video memory copy, the GPU's blocks until they land (mir_own): over the pool
+               every access of it crossed PCIe, 15 ms for one game compute job after a verse exit */
+            if (mir_own(pool, at - delta, sb_size[i])) {
+                bi[SNX_VKB_SSBO + i] = (VkDescriptorBufferInfo){g_mir[pool].buf, at - delta, sb_size[i]};
+                dl_written(sb_addr[i], sb_size[i]);
+                WB(SNX_VKB_SSBO + i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+                continue;
+            }
+            g_land_why = 6;
+            own_land_range(pool, at - delta, sb_size[i]); /* written in the pool: what the copy owns of it first */
+        }
         if (!rp_ssbo(sb_addr[i], sb_size[i], si->gbuf_wmask >> i & 1, &bi[SNX_VKB_SSBO + i]))
             bi[SNX_VKB_SSBO + i] = (VkDescriptorBufferInfo){si->gbuf_wmask >> i & 1 ? g_import[pool].buf
                                                                                      : rp_read_buf(pool, at - delta, sb_size[i]),
@@ -3126,6 +3628,7 @@ void vk_nvn_replay_draw(const NvnPipeDesc* d, const NvnStageBind* bind, const Nv
     for (s = 0; s < 5; s++)
         if (d->mod[s] >= 0 && !rp_stage_set(d->mod[s], &bind[s], st_of[s], &set[s], &why))
             RSKIP(why);
+    if (g_pt.open && d->mod[4] >= 0) g_pt.mod = d->mod[4];
     for (b = 0; b < p->nbind; b++) {
         u32 st = p->bstream[b];
         u64 off;
@@ -3166,15 +3669,16 @@ void vk_nvn_replay_draw(const NvnPipeDesc* d, const NvnStageBind* bind, const Nv
         int n;
         if (rp_ssbo(call->indirect, span, 0, &cp))
             xb = cp.buffer, xo = cp.offset;
-        else if ((n = import_of(call->indirect, 20, &xo)) >= 0)
-            xb = g_import[n].buf;
-        else
+        else if ((n = import_of(call->indirect, 20, &xo)) >= 0) {
+            u64 whole; /* c7: from the copy when a dispatch wrote the arguments there; span when it fits the pool */
+            xb = rp_read_buf(n, xo, import_of(call->indirect, span, &whole) == n ? span : 20);
+        } else
             RSKIP("indirect buffer outside the pools");
         if (call->kind == 3) {
             if (rp_ssbo(call->parameter, 4, 0, &cp))
                 pb = cp.buffer, po = cp.offset;
             else if ((n = import_of(call->parameter, 4, &po)) >= 0)
-                pb = g_import[n].buf;
+                pb = rp_read_buf(n, po, 4);
             else
                 RSKIP("draw count outside the pools");
         }
@@ -3245,7 +3749,7 @@ void vk_nvn_replay_dispatch(int mod, const NvnStageBind* b, u32 x, u32 y, u32 z,
         if (rp_ssbo(indirect, 12, 0, &ib))
             buf = ib.buffer, off = ib.offset;
         else if ((n = import_of(indirect, 12, &off)) >= 0)
-            buf = g_import[n].buf;
+            buf = rp_read_buf(n, off, 12); /* the copy when a dispatch wrote them there (c7) */
         else
             RSKIP("indirect dispatch outside the pools");
     }
@@ -3258,6 +3762,11 @@ void vk_nvn_replay_dispatch(int mod, const NvnStageBind* b, u32 x, u32 y, u32 z,
         vkCmdDispatchIndirect(g_rp.cb, buf, off);
     else
         vkCmdDispatch(g_rp.cb, x, y, z);
+    if (g_pt.open) {
+        int k;
+        g_pt.mod = mod;
+        for (k = 0; k < 16; k++) g_pt.bound += b->ssbo[k].size;
+    }
     pt_mark(PT_COMPUTE, x, y, 0);
     rp_barrier();
     g_rp.dispatched++;
@@ -3269,10 +3778,23 @@ void vk_nvn_replay_buffer(u64 src, u64 dst, u64 size, u32 value) {
     int n;
     if (!g_rp.on) return;
     if (!size || (!src && ((dst | size) & 3))) RSKIP("buffer clear not 4-byte aligned");
+    s.buffer = VK_NULL_HANDLE;
     if (g_rp.real) {
+        u64 soff;
+        int sn = src ? import_of(src, size, &soff) : -1;
         if ((n = import_of(dst, size, &off)) < 0) RSKIP("buffer copy or clear outside the pools");
-        d = (VkDescriptorBufferInfo){g_import[n].buf, off, size};
-        rp_stamp(dst, size);
+        if (src && sn < 0) RSKIP("buffer copy source outside the pools");
+        if (src) s = (VkDescriptorBufferInfo){rp_read_buf(sn, soff, size), soff, size}; /* the copy when it holds it */
+        /* c7: into the video memory copy when the GPU owns part of the range there, so it stays the GPU's */
+        if (own_touches(n, off, size) && mir_own(n, off, size)) {
+            d = (VkDescriptorBufferInfo){g_mir[n].buf, off, size};
+            dl_written(dst, size);
+        } else {
+            g_land_why = 7;
+            own_land_range(n, off, size);
+            d = (VkDescriptorBufferInfo){g_import[n].buf, off, size};
+            rp_stamp(dst, size);
+        }
     } else if (!rp_ssbo(dst, size, 1, &d) || !d.buffer)
         RSKIP("buffer copy or clear: no copy of the destination");
     rp_end_rendering();
@@ -3280,7 +3802,7 @@ void vk_nvn_replay_buffer(u64 src, u64 dst, u64 size, u32 value) {
     if (!src)
         vkCmdFillBuffer(g_rp.cb, d.buffer, d.offset, size, value);
     else {
-        if (!rp_ssbo(src, size, 0, &s)) {
+        if (!s.buffer && !rp_ssbo(src, size, 0, &s)) {
             if ((n = import_of(src, size, &off)) < 0) RSKIP("buffer copy source outside the pools");
             s = (VkDescriptorBufferInfo){g_import[n].buf, off, size};
         }
@@ -3298,6 +3820,8 @@ void vk_nvn_replay_update(u64 dst, const void* data, u32 size) {
     u8* p;
     if (!g_rp.on || !g_rp.real) return;
     if ((n = import_of(dst, size, &off)) < 0) RSKIP("uniform buffer update outside the pools");
+    g_land_why = 8;
+    own_land_range(n, off, size); /* written in the pool: the copy's blocks of it land first */
     if (!(p = rp_alloc(size, &from))) RSKIP("staging used up");
     memcpy(p, data, size);
     rp_stamp(dst, size);
@@ -3550,6 +4074,7 @@ void vk_nvn_live_window(int open) {
         rp_stamps_done();
         vk_nvn_frame(); /* the renderer's textures may have changed since the last list: looked up again */
         g_rp.cb = vk_cmd();
+        g_rp_win = 1;
         for (k = 0; k < RP_SHOW; k++)
             if (g_rps[k].s.img && g_rps[k].s.layout != VK_IMAGE_LAYOUT_GENERAL)
                 vk_surf_use(g_rp.cb, &g_rps[k].s, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
@@ -3561,6 +4086,7 @@ void vk_nvn_live_window(int open) {
         dl_window();
         rp_ts_write(0);
     } else {
+        g_rp_win = 0;
         rp_end_rendering();
         rp_barrier();
         pt_mark(PT_BETWEEN, 0, 0, 0);
@@ -3779,6 +4305,24 @@ void vk_nvn_live_stats(u64 frames) {
             (unsigned long long)hot, (unsigned long long)(g_mir_bytes >> 20), (unsigned long long)g_mir_taken,
             (double)g_mir_scan_ns / 6e8, (unsigned long long)(g_mir_bound >> 4), (double)g_mir_bind_ns / 1e6);
         g_mir_hits = g_mir_miss = g_mir_bytes = g_mir_taken = g_mir_scan_ns = g_mir_bind_ns = 0;
+        if (g_own_made || g_own_n)
+            LOG("nvn-live: GPU-written storage buffers: %u blocks in video memory now (%llu MiB), %llu taken (%llu MiB "
+                "filled), %llu not (no memory), landed %llu at once and %llu idle (%llu MiB, %.1f ms waiting), %llu "
+                "pool writes over them; the game's writes patched in %llu times (%llu KiB)\n",
+                g_own_n, (unsigned long long)g_own_n >> 4, (unsigned long long)g_own_made,
+                (unsigned long long)(g_own_fill >> 20), (unsigned long long)g_own_fail,
+                (unsigned long long)g_land_forced, (unsigned long long)g_land_idle,
+                (unsigned long long)(g_land_bytes >> 20), (double)g_land_ns / 1e6, (unsigned long long)g_own_lost,
+                (unsigned long long)g_patch_blocks, (unsigned long long)(g_patch_bytes >> 10));
+        g_patch_blocks = g_patch_bytes = 0;
+        if (g_land_forced)
+            LOG("nvn-live: landed at once because: game wrote %llu, texture %llu, CPU constant copy %llu, no memory "
+                "%llu, no tracking %llu, partial read %llu, pool write %llu, buffer copy %llu, constant update %llu\n",
+                (unsigned long long)g_land_by[0], (unsigned long long)g_land_by[1], (unsigned long long)g_land_by[2],
+                (unsigned long long)g_land_by[3], (unsigned long long)g_land_by[4], (unsigned long long)g_land_by[5],
+                (unsigned long long)g_land_by[6], (unsigned long long)g_land_by[7], (unsigned long long)g_land_by[8]);
+        memset(g_land_by, 0, sizeof g_land_by);
+        g_own_made = g_own_fill = g_own_fail = g_land_forced = g_land_idle = g_land_bytes = g_land_ns = 0;
     }
     pm_lock(&g_prq_lk);
     if (g_pr_set)

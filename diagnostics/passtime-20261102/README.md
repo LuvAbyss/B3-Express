@@ -40,3 +40,36 @@ In heavy combat the main pass moves between about 1638x922 and 2304x1306 about e
 - Ours loses `ResetCounter` and `ReportCounter` in release-only mode (164 of each in 392 s, `cmd_unkept`), which is rare, so these are unlikely to be the controller's input. Which call the game's controller reads isn't known yet. Nobody here has found it in the game's code.
 
 If the hypothesis holds, the next step is finding that input, and what ours reports against Witch Time, by reading the game's code.
+
+## The c3 load test (`play-c3/`, 2026-11-03)
+
+Build c3 (`2cef14fd...`) through `Launch-Bayonetta3-PassTime.cmd`, by the user, about 250 s, with a GPU record (`play-c3/vram-c3-loads.csv`, from `nvidia gpu record/`). Log hash `1889bec3...`, record `87d3efbe...`. `nvn-top:` names the largest jobs in every 30th frame.
+
+**The drop is one fixed chain of three game compute shaders, plus one or two heavy full-screen passes.** It appeared four times (t62-66, t74-80, t145-152, t161-172) and looks the same every time:
+
+| job | size | binds | time in the drop | time as it fades |
+|---|---|---|---|---|
+| compute `614fd3a3` | 613xN groups of 64, N 1-4 | 2 storage buffers, 24.6 MiB, both from video memory copies | **12-16 ms** | 6.6-7.5 ms |
+| compute `66b9a528` | the same | 3 buffers, 24.7 MiB, one read from a pool in host memory | 4.2-6.6 ms | 3.0-3.4 ms |
+| compute `ea51dd0e` | the same | 2 buffers, 24.7 MiB, from copies | 2.1-2.6 ms | 1.0-1.2 ms |
+| pass, last fragment `1e842019` | 2304x1306 | no buffers, textures half from copies, half from pools | **10.6-10.9 ms, with 3 to 61 draws** | gone |
+| pass, last fragment `e9d06cf6` (t161-166 only) | 2304x1306, 8-12 draws | the same | 10.6-17.3 ms | gone |
+
+- **Time doesn't follow the work.** `614fd3a3` costs 7.5 ms at 613x1 and 12-16 ms at 613x2 to 613x4, so the size of the job isn't the cost. 39k threads over 25 MiB should take well under 1 ms on an RTX 3080.
+- `1e842019` takes 10.6 ms for **3 draws** at 2304x1306 (t145). That is a per-pixel cost, too high for a plain full-screen effect.
+- The compute chain's buffers sit in video memory copies, so host-pool reads don't explain `614fd3a3`. They could explain part of the passes, which read about half their textures from the pools.
+- Witch Time's whole frame is 14-17 ms in the same phase, so it can't spend 20 ms on these jobs. The jobs are the game's own; **their cost is most likely in our translation of them** (memory access, atomics or loops as we emit them), not in the work.
+- The long phase t174-230 (GPU 18-21 ms, 650 draws, no compute) is the game's heavy phase that Witch Time has too, at 14-17 ms: ours is about 1.3x there, not 2x.
+- GPU record: 91-97% busy in each drop, 36-41% in the settled stretches, peak 3,832 MiB.
+
+### Next: read the three shaders
+
+These hashes aren't in the 2026-10-29 corpus (`nvn-port-20261029/corpus-nvn-7/`, 73 compute stages, retranslated on 2026-11-03 with `snx-shaderc` from current source: no match). The second c3 run (`play-c3-2/`, record `vram-c3-loads-2.csv`) shows the same three hashes, `614fd3a3` up to 15.6 ms, so the hashes hold across runs. **It saved no shaders: `SNX_NVN_CORPUS` works only in the shadow path (`SNX_NVN_SHADOW=1`), and the fast renderer registers programs itself**, so the first `Launch-Bayonetta3-Capture.cmd` captured nothing. Build c4 (`Bayo3_120-c4.exe`, `1aabddf7...`) is c3 plus `SNX_NVN_SPV_DUMP=dir`: `vk_nvn_shader` writes each module it makes as `<hash>_<stage>.spv`, with the game code it came from (`.bin`) and constant buffer 1 (`.cb1`), named by the hash `nvn-top` logs. `Launch-Bayonetta3-Capture.cmd` now sets it to `diagnostics/passtime-20261102/spv-c4/`. The dumps are game data: they stay local. Not run yet.
+
+### The shaders read (2026-11-03, from `spv-c5/`)
+
+- **Witch Time has the same three compute stages.** Its cache (`build/cache/vk/stage/5_*.st`) holds compute stages of exactly 6208, 4800 and 3008 bytes, our three `.bin` sizes, three variants each. The keys don't reproduce from our dump alone (`ssrc_hb` folds in the constant data, which `.bin` lacks), but the float math agrees to the instruction (614fd3a3: FMul 44/44, FAdd 20/20, ExtInst 54/59).
+- **Ours is about twice the size**: 614fd3a3 184,600 bytes against Witch Time's 94,548 (`2c6b5cc63e0d90f1.spv`), ea51dd0e 104,260 against 55,156 (`e623f780dd35c2d0.spv`). The extra is software denormal flushing (`float_ftz`, `spirv_translate.c:442`): every FTZ float op gets And, And, IEqual, Select on each input and its result. All five slow shaders are FTZ only (110/0, 63/0, 90/0, 54/4, 46/3), and the RTX 3080 reports `shaderDenormFlushToZeroFloat32 = false` and `shaderDenormPreserveFloat32 = false` (vulkaninfo), so `device.c:228` falls back to software ("FP32 denormal flush mode unavailable" in every log). Witch Time doesn't emulate FTZ; it takes the driver's default.
+- **That isn't enough to explain the time.** About 1,300 extra integer ops per thread over 39k-78k threads is well under 1 ms on this GPU, and a 613x2 dispatch costs about 7 ms (frame 2820: 613x2 x3 = 21.7 ms, ASTC 0 Mpx, so no texture decode competes).
+- **Control flow is the other difference.** The CRS resolver succeeds for all three (checked offline against `shader.c`), so no run-time stack. But 614fd3a3 (SSY/SYNC and a BAR) and 66b9a528 (PBK/BRK loops, two BARs) have flow, so we run them as one `switch (pc)` per block inside a loop, and with BAR in "converge" mode (a subgroup minimum per block, lanes ahead wait). Witch Time emits structured if/else and loops (139 labels, 57 selection merges, against our 78 and 30 in 614fd3a3). Not measured yet.
+- Next: an A/B build with the software flush switchable, and a reproducible way to the drop, to measure each.
