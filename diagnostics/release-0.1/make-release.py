@@ -4,12 +4,13 @@ import shutil
 import zipfile
 from pathlib import Path
 
-VERSION = '0.1.1'
+VERSION = '0.1.2'
 root = Path.cwd()
 name = f'B3-Express-{VERSION}-windows-x64'
 out = root / 'release' / name
-exe = root / 'diagnostics/vram-cb-20261103/Bayo3_120-c7-release.exe'
-assert hashlib.sha256(exe.read_bytes()).hexdigest().startswith('2c85ecac')
+exe = root / 'diagnostics/release-0.1/Bayo3_120-0.1.2-release.exe'  # a2, built from c5774e0
+assert hashlib.sha256(exe.read_bytes()).hexdigest().startswith('ac31d727')
+assert not (root / 'release' / (name + '.zip')).exists(), 'this version is already packaged: raise VERSION'
 if out.exists():
     shutil.rmtree(out)
 out.mkdir(parents=True)

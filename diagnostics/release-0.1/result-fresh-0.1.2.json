@@ -1,0 +1,19 @@
+{
+  "button_before": "Install",
+  "play_before": "disabled",
+  "seconds": 214,
+  "status": "The game is ready. Open Play.",
+  "ready": true,
+  "play": "normal",
+  "module_size": 249934336,
+  "game_exit": 0,
+  "scene60": [
+    "[   2.52] scene60: title, menus and cutscenes at 60, main at 8005000",
+    "[   3.51] scene60: the game asks for mode 2 at frames forced 0",
+    "[  15.24] scene60: the game asks for mode 0 at frames forced 0"
+  ],
+  "frames": [
+    "[  33.17] nvn-live: 1200 frames: draws 182802, drawn 182749;"
+  ],
+  "tail": "[  33.52] nvn-cmdlist: texture pool descriptors checked 8328, equal to the drive"
+}
