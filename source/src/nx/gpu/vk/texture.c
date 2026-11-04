@@ -159,10 +159,57 @@ static struct { /* first ASTC uploads since the last report (vk_tex_frame) */
 } g_ahead;
 static u32 g_tex_inval_gen;
 void vk_tex_invalidate_all(void) { g_tex_inval_gen++; }
-/* 1 when every subresource was copied; 0 when memory or staging ran out, and upload_valid keeps it for a retry */
+/* Entering an area gives a frame 150-230 Mpx of new ASTC textures to decode, about 100 ms of GPU the game's thread
+   waits for. A big one with a mip chain is decoded from its third level down at first (1/16 of the work) and drawn from
+   there through views that start at that level; the two levels above wait in a queue, decoded at the next presents up
+   to SNX_ASTC_SPREAD_MPX texels a present (0 decodes everything at once) */
+#define SPREAD_SKIP   2u
+#define SPREAD_QUEUE  512
+#define SPREAD_MIN_PX (512u * 512u)
+static Surf* g_spread[SPREAD_QUEUE];
+static int g_nspread;
+static u64 g_spread_px = ~0ull; /* the budget a present, texels; ~0 until read */
+static struct {
+    u64 n, px, done, done_px, frames;
+} g_spread_st; /* since the last report */
+static void tex_set_base(Surf* t, u32 base) { /* views from level base: the old ones go, made again when asked */
+    if (t->astc_base == base) return;
+    t->astc_base = (u8)base;
+    for (int i = 0; i < t->nsv; i++) vk_defer_image(VK_NULL_HANDLE, VK_NULL_HANDLE, t->sv[i].v, VK_NULL_HANDLE);
+    t->nsv = 0;
+}
+void vk_tex_forget(Surf* s) {
+    for (int i = 0; i < g_nspread; i++)
+        if (g_spread[i] == s) {
+            memmove(g_spread + i, g_spread + i + 1, (size_t)(g_nspread - i - 1) * sizeof *g_spread);
+            g_nspread--;
+            return;
+        }
+}
+static u64 level_px(const Surf* t, u32 l0, u32 l1) { /* texels of levels l0 to l1 - 1, every layer */
+    u64 px = 0;
+    for (u32 l = l0; l < l1; l++) {
+        u64 w = t->w >> l, h = t->h >> l;
+        px += (w ? w : 1) * (h ? h : 1);
+    }
+    return px * t->layers;
+}
+/* the level a first upload of t starts at: SPREAD_SKIP for a big ASTC texture with levels to spare, else 0 */
+static u32 spread_first(const Surf* t) {
+    if (g_spread_px == ~0ull) {
+        const char* e = getenv("SNX_ASTC_SPREAD_MPX");
+        g_spread_px = (u64)(e ? atoi(e) : 16) * 1000000;
+    }
+    if (!g_spread_px || t->f.conv != VKC_ASTC || t->uploaded || t->levels <= SPREAD_SKIP ||
+        t->type == VK_IMAGE_VIEW_TYPE_3D || (u64)t->w * t->h < SPREAD_MIN_PX || g_nspread == SPREAD_QUEUE)
+        return 0;
+    return SPREAD_SKIP;
+}
+/* levels l0 to l1 - 1 copied (the others are left as they are). 1 when every one was; 0 when memory or staging ran out,
+   and upload_valid keeps it for a retry */
 u64 g_vk_tex_budget, g_vk_tex_deferred;
 int g_vk_tex_later;
-static int tex_upload(Surf* t) {
+static int tex_upload_levels(Surf* t, u32 l0, u32 l1) {
     const VkFmt* f = &t->f;
     if (g_vk_tex_budget && f->conv == VKC_ASTC && !t->uploaded) {
         /* a whole level's worth of first-time textures decoded at once stalled the frames after it for 200-360 ms */
@@ -208,6 +255,10 @@ static int tex_upload(Surf* t) {
             u32 tw = (lw + f->bw - 1) / f->bw, th = (lh + f->bh - 1) / f->bh;
             u32 rowb = tw * f->bpp, lbh = 0, lbd = 0;
             u64 lsz = t->bl ? bl_level_size(t->w, t->h, d3, f, t->bh, t->bd, t->tws, l, &lbh, &lbd) : (u64)t->pitch * th * ld;
+            if (l < l0 || l >= l1) {
+                at += lsz;
+                continue;
+            }
             u8* src = gmem_ptr(t->gva + at, lsz);
             u8* tmp = NULL;
             /* a format the GPU takes as it is goes from guest memory straight into the staging buffer; the others
@@ -271,6 +322,39 @@ done:
     free(reg);
     if (complete) t->uploaded = 1;
     return t->upload_valid = complete;
+}
+/* the whole texture, or for a big new ASTC one its lower levels with the rest queued (astc_spread) */
+static int tex_upload(Surf* t) {
+    u32 first = spread_first(t);
+    int ok = tex_upload_levels(t, first, t->levels);
+    if (ok && first) {
+        tex_set_base(t, first);
+        g_spread[g_nspread++] = t;
+        g_spread_st.n++;
+        g_spread_st.px += level_px(t, 0, first);
+    } else if (ok && t->astc_base) { /* a full upload over a queued one (its memory changed): whole now */
+        vk_tex_forget(t);
+        tex_set_base(t, 0);
+    }
+    return ok;
+}
+/* each present: the queued textures' top levels, oldest first, up to the budget. A texture over the budget on its own
+   still goes when it is the first, so the queue always moves */
+static void astc_spread(void) {
+    u64 px = 0;
+    if (g_nspread) g_spread_st.frames++;
+    while (g_nspread && px < g_spread_px) {
+        Surf* t = g_spread[0];
+        u32 base = t->astc_base;
+        u64 n = level_px(t, 0, base);
+        if (px && px + n > g_spread_px) break;
+        if (!tex_upload_levels(t, 0, base)) break; /* staging full: tried again at the next present */
+        vk_tex_forget(t);
+        tex_set_base(t, 0);
+        px += n;
+        g_spread_st.done++;
+        g_spread_st.done_px += n;
+    }
 }
 
 /* change checks: a hash of the whole texture when it is contiguous in host memory, else of 64 bytes of each page
@@ -746,7 +830,7 @@ VkImageView vk_tex_view(Surf* s, VkImageViewType type, int srgb, const VkCompone
                                 .subresourceRange = {stencil      ? VK_IMAGE_ASPECT_STENCIL_BIT
                                                      : s->f.depth ? VK_IMAGE_ASPECT_DEPTH_BIT
                                                                   : VK_IMAGE_ASPECT_COLOR_BIT,
-                                                     0, s->levels, 0, layers}};
+                                                     s->astc_base, s->levels - s->astc_base, 0, layers}};
     /* a view in the image's sRGB twin is sampled only: storage, which a render target may have, has no sRGB format */
     VkImageViewUsageCreateInfo vu = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
                                      .usage = VK_IMAGE_USAGE_SAMPLED_BIT};
@@ -948,6 +1032,15 @@ VkSampler vk_sampler(const u32* tsc, int raise, int integer) {
 
 void vk_tex_frame(void) {
     vk_prompts_frame();
+    astc_spread();
+    if (g_vk_present % 600 == 0 && g_spread_st.n) {
+        LOG("astc-spread: %llu textures drawn from level %u first, their top levels %.1f Mpx decoded over %llu "
+            "presents (%llu done, %.1f Mpx), %d waiting\n",
+            (unsigned long long)g_spread_st.n, SPREAD_SKIP, (double)g_spread_st.px / 1e6,
+            (unsigned long long)g_spread_st.frames, (unsigned long long)g_spread_st.done,
+            (double)g_spread_st.done_px / 1e6, g_nspread);
+        memset(&g_spread_st, 0, sizeof g_spread_st);
+    }
     if (g_vk_present % 600 == 0 && g_ahead.n) { /* every 10 s at 60 */
         LOG("astc-ahead: %llu first uploads, %.1f Mpx, %.1f ms on the render thread (worst %.1f); %llu (%.1f Mpx) "
             "registered 30+ frames before, %llu never registered\n",

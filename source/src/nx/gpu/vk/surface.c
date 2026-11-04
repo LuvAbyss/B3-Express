@@ -638,6 +638,7 @@ static void surf_free(Surf* s) {
         vk_render_end();
         vk_astc_flush(vk_cmd());
     }
+    if (s->astc_base) vk_tex_forget(s);
     if (s->is_rt) {
         for (Surf** pp = &g_rt_first; *pp; pp = &(*pp)->rt_next)
             if (*pp == s) {

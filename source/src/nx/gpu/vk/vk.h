@@ -254,6 +254,9 @@ typedef struct Surf {
     struct Surf* crop;
     u32 crop_gen;
     u8 astc_pending; /* its ASTC levels decoded, their copies waiting in the batch (astc.c): vk_surf_use flushes it */
+    /* the first level its views show: a big new ASTC texture is decoded from this level down, and drawn from it
+       (blurrier), until the levels above are decoded at the next presents (texture.c astc_spread). 0 when whole */
+    u8 astc_base;
     struct Surf* next;
     struct Surf* rt_next; /* real render targets, for overlapping guest-memory writes */
 } Surf;
@@ -344,6 +347,7 @@ VkImageView vk_null_view(VkImageViewType type, int num);
 VkSampler vk_sampler(const u32* tsc, int raise, int integer);
 extern int g_vk_anisotropy; /* anisotropy=, read once at start: the sampler table keeps the samplers it made */
 void vk_tex_frame(void);    /* a frame was presented: evicts what wasn't used for a while */
+void vk_tex_forget(Surf* s); /* s goes: out of the queue of textures whose top levels wait to be decoded */
 
 /* gpu/vk/buffer.c: guest memory [gva, gva + len) as a buffer the GPU reads, valid until the next submit */
 int vk_buf_get(u64 gva, u64 len, VkBuffer* buf, u64* off);

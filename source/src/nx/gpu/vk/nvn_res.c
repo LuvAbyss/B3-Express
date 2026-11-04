@@ -4407,8 +4407,13 @@ void vk_nvn_live_present(u64 gpu, u64 cpu, const char* out, int all) {
                       g_rp.fr_draws, (double)(g_vk_astc_px - g_fr_astc) / 1e6,
                       g_rp.fr_first ? (double)(g_rp.fr_first - g_rp.last_present) / 1e6 : 0.0,
                       g_rp.fr_last ? (double)(now - g_rp.fr_last) / 1e6 : 0.0, g_rp.fr_gpu_busy);
-        if (g_rp.last_present && g_rp.fr_first && g_rp.fr_first - g_rp.last_present > 150000000)
-            plat_prof_spike(g_rp.last_present, g_rp.fr_first, g_rp.frame); /* what ran before the frame's first list */
+        {
+            static u64 spike_ns; /* SNX_NVN_SPIKE_MS: the time before the first window that gets profiled, 150 ms */
+            if (!spike_ns)
+                spike_ns = (getenv("SNX_NVN_SPIKE_MS") ? (u64)atoi(getenv("SNX_NVN_SPIKE_MS")) : 150) * 1000000ull + 1;
+            if (g_rp.last_present && g_rp.fr_first && g_rp.fr_first - g_rp.last_present >= spike_ns)
+                plat_prof_spike(g_rp.last_present, g_rp.fr_first, g_rp.frame); /* what ran before the first list */
+        }
         /* what a frame's picture lacked: a dark frame in play is found by its time here */
         if (g_rp.fr_deferred || g_fr_null)
             LOG_LIMIT(20000, "nvn-live: frame %llu lacks: %u draws for a pipeline (largest target %llu px), %llu textures "

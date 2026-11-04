@@ -51,7 +51,33 @@ interval 1 count (`g_pace_interval`, `present.c`), and the pace line says how ma
 
 Left for the 1% low: ASTC at area entry (first two windows, 233 Mpx in one frame), game CPU frames, and these misses.
 
+## Area entry: ASTC decode spread over frames (s1, s2)
+
+The area entry at frame ~1082 decoded 228-234 Mpx of first-time ASTC in one frame. `--profile=1` with
+`SNX_NVN_SPIKE_MS=60` (the spike threshold, 150 ms by default) showed the next frame's 103-148 ms before its first
+window as every thread idle except the game's, spinning on `plat_ns`: waiting for the GPU's decode. The user chose to
+spread the decode (2026-11-04) over a texture pack at install or a faster decoder.
+
+`texture.c`: a first upload of an ASTC texture with more than two levels and at least 512 x 512 decodes from level 2
+down (1/16 of the work) and is drawn through views starting there (`Surf.astc_base`); its top two levels wait in a
+queue, decoded at each present up to `SNX_ASTC_SPREAD_MPX` (16 Mpx by default, 0 turns it off). The views are
+remade when the texture is whole.
+
+Warm fight, same build, no screenshots (screenshots cost about 100 ms each and made the first try unreadable):
+
+| | spread off | spread on |
+|---|---|---|
+| ASTC in the area-entry frame | 233.6 Mpx | about 17 Mpx |
+| area-entry frames | 92 + 157 ms | 129 (93 of them a pipeline wait, not textures) + 54 ms |
+| slow frames after 30 s, time lost | 17, 1,010 ms | 13, 708 ms |
+| over 33.4 ms at 60 | 23 | 20 |
+
+The route's area entry fades in from black, and the top levels are all in by about 17 presents (frame 1092 already
+sharp in the screenshots). In-play texture loads (frames 3500-6000) spread over 3-39 presents with nothing waiting.
+Not seen yet: a texture drawn soft in full light, and shaders that read a texture's size (they would see the smaller
+level for those few frames).
+
 ## Builds
 
-l1 to l10 in this folder (not tracked). l10 (`7c183773...`) is the candidate: compute preparation, the interval-aware
-1% low, and the logs. Not installed.
+l1 to l11 and s1, s2 in this folder (not tracked). l10 (`7c183773...`): compute preparation, the interval-aware 1% low
+and the logs, committed as `bf7496c`. s2 (`9a46b5ae...`) = l10 + the spread decode + `SNX_NVN_SPIKE_MS`. Not installed.

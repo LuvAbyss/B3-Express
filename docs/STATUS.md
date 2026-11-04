@@ -231,6 +231,10 @@ stretches, about 910 of the fight route's 6000 frames, were 283 of its 287 "33 m
 on the draw thread, 150-185 ms each: shader preparation skipped compute stages. It now prepares them (5,389 stages,
 160 s): 8 to 1, and the five 200-290 ms frames they caused are gone. About 10 graphics compiles (0.6 s) remain,
 keyed in ways preparation can't foresee. Waiting once for a compiling pipeline was tried and dropped (no gain).
+Area entry: the 228-234 Mpx of new ASTC textures decoded in one frame made the game wait 103-157 ms for the GPU. Big
+new textures are now drawn from their third level first and their top two levels decoded over the next presents (16
+Mpx each, `SNX_ASTC_SPREAD_MPX`): the area-entry frames went from 92 + 157 ms to 129 + 54 ms, the 129 almost all a pipeline wait, and time lost to slow frames after
+30 s from 1,010 to 708 ms (build s2 `9a46b5ae...`, not installed).
 Warm runs unchanged. Build l10 (`7c183773...`), not installed, committed as `bf7496c`; `diagnostics/lows-20261104/README.md`.
 
 ## Game and source identity
