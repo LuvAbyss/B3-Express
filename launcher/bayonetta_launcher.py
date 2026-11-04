@@ -309,12 +309,14 @@ def keep_last_log():
 
 
 def game_running(name=NAME):
+    """Read as bytes: tasklist answers in the PC's language and code page, never UTF-8, and a decode error there once
+    made Install do nothing on a non-English Windows. Only the ASCII program name matters"""
     try:
-        out = subprocess.run(['tasklist', '/FI', f'IMAGENAME eq {name}.exe', '/NH'], capture_output=True, text=True,
-                             creationflags=HIDDEN, timeout=10).stdout
+        out = subprocess.run(['tasklist', '/FI', f'IMAGENAME eq {name}.exe', '/NH'], capture_output=True,
+                             creationflags=HIDDEN, timeout=10).stdout or b''
     except (OSError, subprocess.SubprocessError):
         return False
-    return name.lower() in out.lower()
+    return (name + '.exe').lower().encode('ascii') in out.lower()
 
 
 def shaders_ready(cache, scaled):
@@ -356,11 +358,26 @@ def launch_command():
 def gpu_info():
     try:
         out = subprocess.run(['nvidia-smi', '--query-gpu=name,memory.total,driver_version', '--format=csv,noheader,nounits'],
-                             capture_output=True, text=True, creationflags=HIDDEN, timeout=10).stdout
+                             capture_output=True, creationflags=HIDDEN, timeout=10).stdout
+        out = (out or b'').decode('utf8', errors='replace')
         name, memory, driver = [x.strip() for x in out.splitlines()[0].split(',')]
         return f'{name}, {int(memory) / 1024:.0f} GB, driver {driver}'
     except (OSError, subprocess.SubprocessError, ValueError, IndexError):
         return 'No NVIDIA graphics card found. This build is only tested on NVIDIA.'
+
+
+def log_error(kind, value, trace):
+    """Appends the error to logs/launcher-errors.log and returns what to show the player"""
+    import traceback
+    text = ''.join(traceback.format_exception(kind, value, trace))
+    try:
+        LOGS.mkdir(exist_ok=True)
+        with (LOGS / 'launcher-errors.log').open('a', encoding='utf8') as log:
+            log.write(time.strftime('[%Y-%m-%d %H:%M:%S]\n') + text + '\n')
+        where = f'Details are in {LOGS / "launcher-errors.log"}.'
+    except OSError:
+        where = text
+    return f'The launcher hit an error: {value!r}\n{where}\nPlease attach that file to a GitHub issue.'
 
 
 class Launcher(LauncherTheme):
@@ -373,6 +390,9 @@ class Launcher(LauncherTheme):
         self.dirty = False
         self.installing = False
         self.builder = None
+        # pythonw has no console: an error in a button or a thread would vanish and the click would seem to do nothing
+        root.report_callback_exception = lambda *e: self.events.put(('error', log_error(*e)))
+        threading.excepthook = lambda a: self.events.put(('error', log_error(a.exc_type, a.exc_value, a.exc_traceback)))
         root.title('Bayonetta 3')
         root.configure(bg=BG)
         root.geometry(f'{self.px(980)}x{self.px(640)}')
@@ -696,7 +716,7 @@ class Launcher(LauncherTheme):
             if STAMP.exists():  # code without files is from something else: it counts only once built from these
                 STAMP.unlink()
             copy_game(source, lambda percent: self.events.put(('progress', f'Copying your game files: {percent}%')))
-        except OSError as e:
+        except Exception as e:  # the page must never stay on Copying
             shutil.rmtree(GAME / '_copy', ignore_errors=True)
             self.events.put(('installed', f'Installing failed: {error_text(e)}'))
             return
@@ -710,6 +730,10 @@ class Launcher(LauncherTheme):
                 break
             if kind == 'gpu':
                 self.gpu_line.set(value)
+            elif kind == 'error':
+                self.installing = False  # a stuck flag would make every later click do nothing
+                self.refresh()
+                messagebox.showerror('Bayonetta 3', value)
             elif kind == 'exit':
                 self.process = None
                 self.text = INI.read_text(encoding='utf8', newline='') if INI.is_file() else self.text

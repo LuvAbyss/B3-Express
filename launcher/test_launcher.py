@@ -239,4 +239,32 @@ try:
 finally:
     L.subprocess.Popen = real
     L.shutil.rmtree = real_rmtree
+
+# tasklist answers in the PC's code page: German cp850 "ausgeführt" is not UTF-8 (issue 1: Install did nothing)
+class Answer:
+    def __init__(self, stdout):
+        self.stdout = stdout
+
+
+real_run = L.subprocess.run
+try:
+    L.subprocess.run = lambda *a, **k: Answer(b'INFORMATION: Es werden keine Tasks mit den angegebenen Kriterien ausgef\x81hrt.\r\n')
+    assert L.game_running() is False
+    L.subprocess.run = lambda *a, **k: Answer(b'Bayo3_120.exe   1234 Console   1   2.000.000 K\r\n')
+    assert L.game_running() is True
+    L.subprocess.run = lambda *a, **k: Answer(None)  # what a decode failure in run's reader thread leaves
+    assert L.game_running() is False
+    L.subprocess.run = lambda *a, **k: Answer(b'NVIDIA GeForce RTX 3080, 10240, 621.01\r\n')
+    assert L.gpu_info() == 'NVIDIA GeForce RTX 3080, 10 GB, driver 621.01', L.gpu_info()
+    L.subprocess.run = lambda *a, **k: Answer(None)
+    assert 'No NVIDIA' in L.gpu_info()
+finally:
+    L.subprocess.run = real_run
+L.LOGS = Path(tempfile.mkdtemp())
+try:
+    raise KeyError('x')
+except KeyError:
+    shown = L.log_error(*sys.exc_info())
+assert 'KeyError' in shown and 'launcher-errors.log' in shown
+assert 'KeyError' in (L.LOGS / 'launcher-errors.log').read_text(encoding='utf8')
 print('launcher logic: all passed')
