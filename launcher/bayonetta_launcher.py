@@ -407,6 +407,8 @@ class Launcher(LauncherTheme):
         self.process = None
         self.preparing = False
         self.dirty = False
+        self.save_buttons = []
+        self.save_status = tk.StringVar()
         self.installing = False
         self.builder = None
         # pythonw has no console: an error in a button or a thread would vanish and the click would seem to do nothing
@@ -440,6 +442,10 @@ class Launcher(LauncherTheme):
         root.after(100, self.drain)
 
     def close(self):
+        if self.dirty:
+            answer = messagebox.askyesnocancel('Settings', 'Save your changed settings before closing?')
+            if answer is None or (answer and not self.save()):
+                return
         builder = self.builder
         if builder and builder.poll() is None:
             builder.kill()  # the work folder is cleared by the next build
@@ -515,6 +521,7 @@ class Launcher(LauncherTheme):
         self.fade.trace_add('write', self.fade_note)
         self.quality_note()
         self.fade_note()
+        self.save_bar(page)
 
     def build_controller(self):
         page = self.pages['Controller']
@@ -533,6 +540,20 @@ class Launcher(LauncherTheme):
                                                      values=('0', '25', '50', '75', '100')))
         for var in (self.deadzone, self.rumble, self.prompts):
             var.trace_add('write', self.changed)
+        self.save_bar(page)
+
+    def save_bar(self, page):
+        """Save settings, usable once something changed, and what state the settings file is in. Play saves too"""
+        bar = ttk.Frame(page)
+        bar.grid(row=self.next_row(page), column=0, columnspan=2, sticky='w', pady=(26, 0))
+        button = ttk.Button(bar, text='Save settings', command=self.save_clicked, state='disabled')
+        button.pack(side='left')
+        ttk.Label(bar, textvariable=self.save_status, style='Muted.TLabel').pack(side='left', padx=12)
+        self.save_buttons.append(button)
+
+    def save_clicked(self):
+        if self.save():
+            self.refresh()
 
     def check(self, parent, key, label, default='1'):
         var = tk.StringVar(value=ini_get(self.text, key, default))
@@ -577,6 +598,7 @@ class Launcher(LauncherTheme):
     # state
     def changed(self, *_):
         self.dirty = True
+        self.save_status.set('Unsaved changes.')
         self.refresh()
 
     def quality_note(self, *_):
@@ -589,6 +611,8 @@ class Launcher(LauncherTheme):
         self.screen.set(best_screen(self.root.winfo_screenwidth(), self.root.winfo_screenheight()))
 
     def refresh(self):
+        for button in self.save_buttons:
+            button.configure(state='normal' if self.dirty else 'disabled')
         have_files, have_code = installed(), module_ready()
         ready = have_files and have_code
         self.game_line.set('Installed, version 1.2.0' if ready else
@@ -629,7 +653,7 @@ class Launcher(LauncherTheme):
             text = ini_set(text, 'gamepad_rumble', self.rumble.get(), 'gamepad_deadzone')
             text = ini_set(text, 'button_prompts', dict(PROMPTS)[self.prompts.get()], 'gamepad_swap_ab')
             backup = INI.with_suffix('.ini.before-launcher')
-            if not backup.exists():
+            if INI.is_file() and not backup.exists():
                 shutil.copy2(INI, backup)
             temporary = INI.with_suffix('.tmp')
             temporary.write_text(text, encoding='utf8', newline='')
@@ -639,6 +663,9 @@ class Launcher(LauncherTheme):
             return False
         self.text = text
         self.dirty = False
+        self.save_status.set('Settings saved.')
+        for button in self.save_buttons:
+            button.configure(state='disabled')
         return True
 
     def play(self):
