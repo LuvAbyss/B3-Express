@@ -161,6 +161,23 @@ static const SnxModule* load_module(const char* path) {
     return m;
 }
 
+/* fast_renderer=1: the NVN-level renderer (gpu/vk/nvn_res.c) unless the environment says otherwise, so the game
+   started by itself draws as the launcher starts it. Its switches are read with getenv (hle/nvn), so they go into
+   the environment, before nvn_init and before any thread. SNX_NVN_FRONTEND=0 still picks the old renderer */
+static void fast_renderer_default(void) {
+    static const char* const vars[2][2] = {{"SNX_NVN_FRONTEND", "2"}, {"SNX_NVN_RELEASE_ONLY", "1"}};
+    int i;
+    if (!g_opt_fast_renderer || getenv("SNX_NVN_FRONTEND")) return;
+    for (i = 0; i < 2; i++) {
+        if (getenv(vars[i][0])) continue;
+#if defined(_WIN32)
+        _putenv_s(vars[i][0], vars[i][1]);
+#else
+        setenv(vars[i][0], vars[i][1], 0);
+#endif
+    }
+}
+
 /* the dispatch table: a function for each code word the recompiler compiled one for */
 static void dispatch_init(void) {
     u64 words, i;
@@ -425,6 +442,7 @@ int snx_main(int argc, char** argv) {
     if (g_cli_fullscreen >= 0) ini_override("fullscreen", g_cli_fullscreen ? "1" : "0");
     snprintf(ini, sizeof ini, "%s%s.ini", g_confdir, g_exename);
     ini_open(ini);
+    fast_renderer_default();
     snprintf(g_datadir, sizeof g_datadir, "%s%s_data/", g_exedir, g_exename);
     hints_init();
     plat_install_crash_handler();

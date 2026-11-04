@@ -24,7 +24,7 @@
 
 int g_opt_fullscreen, g_opt_docked = 1, g_opt_lang = 1, g_opt_fps = SNX_FPS_GAME, g_opt_diag, g_opt_shadows = 1;
 int g_opt_prof, g_opt_auto_stub_ipc = 1, g_opt_network, g_opt_vsync = 1, g_opt_aniso, g_opt_mute_unfocused = 1;
-int g_opt_cutscene_fps = 30, g_opt_dither = 3;
+int g_opt_cutscene_fps = 30, g_opt_dither = 3, g_opt_fast_renderer = 1;
 float g_opt_resf = 1, g_opt_fsr, g_opt_fsr_sharpness = 0.2f;
 
 /* ---- the runtime's own settings ---- */
@@ -93,6 +93,10 @@ static const IniOpt g_display[] = {
      "30 = the title, menus and cutscenes run at the game's 30; 60 = they run at 60, keeping real time. 60 needs a game\n"
      "module compiled with the .tablecalls file, and does nothing for a game hle/scene60.c doesn't know",
      INI_INT, INI_STARTUP, &g_opt_cutscene_fps, 30, 60, NULL, "Cutscene frame rate", NULL, 0, 0},
+    {"fast_renderer", "1",
+     "1 = the fast renderer (NVN level), also when the game is started without the launcher; 0 = the old one.\n"
+     "SNX_NVN_FRONTEND in the environment overrides it",
+     INI_INT, INI_STARTUP, &g_opt_fast_renderer, 0, 1, NULL, "Fast renderer", "Off|On", 0, 0},
     {"dither", "3",
      "How objects fade (the game's checkerboard): 0 = as the game does, 1 = off, a fading object stays whole,\n"
      "2 = the pattern at the screen's own pixels, even at any resolution, 3 = see-through by blending instead.\n"

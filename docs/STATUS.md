@@ -206,10 +206,18 @@ the first frame 101 ms (a2 INSTALLED 2026-11-03 at the user's request, rollback 
 loop) and the host import of memory pools (up to 313 ms at boot). Build a1 (`7a8d599a...`), not installed;
 `diagnostics/scene-hitch-20261103/README.md`.
 
+## Fast renderer by default (2026-11-04)
+
+The user's a2 play test felt worse because it ran on the old renderer: started without the launcher
+(`Run-Bayonetta3.cmd` or the exe), so `SNX_NVN_FRONTEND=2` and `SNX_NVN_RELEASE_ONLY=1` were missing. The runtime now
+sets both itself when they aren't set (INI `fast_renderer=1`, `main.c` `fast_renderer_default`, before `nvn_init`).
+Checked in the isolated copy: nothing set gives the fast renderer (204 `nvn-live` lines), `SNX_NVN_FRONTEND=0` the
+old one (none); both exit 0 with saves unchanged. Not installed: `output/` holds a2 for the user's play test.
+
 ## Object fade (2026-11-04)
 
-The game fades objects with a 64 x 64 screen-door pattern (429 of 3,755 pixel programs). Build d1 (`953aef25...`, INSTALLED
-2026-11-04 at the user's request, rollback to a2 in `diagnostics/dither-20261104/preserved-installed-d1/`, uncommitted) adds `dither=0..3` (launcher Graphics "Object fade"): the game's, off, even (the pattern at
+The game fades objects with a 64 x 64 screen-door pattern (429 of 3,755 pixel programs). Build d1 (`953aef25...`, installed 2026-11-04,
+then a2 put back the same day at the user's request for a play test; d1's INI and last log kept in `diagnostics/dither-20261104/preserved-installed-d1/`) adds `dither=0..3` (launcher Graphics "Object fade"): the game's, off, even (the pattern at
 the image's own pixels) and transparent (blended by the alpha it compared). All patched programs pass spirv-val; six
 fight runs at 2560x1440 ran clean with no frame time change, and transparent removes the checkerboard on a real fade. A/B on the fight route (2026-11-04, two runs a mode): slow frames 517/502 game, 505/492 off, 511/496
 transparent of 5999, so no cost. Transparent is the default since then, at the user's choice (`dither=3`).
