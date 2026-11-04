@@ -681,8 +681,8 @@ static void prog_shaders(CPU* RESTRICT c, const NvnFn* f) { /* (program, count, 
     }
     nvn_guest(c, f);
     for (i = 0; i < (u64)rec.n; i++)
-        if (!rec.st[i].compute)
-            vk_nvn_prep_add(rec.st[i].stage, rec.st[i].code, rec.st[i].window, rec.st[i].cb, rec.st[i].cb_size);
+        vk_nvn_prep_add(rec.st[i].stage, rec.st[i].code, rec.st[i].window, rec.st[i].cb, rec.st[i].cb_size,
+                        rec.st[i].compute ? rec.st[i].cs_local : NULL, rec.st[i].shared);
     pm_lock(&g_lk);
     {
         ProgRec* p = prog_slot(prog, 1);

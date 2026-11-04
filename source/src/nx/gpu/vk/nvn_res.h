@@ -32,8 +32,9 @@ int vk_nvn_shader(int stage, u64 code_gva, u32 window, int compute_stub, u64 cb1
 /* what a module's translation found: generic inputs read, outputs written, and whether the fragment program header
    declares colour outputs (sph word 18). 0 for no such module */
 int vk_nvn_shader_io(int mod, u32* in_mask, u32* out_mask, u32* frag_outputs);
-/* a vertex or fragment stage the game gave a program: prepared by the workers before a draw needs it */
-void vk_nvn_prep_add(int stage, u64 code_gva, u32 window, u64 cb1_gva, u32 cb1_size);
+/* a vertex, fragment or compute stage the game gave a program: prepared by the workers before a draw or dispatch
+   needs it. cs_local (the workgroup size) and shared are a compute stage's, NULL and 0 for the others */
+void vk_nvn_prep_add(int stage, u64 code_gva, u32 window, u64 cb1_gva, u32 cb1_size, const u32* cs_local, u32 shared);
 
 /* A draw's pipeline in NVN's terms, from the bound state objects (decoded through the driver's getters) and the
    program bound to each stage. Zeroed before it is filled: it is a cache key */

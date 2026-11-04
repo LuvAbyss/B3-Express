@@ -223,6 +223,16 @@ fight runs at 2560x1440 ran clean with no frame time change, and transparent rem
 transparent of 5999, so no cost. Transparent is the default since then, at the user's choice (`dither=3`).
 Details: `diagnostics/dither-20261104/README.md`.
 
+## 1% low (2026-11-04)
+
+The 1% low and "frames over 33.4 ms" now count only frames the game paces at 60 (swap interval 1). Its own 30 FPS
+stretches, about 910 of the fight route's 6000 frames, were 283 of its 287 "33 ms" frames. A truly cold first play
+(NVIDIA's shader cache emptied too, which earlier "cold" runs didn't do) on the launcher path made 8 compute pipelines
+on the draw thread, 150-185 ms each: shader preparation skipped compute stages. It now prepares them (5,389 stages,
+160 s): 8 to 1, and the five 200-290 ms frames they caused are gone. About 10 graphics compiles (0.6 s) remain,
+keyed in ways preparation can't foresee. Waiting once for a compiling pipeline was tried and dropped (no gain).
+Warm runs unchanged. Build l10 (`7c183773...`), not installed, uncommitted; `diagnostics/lows-20261104/README.md`.
+
 ## Game and source identity
 
 - Title ID `01004A4010FEA000`, display version 1.2.0. Main build ID `B47CC79B88B7091EA514B2B725C50AE01C6F00DF`, main SHA-256 `499983f6...`.
@@ -275,5 +285,5 @@ Also open: merging upstream, now 1,872 commits ahead of our base, with NVN as it
 - FSR 1 on Thule, Gomorrah, the kraken and full-screen movies.
 - `mute_unfocused` and the cutscene audio fix, by ear.
 - f5 on the laptop, or any AMD GPU. A CPU of 12 threads for the compile.
-- Other chapters on f5. Tessellation and geometry stages and compute aren't prepared.
+- Other chapters on f5. Tessellation and geometry stages aren't prepared (compute is since l10).
 - A dump extracted by another tool.

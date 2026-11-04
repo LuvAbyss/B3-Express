@@ -32,10 +32,12 @@ void vi_show_buffer(u32 nvmap_id, u32 offset, u32 w, u32 h, u32 pitch, u32 layou
 static PMutex g_pace_lock = PMUTEX_INIT;
 static u64 g_pace_last; /* when the frame before was due, 0 before the first */
 u64 g_pace_slept_ns, g_pace_restarts;
+u32 g_pace_interval = 1;
 
 void present_pace(u32 interval) {
     int fps = __atomic_load_n(&g_opt_fps, __ATOMIC_RELAXED);
     u64 refresh, period, now, next, late;
+    __atomic_store_n(&g_pace_interval, interval, __ATOMIC_RELAXED);
     if (!fps || (fps == SNX_FPS_GAME && !interval)) return;
     refresh = 1000000000u / (fps == SNX_FPS_GAME ? (u64)VI_REFRESH_HZ : (u64)fps);
     period = fps == SNX_FPS_GAME ? refresh * interval : refresh;

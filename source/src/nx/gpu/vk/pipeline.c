@@ -567,6 +567,12 @@ static VkPipeline lib_get(u32 part, const PipeKey* m, const VkGraphicsPipelineCr
     l->p = lib_compile(part, gi);
     t0 = plat_ns() - t0;
     __atomic_store_n(&l->pending, 0, __ATOMIC_RELEASE);
+    if (t0 > 30000000ull) /* a draw's library the driver's cache didn't have: what shader preparation missed */
+        LOG_LIMIT(400, "vk: a %s library took %.1f ms: geometry or tessellation %d, polygon %d, depth clamp %d\n",
+                  part == LIB_PR   ? "vertex"
+                  : part == LIB_FS ? "fragment"
+                                   : "state",
+                  (double)t0 / 1e6, m->gs || m->tes, m->polygon, m->depth_clamp);
     pm_lock(&g_lib_lk);
     g_libs.n[part]++;
     g_libs.ns[part] += t0;

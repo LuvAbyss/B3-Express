@@ -369,9 +369,10 @@ int vk_nvn_shader(int stage, u64 code_gva, u32 window, int compute_stub, u64 cb1
 /* The game gives every program long before it draws with it (fight: a median of 78 s), and the keys are predictable: 96%
    of fragment stages draw with an empty key, vertex stages with every clip distance on and attribute 2 either way. So
    workers translate each stage for those keys and compile its library into the driver's pipeline cache, then destroy it.
-   A draw's own compile finds the cache. A wrong guess costs what it cost before. Hashes of stages done are kept beside
-   the cache, per driver and scale mode. The workers stop in heavy frames: the driver's compiles take the cores the game
-   needs */
+   A draw's own compile finds the cache. Compute stages go the same way with an empty key, as most dispatches use them:
+   their pipelines are made on the draw thread, with no budget to wait in (150-180 ms each on a new driver cache). A
+   wrong guess costs what it cost before. Hashes of stages done are kept beside the cache, per driver and scale mode.
+   The workers stop in heavy frames: the driver's compiles take the cores the game needs */
 #define PREP_QUEUE    32768u
 #define PREP_SET      (1u << 17)
 #define PREP_HEAVY    200u /* draws in a frame */
@@ -380,6 +381,7 @@ typedef struct {
     int stage;
     u64 code, cb, hash;
     u32 window, cb_size;
+    u32 cs_local[3], shared; /* a compute stage's workgroup size and shared memory, which its SPIR-V holds */
 } PrepJob;
 static PrepJob* g_prq;
 static u32 g_prq_in, g_prq_out, g_prep_heavy;
@@ -389,9 +391,10 @@ static int g_prep_on = -1, g_prep_started, g_prep_run, g_prep_busy;
 static u64 g_prep_quiet; /* a pass: when the last stage arrived or was finished */
 static FILE* g_prf;
 static u64 g_pr_set, g_pr_done, g_pr_gone, g_pr_ns, g_pr_paused;
+#define PREP_GONE ~0ull       /* a set entry taken out: probes go past it */
 static int prep_seen(u64 h) { /* adds it: 1 when it was there. Lock held */
     u32 i = (u32)h & (PREP_SET - 1), n;
-    if (!h) h = 1;
+    if (!h || h == PREP_GONE) h = 1;
     for (n = 0; n < PREP_SET; n++, i = (i + 1) & (PREP_SET - 1)) {
         if (g_prseen[i] == h) return 1;
         if (!g_prseen[i]) {
@@ -401,7 +404,27 @@ static int prep_seen(u64 h) { /* adds it: 1 when it was there. Lock held */
     }
     return 1;
 }
-void vk_nvn_prep_add(int stage, u64 code_gva, u32 window, u64 cb1_gva, u32 cb1_size) {
+/* takes h out of the set, for a stage whose memory the game reused before a worker got to it: when the game gives the
+   same stage again, it is queued again instead of passed over as done. Lock held */
+static void prep_forget(u64 h) {
+    u32 i = (u32)h & (PREP_SET - 1), n;
+    if (!h || h == PREP_GONE) h = 1;
+    for (n = 0; n < PREP_SET && g_prseen[i]; n++, i = (i + 1) & (PREP_SET - 1))
+        if (g_prseen[i] == h) {
+            g_prseen[i] = PREP_GONE;
+            return;
+        }
+}
+/* a stage's identity: its code, its constant buffer 1 (cb, NULL for none), and for compute its workgroup size and
+   shared memory. The worker checks it again, against what the game may have overwritten since */
+static u64 prep_hash(int stage, const u8* code, u32 window, const u8* cb, u32 cb_size, const u32* cs_local,
+                     u32 shared) {
+    u64 h = vk_hash(code, window) ^ (u64)stage * 0x9E3779B97F4A7C15ull;
+    if (cb) h ^= vk_hash(cb, cb_size) * 3;
+    if (stage == ST_CS) h ^= vk_hash(cs_local, 3 * sizeof *cs_local) * 5 ^ shared;
+    return h;
+}
+void vk_nvn_prep_add(int stage, u64 code_gva, u32 window, u64 cb1_gva, u32 cb1_size, const u32* cs_local, u32 shared) {
     const u8* code = window <= 0x10000 ? gmem_ptr_untracked(code_gva, window) : NULL;
     const u8* cb = cb1_size && cb1_size <= 0x10000 ? gmem_ptr_untracked(cb1_gva, cb1_size) : NULL;
     u64 h;
@@ -409,9 +432,8 @@ void vk_nvn_prep_add(int stage, u64 code_gva, u32 window, u64 cb1_gva, u32 cb1_s
         const char* e = getenv("SNX_NVN_PREP");
         g_prep_on = !(e && e[0] == '0');
     }
-    if (!g_prep_on || !code || (stage != ST_VS && stage != ST_FS)) return;
-    h = vk_hash(code, window) ^ (u64)stage * 0x9E3779B97F4A7C15ull;
-    if (cb) h ^= vk_hash(cb, cb1_size) * 3;
+    if (!g_prep_on || !code || (stage != ST_VS && stage != ST_FS && (stage != ST_CS || !cs_local))) return;
+    h = prep_hash(stage, code, window, cb, cb1_size, cs_local, shared);
     pm_lock(&g_prq_lk);
     if (!g_prq) {
         g_prq = calloc(PREP_QUEUE, sizeof *g_prq);
@@ -427,6 +449,10 @@ void vk_nvn_prep_add(int stage, u64 code_gva, u32 window, u64 cb1_gva, u32 cb1_s
         j->window = window;
         j->cb_size = cb ? cb1_size : 0;
         j->hash = h;
+        if (stage == ST_CS) {
+            memcpy(j->cs_local, cs_local, sizeof j->cs_local);
+            j->shared = shared;
+        }
     }
     pm_unlock(&g_prq_lk);
 }
@@ -437,14 +463,39 @@ static int prep_key(const PrepJob* j, const u8* code, const NvnStageKey* key, u3
     u32* spv;
     VkShaderModule m = VK_NULL_HANDLE;
     vk_lock();
-    spv = stage_spirv(j->stage, code, j->window, 0, j->cb, j->cb_size, NULL, 0, key, &si, &words);
+    /* compute code comes without a program header, as cmdlist.c records it: framed as vk_nvn_shader frames it */
+    spv = stage_spirv(j->stage, code, j->window, j->stage == ST_CS, j->cb, j->cb_size,
+                      j->stage == ST_CS ? j->cs_local : NULL, j->shared, key, &si, &words);
     vk_unlock();
     if (!spv) return 0;
     *in_mask = si.in_mask;
+    {
+        static int show = -1; /* SNX_NVN_PREP_LOG=1: each prepared stage's SPIR-V hash, to match against draws' */
+        if (show < 0) show = getenv("SNX_NVN_PREP_LOG") && getenv("SNX_NVN_PREP_LOG")[0] == '1';
+        if (show) {
+            u32 h = 2166136261u;
+            size_t w;
+            for (w = 0; w < words; w++) h = (h ^ spv[w]) * 16777619u;
+            LOG("nvn-live: prepared stage %d: %08x (clip %x, int %x, unfed %x)\n", j->stage, h, key->clip,
+                key->int_mask, key->unfed);
+        }
+    }
     VkShaderModuleCreateInfo mi = {
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = words * 4, .pCode = spv};
     if (vkCreateShaderModule(g_vk.dev, &mi, NULL, &m) == VK_SUCCESS) {
-        vk_pipeline_prep(m, j->stage == ST_VS);
+        if (j->stage == ST_CS) { /* as vk_nvn_compute_pipeline makes it on the draw thread, there 150-180 ms cold */
+            VkPipeline p = VK_NULL_HANDLE;
+            VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                              .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                                                        .module = m,
+                                                        .pName = "main"},
+                                              .layout = g_vk_playout};
+            if (vkCreateComputePipelines(g_vk.dev, vk_pipeline_cache(), 1, &ci, NULL, &p) == VK_SUCCESS)
+                vkDestroyPipeline(g_vk.dev, p, NULL);
+        } else {
+            vk_pipeline_prep(m, j->stage == ST_VS);
+        }
         vkDestroyShaderModule(g_vk.dev, m, NULL);
     }
     free(spv);
@@ -475,11 +526,12 @@ static void prep_worker(void* arg) {
         pm_unlock(&g_prq_lk);
         code = gmem_ptr_untracked(j.code, j.window);
         /* the game may have freed the program since: only what is still the same bytes */
-        if (!code || (vk_hash(code, j.window) ^ (u64)j.stage * 0x9E3779B97F4A7C15ull ^
-                      (j.cb ? vk_hash(gmem_ptr_untracked(j.cb, j.cb_size), j.cb_size) * 3 : 0)) != j.hash) {
+        if (!code || prep_hash(j.stage, code, j.window, j.cb ? gmem_ptr_untracked(j.cb, j.cb_size) : NULL, j.cb_size,
+                               j.cs_local, j.shared) != j.hash) {
             pm_lock(&g_prq_lk);
             g_pr_gone++;
             g_prep_busy--;
+            prep_forget(j.hash);
             pm_unlock(&g_prq_lk);
             continue;
         }
@@ -763,6 +815,17 @@ static void pipe_worker(void* arg) {
         p->t_done = plat_ns();
         q = p->t_begun - p->t_queued;
         m = p->t_done - p->t_begun;
+        if (m > 30000000ull) { /* a real compile, not the driver's cache: what shader preparation didn't have */
+            const ShaderInfo* v = p->d.mod[0] >= 0 ? &g_mod[p->d.mod[0]].si : NULL;
+            const ShaderInfo* f = p->d.mod[4] >= 0 ? &g_mod[p->d.mod[4]].si : NULL;
+            LOG_LIMIT(400,
+                      "nvn-live: a pipeline took %.1f ms to make: vertex %08x (clip %x, int %x), fragment %08x "
+                      "(int rt %x, int tex %llx, unfed %x, dc %llx)\n",
+                      (double)m / 1e6, v ? g_mod[p->d.mod[0]].spv_hash : 0, v ? v->clip_enable : 0,
+                      v ? v->attr_int_mask : 0, f ? g_mod[p->d.mod[4]].spv_hash : 0, f ? f->rt_int_mask : 0,
+                      f ? (unsigned long long)f->tex_int_mask : 0, f ? f->in_unfed_mask : 0,
+                      f ? (unsigned long long)f->tex_dc_color_mask : 0);
+        }
         pm_lock(&g_pq_lk);
         g_ps.made++;
         g_ps.queue_ns += q;
@@ -986,9 +1049,17 @@ static NvnPipe* pipe_get(const NvnPipeDesc* d, int* made) { /* the cache entry f
             if (g_rp_real && pipe_budget_ns() && pipe_enqueue(p))
                 *made = 1;
             else {
+                u64 t0 = plat_ns(), t;
                 vk_lock(); /* the renderer's pipeline table and cache */
                 p->p = vk_pipeline_get(&k);
                 vk_unlock();
+                t = plat_ns() - t0;
+                if (t > 5000000ull)
+                    LOG_LIMIT(400,
+                              "nvn-live: a pipeline took %.1f ms to make on the draw thread: vertex %08x, fragment "
+                              "%08x\n",
+                              (double)t / 1e6, d->mod[0] >= 0 ? g_mod[d->mod[0]].spv_hash : 0,
+                              d->mod[4] >= 0 ? g_mod[d->mod[4]].spv_hash : 0);
                 if (!p->p) snprintf(p->why, sizeof p->why, "vkCreateGraphicsPipelines failed");
                 *made = p->p != VK_NULL_HANDLE;
             }
@@ -1018,12 +1089,17 @@ int vk_nvn_compute_pipeline(int mod, int* made, char* why, u32 why_size) {
                                                     .module = g_mod[mod].mod,
                                                     .pName = "main"},
                                           .layout = g_vk_playout};
+        u64 t0 = plat_ns(), t;
         tried[mod] = 1;
         vk_lock();
         if (!VK_OK(vkCreateComputePipelines(g_vk.dev, vk_pipeline_cache(), 1, &ci, NULL, &pipe[mod])))
             pipe[mod] = VK_NULL_HANDLE;
         vk_unlock();
         *made = pipe[mod] != VK_NULL_HANDLE;
+        t = plat_ns() - t0;
+        if (t > 5000000ull) /* made on the draw thread: what shader preparation missed */
+            LOG_LIMIT(400, "nvn-live: a compute pipeline took %.1f ms to make on the draw thread: %08x\n",
+                      (double)t / 1e6, g_mod[mod].spv_hash);
     }
     if (!pipe[mod]) snprintf(why, why_size, "vkCreateComputePipelines failed");
     return pipe[mod] != VK_NULL_HANDLE;
@@ -1541,6 +1617,7 @@ static struct {
     u32 fr_draws;
     u64 fr_first, fr_last; /* this frame: the first window's start, the last one's end */
     u64 p_frames, p_over, p_win, p_lock, p_before, p_after, p_busy; /* the same since the last stats, in ns */
+    u64 p_at60, p_at30; /* frames the game paced at 60 (swap interval 1, the ones p_over counts) and at 30 or less */
     u64 p_slept, p_restarts; /* the pacer's counters at the last stats */
     int fr_gpu_busy;       /* the GPU still had earlier work when the frame's first window opened */
     u64 win_start, win_ns, win_ns_seen, frame_seen;
@@ -4310,10 +4387,18 @@ void vk_nvn_live_present(u64 gpu, u64 cpu, const char* out, int all) {
     g_rp.frame++;
     {
         u64 now = plat_ns(), d = now - g_rp.last_present;
+        static u64 slow_ns; /* SNX_NVN_SLOW_MS: frames past it get their breakdown line, 50 ms when unset */
+        int at60;
+        if (!slow_ns)
+            slow_ns = (getenv("SNX_NVN_SLOW_MS") ? (u64)atoi(getenv("SNX_NVN_SLOW_MS")) : 50) * 1000000ull + 1;
         if (g_rp.last_present && d > g_rp.worst_ns) g_rp.worst_ns = d;
         g_rp.slow_frames += g_rp.last_present && d > 50000000;
-        if (g_rp.last_present) g_ft[d / 1000000 < 255 ? d / 1000000 : 255]++;
-        if (g_rp.last_present && d > 50000000)
+        /* the 1% low is play's: frames the game itself asked to come at 30 FPS or less (swap interval 2 and more:
+           loads, in-engine scenes) are 33 ms by design, and counting them made a session with more of those read as
+           stutter */
+        at60 = __atomic_load_n(&g_pace_interval, __ATOMIC_RELAXED) <= 1;
+        if (g_rp.last_present && at60) g_ft[d / 1000000 < 255 ? d / 1000000 : 255]++;
+        if (g_rp.last_present && d >= slow_ns)
             LOG_LIMIT(20000, "nvn-live: frame %llu took %.1f ms: windows %.1f, of which texture lookups %.1f (%u) and "
                            "pipeline waits %.1f; vk_lock waits %.1f; draws %u; ASTC %.1f Mpx; before the first "
                            "window %.1f, after the last %.1f, GPU busy at its start %d\n",
@@ -4334,7 +4419,9 @@ void vk_nvn_live_present(u64 gpu, u64 cpu, const char* out, int all) {
         g_rp.fr_deferred_area = g_fr_null = g_fr_null_area = 0;
         if (g_rp.last_present) {
             g_rp.p_frames++;
-            g_rp.p_over += d > 33400000;
+            g_rp.p_over += at60 && d > 33400000;
+            g_rp.p_at60 += at60;
+            g_rp.p_at30 += !at60;
             g_rp.p_win += g_rp.fr_win;
             g_rp.p_lock += g_rp.fr_lock;
             g_rp.p_before += g_rp.fr_first ? g_rp.fr_first - g_rp.last_present : 0;
@@ -4520,14 +4607,15 @@ void vk_nvn_live_stats(u64 frames) {
         u64 restarts = __atomic_load_n(&g_pace_restarts, __ATOMIC_RELAXED);
         LOG("nvn-live: pace, a frame on average: before the first window %.1f ms, windows %.1f (vk_lock %.1f), after the "
             "last %.1f; held by the pacer %.1f; frames over 33.4 ms %llu of %llu; schedule restarts %llu; GPU busy at the "
-            "first window %llu\n",
+            "first window %llu; at the game's 30 FPS or less %llu\n",
             (double)g_rp.p_before / n / 1e6, (double)g_rp.p_win / n / 1e6, (double)g_rp.p_lock / n / 1e6,
             (double)g_rp.p_after / n / 1e6, (double)(slept - g_rp.p_slept) / n / 1e6, (unsigned long long)g_rp.p_over,
-            (unsigned long long)g_rp.p_frames, (unsigned long long)(restarts - g_rp.p_restarts),
-            (unsigned long long)g_rp.p_busy);
+            (unsigned long long)g_rp.p_at60, (unsigned long long)(restarts - g_rp.p_restarts),
+            (unsigned long long)g_rp.p_busy, (unsigned long long)g_rp.p_at30);
         g_rp.p_slept = slept;
         g_rp.p_restarts = restarts;
         g_rp.p_frames = g_rp.p_over = g_rp.p_win = g_rp.p_lock = g_rp.p_before = g_rp.p_after = g_rp.p_busy = 0;
+        g_rp.p_at60 = g_rp.p_at30 = 0;
     }
     vk_mem_log();
     LOG("nvn-live: %llu frames: draws %llu, drawn %llu; clears %llu, done %llu; dispatches %llu, done %llu; left out "

@@ -33,6 +33,9 @@ void vi_show_buffer(u32 nvmap_id, u32 offset, u32 w, u32 h, u32 pitch, u32 layou
    frame before has been on the display for interval refreshes (its swap interval) */
 void present_pace(u32 interval);
 extern u64 g_pace_slept_ns, g_pace_restarts; /* time present_pace held the game back; schedules given up as too late */
+/* the swap interval of the frame present_pace last paced: 2 and more are the game's own 30 FPS (or lower) stretches,
+   loads and in-engine scenes, which the renderer's smoothness numbers leave out */
+extern u32 g_pace_interval;
 /* a buffer in guest memory at a as RGBA8 into out (w * h words), for one no render target holds */
 void vi_convert_cpu(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt, u32* out);
 
