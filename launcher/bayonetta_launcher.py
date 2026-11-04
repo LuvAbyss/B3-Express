@@ -239,6 +239,25 @@ def build_code(report, started=lambda process: None):
     return None
 
 
+# the game's dither values (gpu/vk/dither.c), as the Graphics page names them
+FADES = (('Game', '0'), ('Off', '1'), ('Even pattern', '2'), ('Transparent', '3'))
+FADE_HELP = {'Game': 'Fading objects use the game\'s checkerboard, as on the Switch.',
+             'Off': 'No checkerboard. Objects that would fade stay solid, so one near the camera can block the view.',
+             'Even pattern': 'The checkerboard at your screen\'s own pixels: fine and even on Balanced and Sharp. '
+                             'Smooth 60 looks the same as Game.',
+             'Transparent': 'Recommended. Fading objects are see-through instead of checkered. Things behind them can be hidden '
+                            'or drawn in the wrong order.'}
+
+
+def prep_mode(text):
+    """What the game's prepared shaders are for, as it writes it (nvn_res.c prep_mode): the scaling, plus 2 x dither"""
+    try:
+        dither = max(0, min(3, int(ini_get(text, 'dither', '3'))))
+    except ValueError:
+        dither = 0
+    return int(scaled_mode(text)) + 2 * dither
+
+
 # the game's button_prompts values, as the Controller page names them
 PROMPTS = (('Auto', '0'), ('Switch', '1'), ('PlayStation', '2'), ('Xbox', '3'))
 
@@ -483,10 +502,19 @@ class Launcher(LauncherTheme):
         self.aniso = tk.StringVar(value=ini_get(self.text, 'anisotropy', '0'))
         self.row(page, 'Texture filtering', ttk.Combobox(page, textvariable=self.aniso, state='readonly', width=20,
                                                          values=('0', '2', '4', '8', '16')), '0 = as the game asks.')
-        for var in (self.screen, self.quality, self.aniso):
+        names = [n for n, _ in FADES]
+        self.fade = tk.StringVar(value=dict((v, n) for n, v in FADES).get(ini_get(self.text, 'dither', '3'), names[3]))
+        self.row(page, 'Object fade', ttk.Combobox(page, textvariable=self.fade, state='readonly', width=20,
+                                                   values=names))
+        self.fade_help = tk.StringVar()
+        ttk.Label(page, textvariable=self.fade_help, style='Muted.TLabel', wraplength=self.px(560), justify='left').grid(
+            row=self.next_row(page), column=1, sticky='w', pady=(4, 0))
+        for var in (self.screen, self.quality, self.aniso, self.fade):
             var.trace_add('write', self.changed)
         self.quality.trace_add('write', self.quality_note)
+        self.fade.trace_add('write', self.fade_note)
         self.quality_note()
+        self.fade_note()
 
     def build_controller(self):
         page = self.pages['Controller']
@@ -554,6 +582,9 @@ class Launcher(LauncherTheme):
     def quality_note(self, *_):
         self.quality_help.set(QUALITY_HELP.get(self.quality.get(), 'Set by hand in the settings file.'))
 
+    def fade_note(self, *_):
+        self.fade_help.set(FADE_HELP[self.fade.get()])
+
     def use_my_screen(self):
         self.screen.set(best_screen(self.root.winfo_screenwidth(), self.root.winfo_screenheight()))
 
@@ -593,6 +624,7 @@ class Launcher(LauncherTheme):
             for key, var in self.flags.items():
                 text = ini_set(text, key, var.get(), 'fullscreen')
             text = ini_set(text, 'anisotropy', self.aniso.get(), 'vsync')
+            text = ini_set(text, 'dither', dict(FADES)[self.fade.get()], 'resolution')
             text = ini_set(text, 'gamepad_deadzone', self.deadzone.get(), 'gamepad_swap_ab')
             text = ini_set(text, 'gamepad_rumble', self.rumble.get(), 'gamepad_deadzone')
             text = ini_set(text, 'button_prompts', dict(PROMPTS)[self.prompts.get()], 'gamepad_swap_ab')
@@ -615,7 +647,7 @@ class Launcher(LauncherTheme):
         if game_running():
             self.status.set('The game is already running.')
             return
-        self.preparing = can_prepare() and not shaders_ready(GAME / 'shader_cache', scaled_mode(self.text))
+        self.preparing = can_prepare() and not shaders_ready(GAME / 'shader_cache', prep_mode(self.text))
         try:
             keep_last_log()
             env = dict(os.environ, **ENV)
@@ -739,7 +771,7 @@ class Launcher(LauncherTheme):
                 self.text = INI.read_text(encoding='utf8', newline='') if INI.is_file() else self.text
                 if self.preparing:
                     self.preparing = False
-                    if shaders_ready(GAME / 'shader_cache', scaled_mode(self.text)):
+                    if shaders_ready(GAME / 'shader_cache', prep_mode(self.text)):
                         self.play()
                     else:
                         self.status.set('Shader preparation stopped. Play goes on from where it was.')

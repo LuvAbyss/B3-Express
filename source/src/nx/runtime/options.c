@@ -24,7 +24,7 @@
 
 int g_opt_fullscreen, g_opt_docked = 1, g_opt_lang = 1, g_opt_fps = SNX_FPS_GAME, g_opt_diag, g_opt_shadows = 1;
 int g_opt_prof, g_opt_auto_stub_ipc = 1, g_opt_network, g_opt_vsync = 1, g_opt_aniso, g_opt_mute_unfocused = 1;
-int g_opt_cutscene_fps = 30;
+int g_opt_cutscene_fps = 30, g_opt_dither = 3;
 float g_opt_resf = 1, g_opt_fsr, g_opt_fsr_sharpness = 0.2f;
 
 /* ---- the runtime's own settings ---- */
@@ -93,6 +93,11 @@ static const IniOpt g_display[] = {
      "30 = the title, menus and cutscenes run at the game's 30; 60 = they run at 60, keeping real time. 60 needs a game\n"
      "module compiled with the .tablecalls file, and does nothing for a game hle/scene60.c doesn't know",
      INI_INT, INI_STARTUP, &g_opt_cutscene_fps, 30, 60, NULL, "Cutscene frame rate", NULL, 0, 0},
+    {"dither", "3",
+     "How objects fade (the game's checkerboard): 0 = as the game does, 1 = off, a fading object stays whole,\n"
+     "2 = the pattern at the screen's own pixels, even at any resolution, 3 = see-through by blending instead.\n"
+     "Bayonetta 3 only (gpu/vk/dither.c). 3 costs nothing measurable (diagnostics/dither-20261104)",
+     INI_INT, INI_STARTUP, &g_opt_dither, 0, 3, NULL, "Object fade", "Game|Off|Even|Blend", 0, 0},
     {"language", "1",
      "The game's language: 0 Japanese, 1 English (US), 2 French, 3 German, 4 Italian, 5 Spanish, 6 Chinese, 7 Korean,\n"
      "8 Dutch, 9 Portuguese, 10 Russian, 11 Taiwanese, 12 English (UK), 13 French (Canada), 14 Spanish (Latin\n"

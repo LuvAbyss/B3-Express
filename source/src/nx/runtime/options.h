@@ -43,6 +43,7 @@ extern float g_opt_fsr, g_opt_fsr_sharpness; /* fsr: scene smaller than resoluti
 extern int g_opt_vsync;   /* vsync: 0 = at once, 1 = mailbox, 2 = FIFO */
 extern int g_opt_mute_unfocused; /* mute_unfocused: 1 = the sound stops while another window has the focus */
 extern int g_opt_cutscene_fps;   /* cutscene_fps: 30 as the game asks, 60 where hle/scene60.c knows the game */
+extern int g_opt_dither;         /* dither: the game's screen-door fade, gpu/vk/dither.h's DITHER_* */
 extern int g_opt_aniso;   /* anisotropy: 0 = the game's, else at least that much for mipmapped 2D textures */
 
 #endif

@@ -267,4 +267,9 @@ except KeyError:
     shown = L.log_error(*sys.exc_info())
 assert 'KeyError' in shown and 'launcher-errors.log' in shown
 assert 'KeyError' in (L.LOGS / 'launcher-errors.log').read_text(encoding='utf8')
+
+# the shader preparation key, as the game writes it (nvn_res.c prep_mode): scaling + 2 x dither, dither 3 by default
+assert L.prep_mode('resolution=1.6\nfsr=0\n') == 7
+assert L.prep_mode('resolution=1\nfsr=0\ndither=0\n') == 0 and L.prep_mode('resolution=1.6\ndither=0\n') == 1
+assert L.prep_mode('resolution=1\ndither=x\n') == 0 and L.prep_mode('resolution=1\ndither=9\n') == 6
 print('launcher logic: all passed')

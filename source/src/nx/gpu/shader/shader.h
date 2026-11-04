@@ -55,6 +55,7 @@ typedef struct {
     u32 cs_local[3];
     int shared_size;
     u32 gbuf_wmask; /* global buffers the program writes */
+    int dither_blend; /* gpu/vk/dither.c made the fade a blend: it writes its alpha at location 0, index 1 */
     struct {
         u32 cbuf_off;
         u8 type, bindless, bl_cbuf, kind; /* kind: 0 float store, 1 unsigned atomic, 2 unsigned store */

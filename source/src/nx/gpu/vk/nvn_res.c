@@ -10,6 +10,7 @@
 #include "nx/gpu/vk/nvn_res.h"
 #include "nx/runtime/main.h"
 #include "nx/gpu/vk/fsr1.h"
+#include "nx/gpu/vk/dither.h"
 #include "nx/runtime/main.h"
 #include "nx/runtime/platform/plat.h"
 #include "nx/runtime/options.h"
@@ -25,6 +26,9 @@ void vk_nvn_window_size(u32 w, u32 h) {
 static int rp_fsr_on(void) { return g_opt_fsr > 1.0f && vk_fsr1_ready(); }
 static float rp_scene_scale(void) { return rp_fsr_on() ? g_vk_scale / g_opt_fsr : g_vk_scale; }
 static int rp_scaling(void) { return g_vk_scale != 1.0f || rp_fsr_on(); }
+/* what prepared shaders are for, beside the driver: the scaling (FragCoord in the game's pixels) and dither=N, which
+   change pixel stages. 0 and 1 with dither=0, as before it existed. The launcher reads it back (shaders_ready) */
+static int prep_mode(void) { return rp_scaling() + 2 * g_opt_dither; }
 
 /* c7 (the video memory copies, below): the GPU's blocks of a range land in guest memory before the CPU reads it */
 static void own_land_range(int p, u64 off, u64 size);
@@ -231,6 +235,28 @@ static int cb1_read(u32 idx, u32 off, u32* out) {
     memcpy(out, g_cb1 + off, 4);
     return 1;
 }
+/* dither=N: the game's screen-door fade in a pixel stage, changed as gpu/vk/dither.c says. SNX_DITHER_FADE=a (test
+   only) gives every fading object alpha a, so the pattern shows on everything that has it. Blending needs dual-source
+   blending: without it the fade is only switched off */
+static void dither_stage(u32** spv, size_t* words, ShaderInfo* si) {
+    static int mode = -1, stages, compares;
+    static float fade = -1.0f;
+    int n, blend = 0;
+    if (mode < 0) {
+        const char* e = getenv("SNX_DITHER_FADE");
+        mode = g_opt_dither;
+        if (mode == DITHER_BLEND && !g_vk.feat.dualSrcBlend) mode = DITHER_OFF;
+        if (e && *e) fade = (float)atof(e);
+        LOG("nvn-live: object fade %d (%s)%s\n", mode, (const char*[]){"game", "off", "even", "blend"}[mode],
+            fade >= 0.0f ? ", every fade at a fixed alpha (SNX_DITHER_FADE)" : "");
+    }
+    if (mode == DITHER_GAME && fade < 0.0f) return;
+    n = dither_patch(spv, words, mode, fade, &blend);
+    if (!n) return;
+    si->dither_blend = blend;
+    stages++, compares += n;
+    if (stages <= 3 || stages % 100 == 0) LOG("nvn-live: object fade: %d stages changed, %d fades\n", stages, compares);
+}
 /* the stage's SPIR-V for key, the caller to free it. Under vk_lock: the translator's state is shared */
 static u32* stage_spirv(int stage, const u8* code, u32 window, int compute_stub, u64 cb1_gva, u32 cb1_size,
                         const u32* cs_local, u32 shared, const NvnStageKey* key, ShaderInfo* out, size_t* words) {
@@ -275,6 +301,7 @@ static u32* stage_spirv(int stage, const u8* code, u32 window, int compute_stub,
     g_shader_instance_base_builtin = g_vk.has_shader_draw_parameters;
     spv = vk_translate_spirv(code, window, stage, &si, words, cb1_read, &reads);
     g_shader_instance_base_builtin = 0;
+    if (spv && stage == ST_FS) dither_stage(&spv, words, &si);
     g_cb1 = NULL;
     free(reads.r);
     *out = si;
@@ -505,7 +532,7 @@ static void prep_frame(u32 draws) {
             snprintf(path, sizeof path, "%s/prepared.txt", vk_pipeline_cache_dir());
             f = fopen(path, "w");
             if (f) {
-                fprintf(f, "%08x %d\n", g_vk.props.driverVersion, rp_scaling());
+                fprintf(f, "%08x %d\n", g_vk.props.driverVersion, prep_mode());
                 fclose(f);
             }
             vk_pipeline_mark_dirty();
@@ -531,11 +558,11 @@ static void prep_frame(u32 draws) {
         snprintf(path, sizeof path, "%s/gpu.txt", vk_pipeline_cache_dir());
         f = fopen(path, "w");
         if (f) { /* for the launcher: what this run's shaders are for */
-            fprintf(f, "%08x %d\n", g_vk.props.driverVersion, rp_scaling());
+            fprintf(f, "%08x %d\n", g_vk.props.driverVersion, prep_mode());
             fclose(f);
         }
         snprintf(path, sizeof path, "%s/prepared_%08x_%d.bin", vk_pipeline_cache_dir(), g_vk.props.driverVersion,
-                 rp_scaling());
+                 prep_mode());
         pm_lock(&g_prq_lk);
         f = fopen(path, "rb");
         if (f) { /* stages done by earlier runs: what the queue holds of them goes without a compile */
@@ -918,6 +945,15 @@ static int pipe_key(const NvnPipeDesc* d, PipeKey* k, u32* bstream, char* why, u
             k->blend[i].cop = blend_op(b[4]);
             k->blend[i].aop = blend_op(b[5]);
         }
+    }
+    /* dither=3: a fading object blends by the alpha its stage now writes as the second source (dither.c), where the
+       game draws it unblended into one target, the most dual-source blending allows */
+    if (d->mod[4] >= 0 && g_mod[d->mod[4]].si.dither_blend && d->ncolor == 1 && k->color[0] && !k->blend[0].en &&
+        g_vk.props.limits.maxFragmentDualSrcAttachments >= 1) {
+        k->blend[0].en = 1;
+        k->blend[0].sc = k->blend[0].sa = VK_BLEND_FACTOR_SRC1_ALPHA;
+        k->blend[0].dc = k->blend[0].da = VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
+        k->blend[0].cop = k->blend[0].aop = VK_BLEND_OP_ADD;
     }
     if (d->depth_format) {
         VkFormat f = target_fmt(d->depth_format);

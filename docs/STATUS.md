@@ -206,6 +206,15 @@ the first frame 101 ms (a2 INSTALLED 2026-11-03 at the user's request, rollback 
 loop) and the host import of memory pools (up to 313 ms at boot). Build a1 (`7a8d599a...`), not installed;
 `diagnostics/scene-hitch-20261103/README.md`.
 
+## Object fade (2026-11-04)
+
+The game fades objects with a 64 x 64 screen-door pattern (429 of 3,755 pixel programs). Build d1 (`953aef25...`, INSTALLED
+2026-11-04 at the user's request, rollback to a2 in `diagnostics/dither-20261104/preserved-installed-d1/`, uncommitted) adds `dither=0..3` (launcher Graphics "Object fade"): the game's, off, even (the pattern at
+the image's own pixels) and transparent (blended by the alpha it compared). All patched programs pass spirv-val; six
+fight runs at 2560x1440 ran clean with no frame time change, and transparent removes the checkerboard on a real fade. A/B on the fight route (2026-11-04, two runs a mode): slow frames 517/502 game, 505/492 off, 511/496
+transparent of 5999, so no cost. Transparent is the default since then, at the user's choice (`dither=3`).
+Details: `diagnostics/dither-20261104/README.md`.
+
 ## Game and source identity
 
 - Title ID `01004A4010FEA000`, display version 1.2.0. Main build ID `B47CC79B88B7091EA514B2B725C50AE01C6F00DF`, main SHA-256 `499983f6...`.
