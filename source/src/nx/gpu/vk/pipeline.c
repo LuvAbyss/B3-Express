@@ -229,6 +229,10 @@ void vk_pipeline_init(void) {
         VkDescriptorPoolSize n[VK_POOL_TYPES];
         vk_pool_sizes(n, 1);
         const VkPhysicalDeviceLimits* l = &g_vk.props.limits;
+        if (!g_shader_texture_arrays) { /* the pools' sizes hold the arrays and their two tables, layouts leave them out */
+            n[2].descriptorCount -= 2 * SNX_TEX_ARRAY;
+            n[0].descriptorCount -= 2;
+        }
         if (n[0].descriptorCount > l->maxPerStageDescriptorUniformBuffers ||
             n[1].descriptorCount > l->maxPerStageDescriptorStorageBuffers ||
             n[2].descriptorCount > l->maxPerStageDescriptorSamplers ||

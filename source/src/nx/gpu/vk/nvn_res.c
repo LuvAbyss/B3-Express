@@ -2498,8 +2498,16 @@ static void own_pq(u32 p, u32 b) {
 static void mir_want(int which, int want) { g_mir[which].want = want; }
 void vk_nvn_pool_mirror(int which, u64 flags) {
     const char* e = getenv("SNX_NVN_VRAM");
+    /* an integrated GPU reads the pools from the same RAM a copy would take, so copies only cost memory, and their
+       sparse binds are what such drivers test least (issue 2, device lost on Iris Xe). SNX_NVN_VRAM=1 copies anyway */
+    int on = e && e[0] ? e[0] != '0' : g_vk.props.deviceType != VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
     /* GPU_CACHED, not shader code (0x40) or compressible render targets (0x80) */
-    int want = (flags & 0x20) && !(flags & 0xC0) && !(e && e[0] == '0');
+    int want = (flags & 0x20) && !(flags & 0xC0) && on;
+    static int said;
+    if (!on && !said) {
+        said = 1;
+        LOG("nvn-live: no video memory copies of pools (%s)\n", e && e[0] ? "SNX_NVN_VRAM=0" : "integrated GPU");
+    }
     if (which < 0 || which >= IMPORTS) return;
     vk_lock();
     import_publish();
