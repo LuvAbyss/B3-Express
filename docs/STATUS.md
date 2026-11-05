@@ -238,6 +238,10 @@ Mpx each, `SNX_ASTC_SPREAD_MPX`): the area-entry frames went from 92 + 157 ms to
 30 s from 1,010 to 708 ms (build s2 `9a46b5ae...`, not installed).
 Warm runs unchanged. Build l10 (`7c183773...`), not installed, committed as `bf7496c`; `diagnostics/lows-20261104/README.md`.
 
+## Black 3D on AMD, issue 3 (2026-11-05)
+
+Issue 3 (RX 560, and a 6700 XT in a comment): the UI draws, the 3D stays black. The NVN path mapped the game's depth formats 0x33 and 0x35 straight to `X8_D24_UNORM_PACK32` and `D24_UNORM_S8_UINT`, which AMD can't use as depth attachments, so every pipeline with depth was refused ("depth target format 0x35") and every 3D draw dropped. The Maxwell path already fell back to 32-bit float depth (`format.c`). Now the NVN path does too (`depth24_fmt`, `nvn_res.c`), and `SNX_NVN_NO_D24=1` forces it on any GPU. Build d1 (`f8f84cce...`, `diagnostics/amd-depth-20261105/`): the warm fight route with the fallback forced on the RTX 3080 drew the scene with depth and shadows right, 263 pipelines made, 0 failed, no crash, save unchanged. Not installed. **Not tested on AMD:** waits on a reporter's run. Issue 2 (Intel Iris Xe, device lost): a reply asking for runs with `SNX_NVN_VRAM=0`, `SNX_NVN_VRAM_SPARSE=0` and the Sunshine and RTSS layers off was drafted for the user to post.
+
 ## Game and source identity
 
 - Title ID `01004A4010FEA000`, display version 1.2.0. Main build ID `B47CC79B88B7091EA514B2B725C50AE01C6F00DF`, main SHA-256 `499983f6...`.

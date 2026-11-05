@@ -697,15 +697,26 @@ static VkFormat vertex_fmt(u32 nf) {
     }
     return VK_FORMAT_UNDEFINED;
 }
+static int fmt_has(VkFormat f, int buffer, VkFormatFeatureFlags need);
+/* AMD renders to neither 24-bit depth format: 32-bit float depth holds every 24-bit value, as format.c does for the
+   Maxwell path. SNX_NVN_NO_D24=1 takes it on any GPU, to test that path */
+static VkFormat depth24_fmt(VkFormat d24, VkFormat d32) {
+    static int no_d24 = -1;
+    if (no_d24 < 0) {
+        const char* e = getenv("SNX_NVN_NO_D24");
+        no_d24 = e && e[0] == '1';
+    }
+    return !no_d24 && fmt_has(d24, 0, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) ? d24 : d32;
+}
 static VkFormat target_fmt(u32 nf) { /* render targets: colour, and depth or stencil */
     int comps, i = comp_kind(nf, &comps);
     if (i >= 0) return comp_fmt(comps == 3 ? 4 : comps, i);
     switch (nf) {
         case 0x31: return VK_FORMAT_S8_UINT;
         case 0x32: return VK_FORMAT_D16_UNORM;
-        case 0x33: return VK_FORMAT_X8_D24_UNORM_PACK32;
+        case 0x33: return depth24_fmt(VK_FORMAT_X8_D24_UNORM_PACK32, VK_FORMAT_D32_SFLOAT);
         case 0x34: return VK_FORMAT_D32_SFLOAT;
-        case 0x35: return VK_FORMAT_D24_UNORM_S8_UINT;
+        case 0x35: return depth24_fmt(VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT);
         case 0x36: return VK_FORMAT_D32_SFLOAT_S8_UINT;
         case 0x37:
         case 0x38: return VK_FORMAT_R8G8B8A8_SRGB;
