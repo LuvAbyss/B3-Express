@@ -2899,6 +2899,15 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
        different iterations, and VOTE, SHFL and BAR would see part of the warp. Each iteration runs only the lanes
        at the subgroup's lowest pc, as the hardware reconverges: lanes ahead wait for the others to reach them. */
     converge = has_flow && can_subgroup && (needs_subgroup || has_barrier || needs_derivatives);
+    /* A BAR inside the flow loop is reached by the invocations whose pc is at its block on that pass, and the
+       workgroup's other subgroups reach it on other passes: a barrier in non-uniform control flow, which Vulkan
+       leaves undefined. NVIDIA counts arrivals per thread and gets through, Intel hangs the GPU (issue 2, device
+       lost on Iris Xe at the first frame with these compute jobs). So a compute program with flow runs in phases:
+       a BAR ends its invocation's pass through the inner loop with its pc past the BAR, every invocation leaves
+       that loop at a BAR or finished, and the workgroup meets at one barrier outside it, uniform, then goes round
+       again while any invocation stopped at a BAR. An invocation that has finished passes the barriers, as an
+       exited thread does on Maxwell */
+    int bar_phases = has_flow && has_barrier && stage == ST_CS;
     if (needs_shared && (stage != ST_CS || si->shared_size <= 0)) return direct_reject(si, "shared memory size");
     for (int i = 0; i < texture_count; i++)
         if (textures[i].shadow && (si->tex_int_mask & (1ull << i))) return direct_reject(si, "integer shadow texture");
@@ -3398,6 +3407,15 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
         shared_array = spv_emit_workgroup_variable(&c->emit, pointer_type);
         interfaces[count++] = shared_array;
     }
+    /* bar_phases: whether some invocation stopped at a BAR, one word per pass parity, so that a word is cleared a
+       pass before it is set again */
+    u32 bar_flags = 0, bar_element_pointer = 0;
+    if (bar_phases) {
+        u32 flags_type = spv_emit_type_array_u32(&c->emit, c->u32_type, 2);
+        bar_element_pointer = spv_emit_type_workgroup_pointer(&c->emit, c->u32_type);
+        bar_flags = spv_emit_workgroup_variable(&c->emit, spv_emit_type_workgroup_pointer(&c->emit, flags_type));
+        interfaces[count++] = bar_flags;
+    }
     u32 push = 0, push_pointer = 0;
     if ((stage == ST_FS && ((target & 15) || needs_point_coord)) || depth_fix || needs_instance) {
         push = spv_emit_push_vec4(&c->emit, vec4, c->f32_type, stage == ST_FS ? 16 : 0, &push_pointer);
@@ -3475,6 +3493,11 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
         stack_ptr = spv_emit_function_variable_init(&c->emit, reg_ptr, c->zero);
         for (u32 k = 0; k < 32; k++) stack[k] = spv_emit_function_variable_init(&c->emit, reg_ptr, c->zero);
     }
+    u32 bar_stop = 0, bar_pass = 0; /* bar_phases: this invocation stopped at a BAR, and the passes made */
+    if (bar_phases) {
+        bar_stop = spv_emit_function_variable_init(&c->emit, reg_ptr, c->zero);
+        bar_pass = spv_emit_function_variable_init(&c->emit, reg_ptr, c->zero);
+    }
     u32 call_ptr = 0, call_stack[32] = {0};
     if (has_calls) {
         call_ptr = spv_emit_function_variable_init(&c->emit, reg_ptr, c->zero);
@@ -3489,6 +3512,7 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
        the same lanes), without its subgroup minimum on every pass. BAR stays in the loop: a workgroup barrier must
        not sit in a branch only some invocations take */
     int linear = 0;
+    u32 bar_header = 0, bar_continue = 0, bar_merge = 0; /* bar_phases: the loop of phases around the flow loop */
     u32 *case_labels = NULL, *case_literals = NULL;
     u8* block_start = NULL;
     size_t case_count = 0;
@@ -3530,7 +3554,7 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                 block_start[bra_target(insn[i], i)] = 1;
             if (!dynamic_stack && (id == O_SYNC || id == O_BRK || id == O_CONT)) block_start[pop_targets[i]] = 1;
             if (id == O_BRA || id == O_CAL || id == O_RET || id == O_BRX || id == O_SYNC || id == O_BRK ||
-                id == O_CONT || id == O_EXIT) {
+                id == O_CONT || id == O_EXIT || (bar_phases && id == O_BAR)) {
                 u32 next = next_instruction(i, n);
                 if (next < n) block_start[next] = 1;
             }
@@ -3574,6 +3598,24 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
             if (position) spv_emit_store(&c->emit, position, empty);
             for (u32 i = 0; i < 32; i++)
                 if (output_attrs[i]) spv_emit_store(&c->emit, output_attrs[i], empty);
+        }
+        if (bar_phases) { /* both words cleared before anyone sets one, then the phases' loop */
+            for (u32 k = 0; k < 2; k++)
+                spv_emit_store(&c->emit,
+                               spv_emit_function_element_pointer(&c->emit, bar_element_pointer, bar_flags,
+                                                                 spv_emit_constant_u32(&c->emit, c->u32_type, k)),
+                               c->zero);
+            spv_emit_control_barrier(&c->emit, c->u32_type);
+            bar_header = spv_emit_id(&c->emit);
+            bar_continue = spv_emit_id(&c->emit);
+            bar_merge = spv_emit_id(&c->emit);
+            u32 body = spv_emit_id(&c->emit);
+            spv_emit_branch(&c->emit, bar_header);
+            spv_emit_label(&c->emit, bar_header);
+            spv_emit_loop_merge(&c->emit, bar_merge, bar_continue);
+            spv_emit_branch(&c->emit, body);
+            spv_emit_label(&c->emit, body);
+            spv_emit_store(&c->emit, bar_stop, c->zero);
         }
         if (!linear) {
             spv_emit_branch(&c->emit, loop_header);
@@ -4386,7 +4428,9 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                     reg_write(c, d + k, spv_emit_load(&c->emit, c->u32_type, pointer));
             }
         } else if (op == O_BAR) {
-            if (stage == ST_TCS)
+            if (bar_phases) /* pc is past it already: the workgroup meets outside the flow loop */
+                spv_emit_store(&c->emit, bar_stop, spv_emit_constant_u32(&c->emit, c->u32_type, 1));
+            else if (stage == ST_TCS)
                 spv_emit_patch_barrier(&c->emit, c->u32_type);
             else
                 spv_emit_control_barrier(&c->emit, c->u32_type);
@@ -6504,7 +6548,10 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                 spv_emit_branch(&c->emit, pexit_merge);
                 spv_emit_label(&c->emit, exit_label);
             }
-            if (passthrough)
+            if (bar_phases) { /* finished, and still at the workgroup's barriers until it leaves them all */
+                spv_emit_store(&c->emit, pc, spv_emit_constant_u32(&c->emit, c->u32_type, UINT32_MAX));
+                if (has_pexit) spv_emit_branch(&c->emit, pexit_merge);
+            } else if (passthrough)
                 geometry_passthrough(c, si, in_vertices, vec4, position, position_in, output_attrs, inputs, point_size,
                                      layer_output, i32_type, clip_output, clip_count, primitive_id, primitive_id_out,
                                      depth_fix, push, push_pointer);
@@ -6539,19 +6586,19 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                                    spv_emit_bitcast(&c->emit, c->f32_type, reg_read(c, reg + 1)));
                 if (push && (target & 15)) alpha_test(c, push, push_pointer, alpha);
             }
-            spv_emit_return(&c->emit);
+            if (!bar_phases) spv_emit_return(&c->emit);
             if (has_pexit) spv_emit_label(&c->emit, pexit_merge);
         }
         /* no texture is sparse, so every texel a fetch reads is resident */
         pred_write(c, sparse_predicate(w, op), c->false_value);
         if (guard_merge) {
-            if (op != O_EXIT) spv_emit_branch(&c->emit, guard_merge);
+            if (op != O_EXIT || bar_phases) spv_emit_branch(&c->emit, guard_merge);
             spv_emit_label(&c->emit, guard_merge);
         } else if (op == O_EXIT && !has_flow)
             break;
         u32 next = next_instruction(i, n);
         if (has_flow && (next >= n || block_start[next])) {
-            if (guard_merge || op != O_EXIT || has_pexit)
+            if (guard_merge || op != O_EXIT || has_pexit || bar_phases)
                 spv_emit_branch(&c->emit, linear ? block_merge : dispatch_merge);
             if (linear) spv_emit_label(&c->emit, block_merge); /* the next block's test, or the end */
         }
@@ -6570,10 +6617,43 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
         u32 next_pc = spv_emit_load(&c->emit, c->u32_type, pc);
         u32 finished =
             spv_emit_i_equal(&c->emit, c->bool_type, next_pc, spv_emit_constant_u32(&c->emit, c->u32_type, UINT32_MAX));
+        if (bar_phases) /* or stopped at a BAR */
+            finished = spv_emit_bool_binary(
+                &c->emit, c->bool_type, 1, finished,
+                spv_emit_i_not_equal(&c->emit, c->bool_type, spv_emit_load(&c->emit, c->u32_type, bar_stop), c->zero));
         spv_emit_branch_conditional(&c->emit, finished, loop_merge, loop_continue);
         spv_emit_label(&c->emit, loop_continue);
         spv_emit_branch(&c->emit, loop_header);
         spv_emit_label(&c->emit, loop_merge);
+    }
+    if (bar_phases) {
+        /* every invocation is here, stopped at a BAR or finished: the BAR's barrier, uniform. The pass's word says
+           whether anyone stopped, read between two barriers and cleared after the second, a pass before its next
+           use, so no invocation clears a word another has set for a later pass */
+        u32 stopped =
+            spv_emit_i_not_equal(&c->emit, c->bool_type, spv_emit_load(&c->emit, c->u32_type, bar_stop), c->zero);
+        u32 passes = spv_emit_load(&c->emit, c->u32_type, bar_pass);
+        u32 word = spv_emit_function_element_pointer(
+            &c->emit, bar_element_pointer, bar_flags,
+            spv_emit_bitwise_and_u32(&c->emit, c->u32_type, passes, spv_emit_constant_u32(&c->emit, c->u32_type, 1)));
+        u32 set = spv_emit_id(&c->emit), set_merge = spv_emit_id(&c->emit);
+        spv_emit_selection_merge(&c->emit, set_merge);
+        spv_emit_branch_conditional(&c->emit, stopped, set, set_merge);
+        spv_emit_label(&c->emit, set);
+        spv_emit_store(&c->emit, word, spv_emit_constant_u32(&c->emit, c->u32_type, 1));
+        spv_emit_branch(&c->emit, set_merge);
+        spv_emit_label(&c->emit, set_merge);
+        spv_emit_control_barrier(&c->emit, c->u32_type);
+        u32 again = spv_emit_i_not_equal(&c->emit, c->bool_type, spv_emit_load(&c->emit, c->u32_type, word), c->zero);
+        spv_emit_control_barrier(&c->emit, c->u32_type);
+        spv_emit_store(&c->emit, word, c->zero);
+        spv_emit_store(
+            &c->emit, bar_pass,
+            spv_emit_iadd_u32(&c->emit, c->u32_type, passes, spv_emit_constant_u32(&c->emit, c->u32_type, 1)));
+        spv_emit_branch_conditional(&c->emit, again, bar_continue, bar_merge);
+        spv_emit_label(&c->emit, bar_continue);
+        spv_emit_branch(&c->emit, bar_header);
+        spv_emit_label(&c->emit, bar_merge);
     }
     if (has_flow) {
         if (passthrough)
