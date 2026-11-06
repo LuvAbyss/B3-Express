@@ -4,11 +4,11 @@ import shutil
 import zipfile
 from pathlib import Path
 
-VERSION = '0.1.7'
+VERSION = '0.2.0'
 root = Path.cwd()
 name = f'B3-Express-{VERSION}-windows-x64'
 out = root / 'release' / name
-exe = root / 'diagnostics/release-0.1/Bayo3_120-0.1.7-release.exe'  # 0.1.6 + present thread on even slots + compute barriers outside the flow loop (issue 2), built from fbf7bf6
+exe = root / 'diagnostics/release-0.1/Bayo3_120-0.1.7-release.exe'  # the same runtime as 0.1.7 (built from fbf7bf6): 0.2.0 is the new launcher
 assert hashlib.sha256(exe.read_bytes()).hexdigest().startswith('30e053b5')
 assert not (root / 'release' / (name + '.zip')).exists(), 'this version is already packaged: raise VERSION'
 if out.exists():
@@ -32,8 +32,7 @@ launcher.mkdir()
 for f in ('bayonetta_launcher.py', 'web_launcher.py', 'theme.py', 'code-hints.txt', 'code-tablecalls.txt', 'README.md', 'ATTRIBUTION.md', 'LICENSE'):
     shutil.copyfile(root / 'launcher' / f, launcher / f)
 shutil.copytree(root / 'launcher/ui', launcher / 'ui', ignore=shutil.ignore_patterns('prototype.html'))
-(out / 'VERSION').write_text(VERSION + '
-', encoding='ascii')  # the launcher's update check reads it
+(out / 'VERSION').write_text(VERSION + '\n', encoding='ascii')  # the launcher's update check reads it
 shutil.copytree(root / 'launcher/python', launcher / 'python', ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
 
 BANNED = ('_code.dll', '.abi', '.hints', '.ini', '.log', '.nso', '.nca', '.nsp', '.xci', '.keys', '.ppm', '.snxs', '.bnk', '.webm')
