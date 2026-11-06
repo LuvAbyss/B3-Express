@@ -1169,7 +1169,9 @@ int vk_nvn_pool_check(int which, u64 off, u32 n) {
     if (vkEndCommandBuffer(cb) != VK_SUCCESS) goto done;
     VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb};
     vk_lock(); /* the queue is the renderer's: its submissions hold the same lock */
+    vk_queue_lock();
     VkResult r = vkQueueSubmit(g_vk.gfx, 1, &si, fence);
+    vk_queue_unlock();
     vk_unlock();
     if (r != VK_SUCCESS || vkWaitForFences(g_vk.dev, 1, &fence, VK_TRUE, 5000000000ull) != VK_SUCCESS) goto done;
     vmaInvalidateAllocation(g_vk.vma, rm, 0, n);
@@ -2664,9 +2666,13 @@ static void mir_bind(void) {
         if (n > first)
             info[bsi.bufferBindCount++] = (VkSparseBufferMemoryBindInfo){g_mir[i].buf, n - first, binds + first};
     }
-    if (vkCreateFence(g_vk.dev, &fci, NULL, &fence) != VK_SUCCESS ||
-        vkQueueBindSparse(g_vk.gfx, 1, &bsi, fence) != VK_SUCCESS ||
-        vkWaitForFences(g_vk.dev, 1, &fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+    int bound = 0;
+    if (vkCreateFence(g_vk.dev, &fci, NULL, &fence) == VK_SUCCESS) {
+        vk_queue_lock();
+        bound = vkQueueBindSparse(g_vk.gfx, 1, &bsi, fence) == VK_SUCCESS;
+        vk_queue_unlock();
+    }
+    if (!bound || vkWaitForFences(g_vk.dev, 1, &fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
         fatal("nvn: binding video memory to a pool copy failed\n");
     vkDestroyFence(g_vk.dev, fence, NULL);
     g_mir_bound += g_nmb;
@@ -4426,16 +4432,24 @@ void vk_nvn_live_present(u64 gpu, u64 cpu, const char* out, int all) {
            stutter */
         at60 = __atomic_load_n(&g_pace_interval, __ATOMIC_RELAXED) <= 1;
         if (g_rp.last_present && at60) g_ft[d / 1000000 < 255 ? d / 1000000 : 255]++;
-        if (g_rp.last_present && d >= slow_ns)
-            LOG_LIMIT(20000,
-                      "nvn-live: frame %llu took %.1f ms: windows %.1f, of which texture lookups %.1f (%u) and "
-                      "pipeline waits %.1f; vk_lock waits %.1f; draws %u; ASTC %.1f Mpx; before the first "
-                      "window %.1f, after the last %.1f, GPU busy at its start %d\n",
-                      (unsigned long long)g_rp.frame, (double)d / 1e6, (double)g_rp.fr_win / 1e6,
-                      (double)g_fr_tex / 1e6, g_fr_miss, (double)g_rp.pipe_wait / 1e6, (double)g_rp.fr_lock / 1e6,
-                      g_rp.fr_draws, (double)(g_vk_astc_px - g_fr_astc) / 1e6,
-                      g_rp.fr_first ? (double)(g_rp.fr_first - g_rp.last_present) / 1e6 : 0.0,
-                      g_rp.fr_last ? (double)(now - g_rp.fr_last) / 1e6 : 0.0, g_rp.fr_gpu_busy);
+        {
+            /* the pacer's hold this frame (present.c, on the game's thread in DequeueBuffer): part of the time before
+               the first window, which is otherwise the game's own work */
+            static u64 slept_before;
+            u64 slept = __atomic_load_n(&g_pace_slept_ns, __ATOMIC_RELAXED), held = slept - slept_before;
+            slept_before = slept;
+            if (g_rp.last_present && d >= slow_ns)
+                LOG_LIMIT(20000,
+                          "nvn-live: frame %llu took %.1f ms: windows %.1f, of which texture lookups %.1f (%u) and "
+                          "pipeline waits %.1f; vk_lock waits %.1f; draws %u; ASTC %.1f Mpx; before the first "
+                          "window %.1f, after the last %.1f, GPU busy at its start %d; held by the pacer %.1f\n",
+                          (unsigned long long)g_rp.frame, (double)d / 1e6, (double)g_rp.fr_win / 1e6,
+                          (double)g_fr_tex / 1e6, g_fr_miss, (double)g_rp.pipe_wait / 1e6, (double)g_rp.fr_lock / 1e6,
+                          g_rp.fr_draws, (double)(g_vk_astc_px - g_fr_astc) / 1e6,
+                          g_rp.fr_first ? (double)(g_rp.fr_first - g_rp.last_present) / 1e6 : 0.0,
+                          g_rp.fr_last ? (double)(now - g_rp.fr_last) / 1e6 : 0.0, g_rp.fr_gpu_busy,
+                          (double)held / 1e6);
+        }
         {
             static u64 spike_ns; /* SNX_NVN_SPIKE_MS: the time before the first window that gets profiled, 150 ms */
             if (!spike_ns)
@@ -4692,7 +4706,9 @@ void vk_nvn_replay_end(u64 present_gpu, u64 present_cpu, const char* out) {
                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     vk_submit(VK_NULL_HANDLE, 0, VK_NULL_HANDLE);
     VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &g_rp.cb};
+    vk_queue_lock();
     VkResult r = vkQueueSubmit(g_vk.gfx, 1, &si, g_rp.fence);
+    vk_queue_unlock();
     vk_unlock();
     if (r == VK_SUCCESS) r = vkWaitForFences(g_vk.dev, 1, &g_rp.fence, VK_TRUE, 20000000000ull);
     LOG("nvn-replay: frame replayed: %s; draws %llu, drawn %llu; clears %llu, done %llu; left out %llu; targets "

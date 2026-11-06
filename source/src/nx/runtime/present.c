@@ -34,13 +34,20 @@ static u64 g_pace_last; /* when the frame before was due, 0 before the first */
 u64 g_pace_slept_ns, g_pace_restarts;
 u32 g_pace_interval = 1;
 
-void present_pace(u32 interval) {
+u64 present_period_ns(void) {
     int fps = __atomic_load_n(&g_opt_fps, __ATOMIC_RELAXED);
+    u32 interval = __atomic_load_n(&g_pace_interval, __ATOMIC_RELAXED);
+    if (!fps || (fps == SNX_FPS_GAME && !interval)) return 0;
+    return fps == SNX_FPS_GAME ? 1000000000u / (u64)VI_REFRESH_HZ * interval : 1000000000u / (u64)fps;
+}
+
+void present_pace(u32 interval) {
     u64 refresh, period, now, next, late;
     __atomic_store_n(&g_pace_interval, interval, __ATOMIC_RELAXED);
-    if (!fps || (fps == SNX_FPS_GAME && !interval)) return;
-    refresh = 1000000000u / (fps == SNX_FPS_GAME ? (u64)VI_REFRESH_HZ : (u64)fps);
-    period = fps == SNX_FPS_GAME ? refresh * interval : refresh;
+    period = present_period_ns();
+    if (!period) return;
+    refresh =
+        interval > 1 && __atomic_load_n(&g_opt_fps, __ATOMIC_RELAXED) == SNX_FPS_GAME ? period / interval : period;
     pm_lock(&g_pace_lock);
     now = plat_ns();
     next = g_pace_last + period;

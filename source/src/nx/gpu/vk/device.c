@@ -25,6 +25,14 @@ void vk_lock(void) {
 void vk_unlock(void) {
     if (!--t_vkdepth) pm_unlock(&g_vklock);
 }
+static PMutex g_vkqlock = PMUTEX_INIT;
+static _Thread_local int t_vkqdepth;
+void vk_queue_lock(void) {
+    if (!t_vkqdepth++) pm_lock(&g_vkqlock);
+}
+void vk_queue_unlock(void) {
+    if (!--t_vkqdepth) pm_unlock(&g_vkqlock);
+}
 int vk_trylock(void) {
     if (!t_vkdepth && !pm_trylock(&g_vklock)) return 0;
     ++t_vkdepth;
@@ -544,21 +552,26 @@ void vk_mem_log(void) {
    presentation engine isn't covered by vkDeviceWaitIdle), so they go a swapchain later, when those presents are long
    done */
 static void swapchain_retire(void) {
+    vk_queue_lock();
     static VkSemaphore retired[VK_SC_MAX];
     static u32 nretired;
     for (u32 i = 0; i < nretired; i++) vkDestroySemaphore(g_vk.dev, retired[i], NULL);
     nretired = 0;
     for (u32 i = 0; i < g_vk.sc_count; i++) retired[nretired++] = g_vk.sc_done[i];
+    vk_present_drop();
     vk_ui_swapchain_gone();
     vkDestroySwapchainKHR(g_vk.dev, g_vk.swapchain, NULL);
     g_vk.swapchain = VK_NULL_HANDLE;
     g_vk.sc_count = 0;
+    vk_queue_unlock();
 }
 
 /* the window's surface made anew, its swapchain to follow: Android destroys a window's surface while the app is in
    the background, and the Vulkan surface on it is lost for good */
 int vk_surface_recreate(void) {
+    vk_queue_lock();
     vkDeviceWaitIdle(g_vk.dev);
+    vk_queue_unlock();
     if (g_vk.swapchain) swapchain_retire();
     vkDestroySurfaceKHR(g_vk.instance, g_vk.surface, NULL);
     g_vk.surface = VK_NULL_HANDLE;
@@ -581,8 +594,10 @@ int vk_window_release(void) {
         if (++waited == 200) return 0;
         plat_sleep_ns(10000000);
     }
+    vk_queue_lock();
     vkDeviceWaitIdle(g_vk.dev); /* a lost device answers at once */
     if (g_vk.swapchain) swapchain_retire();
+    vk_queue_unlock();
     if (g_vk.surface) vkDestroySurfaceKHR(g_vk.instance, g_vk.surface, NULL);
     g_vk.surface = VK_NULL_HANDLE;
     /* every hold of this thread's at once: it won't return to the callers that took them */
@@ -591,7 +606,15 @@ int vk_window_release(void) {
     return 1;
 }
 
+static int swapchain_make(int srgb);
 int vk_swapchain_create(int srgb) {
+    int ok;
+    vk_queue_lock();
+    ok = swapchain_make(srgb);
+    vk_queue_unlock();
+    return ok;
+}
+static int swapchain_make(int srgb) {
     if (g_opt_headless) return 0; /* no WSI calls, even on a resize/recreate path */
     VkSurfaceCapabilitiesKHR caps;
     VkResult cr = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_vk.phys, g_vk.surface, &caps);

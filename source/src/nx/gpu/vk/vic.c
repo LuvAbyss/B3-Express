@@ -332,7 +332,9 @@ static int compose(const VicJob* j) {
     VkSubmitInfo2 si = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = 1, .pCommandBufferInfos = &c};
     vk_lock(); /* the queue is the renderer's compute queue too */
+    vk_queue_lock();
     VkResult r = vkQueueSubmit2(g_vk.compute, 1, &si, g_vic_fence);
+    vk_queue_unlock();
     vk_unlock();
     if (r == VK_ERROR_DEVICE_LOST) fatal("vulkan: the GPU device was lost (driver reset or crash)");
     if (r != VK_SUCCESS) return 0;

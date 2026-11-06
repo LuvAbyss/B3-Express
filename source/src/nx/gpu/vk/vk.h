@@ -83,12 +83,18 @@ int vk_init(void);
 int vk_swapchain_create(int srgb);
 int vk_surface_recreate(void);
 int vk_window_release(void); /* Renderer.release_window */
+void vk_present_drop(void);  /* renderer.c: a frame waiting to be presented on a swapchain that goes is dropped */
 /* logs a failed call with where it happened; evaluates to 1 on success */
 #define VK_OK(call) vk_ok_((call), #call, __FILE__, __LINE__)
 int vk_ok_(VkResult r, const char* what, const char* file, int line);
 void vk_lock(void);
 void vk_unlock(void);
 int vk_trylock(void); /* vk_lock unless another thread holds it: 1 when taken */
+/* the queues and the swapchain alone, reentrant: every submit, acquire, present, device wait and swapchain change
+   holds it, so the present thread presents without waiting for vk_lock (which recording holds). Taken after vk_lock,
+   never before it */
+void vk_queue_lock(void);
+void vk_queue_unlock(void);
 /* What an allocation is for, counted for the log: tagged when made, untagged before it's destroyed. Allocations never
    tagged show as the rest of what VMA holds */
 enum { VKM_NONE, VKM_TARGET, VKM_SURF, VKM_ASTC, VKM_BC, VKM_TEX, VKM_COPY, VKM_STAGE, VKM_BUF, VKM_KINDS };

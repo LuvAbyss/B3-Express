@@ -262,6 +262,145 @@ static void flip_src(VkImageBlit* b, u32 transform) {
     }
 }
 
+/* ---- the present thread: the game's frames reach the display on even slots ----
+   show() submits a frame on the GPU thread and hands its present here: it goes out at its slot, the present before
+   plus the game's frame period (present_period_ns), or at once when the frame comes later than that, so a late frame
+   isn't followed by a short one. The game's own pace (present_pace) holds it at the frame's start, but the frame
+   reaches the display at its present, after however much work: holding it here, on the GPU thread, would stall the
+   fences the game waits on. A frame handed while the one before still waits sends that one out first. The slot comes
+   PT_SLACK early, so the schedule drifts back toward the frames as they come and doesn't stay behind after a late
+   one. Under vk_queue_lock, not vk_lock, which recording holds for long stretches: g_pt's fields and the numbers,
+   and g_pt_lock with g_pt for the thread's wait */
+#define PT_SLACK 250000ull /* ns */
+typedef struct {
+    VkSwapchainKHR sc; /* VK_NULL_HANDLE: none waiting */
+    VkSemaphore sem;
+    u32 idx;
+    int game;
+    u64 due, handed, seq;
+} PtFrame;
+static PtFrame g_pt;
+static PMutex g_pt_lock = PMUTEX_INIT;
+static PCond g_pt_cond;
+static int g_pt_started;
+static u64 g_pt_last;                        /* when the game's frame before was due */
+static VkResult g_pt_result = VK_SUCCESS;    /* what show() acts on: out of date, suboptimal, surface lost */
+static u32 g_pt_hist[512];                   /* game frames' times on the display, in 0.25 ms steps */
+static u64 g_pt_shown, g_pt_prev, g_pt_held; /* game frames presented, the last one's time, their holds in ns */
+static u32 g_pt_early, g_pt_lock_late;       /* sent out before their slot / over 1 ms past it */
+static FILE* g_pt_times;                     /* SNX_PRESENT_TIMES: each game frame's time, hold and lateness, in us */
+
+static void pt_report(void) {
+    u32 i, n = 0, sum = 0, under = 0, over = 0;
+    double median = 0, p99 = 0;
+    for (i = 0; i < 512; i++) {
+        n += g_pt_hist[i];
+        if (i < 56) under += g_pt_hist[i];
+        if (i >= 76) over += g_pt_hist[i];
+    }
+    for (i = 0; i < 512 && n; i++) {
+        sum += g_pt_hist[i];
+        if (median == 0 && sum * 2 >= n) median = (i + 1) * 0.25;
+        if (p99 == 0 && (u64)sum * 100 >= (u64)n * 99) p99 = (i + 1) * 0.25;
+    }
+    if (n)
+        LOG("vulkan: frames on the display: median %.2f ms, p99 %.2f ms; under 14 ms %u, over 19 ms %u of %u; held "
+            "%.2f ms on average; %u sent before their slot, %u over 1 ms past it\n",
+            median, p99, under, over, n, (double)g_pt_held / (double)g_pt_shown / 1e6, g_pt_early, g_pt_lock_late);
+    memset(g_pt_hist, 0, sizeof g_pt_hist);
+}
+
+/* presents what waits. Under vk_queue_lock */
+static void pt_present(void) {
+    PtFrame f = g_pt;
+    u64 now;
+    pm_lock(&g_pt_lock);
+    g_pt.sc = VK_NULL_HANDLE;
+    pm_unlock(&g_pt_lock);
+    if (!f.sc) return;
+    VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                           .waitSemaphoreCount = 1,
+                           .pWaitSemaphores = &f.sem,
+                           .swapchainCount = 1,
+                           .pSwapchains = &f.sc,
+                           .pImageIndices = &f.idx};
+    VkResult r = vkQueuePresentKHR(g_vk.gfx, &pi);
+    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR || r == VK_ERROR_SURFACE_LOST_KHR) {
+        if (g_pt_result != VK_ERROR_SURFACE_LOST_KHR) g_pt_result = r;
+    } else
+        VK_OK(r);
+    if (!f.game) return;
+    now = plat_ns();
+    g_pt_early += now < f.due;
+    g_pt_lock_late += now > f.due + 1000000;
+    if (g_pt_prev && __atomic_load_n(&g_pace_interval, __ATOMIC_RELAXED) <= 1) {
+        u64 d = (now - g_pt_prev) / 250000;
+        g_pt_hist[d < 511 ? d : 511]++;
+        if (g_pt_times)
+            fprintf(g_pt_times, "%llu %llu %lld\n", (unsigned long long)((now - g_pt_prev) / 1000),
+                    (unsigned long long)((now - f.handed) / 1000), (long long)((i64)(now - f.due) / 1000));
+    }
+    g_pt_prev = now;
+    g_pt_held += now - f.handed;
+    if (++g_pt_shown % 600 == 0) pt_report();
+}
+
+static void pt_main(void* arg) {
+    (void)arg;
+    for (;;) {
+        u64 seq, due, now;
+        pm_lock(&g_pt_lock);
+        while (!g_pt.sc) pc_wait(&g_pt_cond, &g_pt_lock, -1);
+        seq = g_pt.seq;
+        due = g_pt.due;
+        pm_unlock(&g_pt_lock);
+        now = plat_ns();
+        if (due > now) plat_sleep_ns((i64)(due - now));
+        vk_queue_lock();
+        if (g_pt.sc && g_pt.seq == seq) pt_present(); /* not one show() sent out meanwhile */
+        vk_queue_unlock();
+    }
+}
+
+/* a swapchain going: what waits for it is dropped, never presented. Under vk_queue_lock */
+void vk_present_drop(void) {
+    pm_lock(&g_pt_lock);
+    g_pt.sc = VK_NULL_HANDLE;
+    pm_unlock(&g_pt_lock);
+}
+
+/* hands the frame just submitted to the present thread, or presents it at once when its slot has come (or it isn't
+   one of the game's paced frames). Under vk_queue_lock */
+static void pt_hand(u32 idx, VkSemaphore sem, int game) {
+    static int off = -1; /* SNX_PRESENT_THREAD=0: each frame presented as it comes, as before, still measured */
+    u64 now = plat_ns(), period = game ? present_period_ns() : 0, due = now;
+    if (off < 0) {
+        const char* t = getenv("SNX_PRESENT_TIMES");
+        off = getenv("SNX_PRESENT_THREAD") && !strcmp(getenv("SNX_PRESENT_THREAD"), "0");
+        if (t && *t) g_pt_times = fopen(t, "w");
+    }
+    if (period && !off && g_pt_last && g_pt_last + period - PT_SLACK > now) due = g_pt_last + period - PT_SLACK;
+    if (game) g_pt_last = due;
+    if (!g_pt_started && due > now) {
+        pc_init(&g_pt_cond);
+        g_pt_started = plat_thread(pt_main, NULL, 0) == 0 ? 1 : -1;
+        if (g_pt_started < 0) WARN("vulkan: the present thread could not be started: frames go out as they come\n");
+    }
+    pm_lock(&g_pt_lock);
+    g_pt.sc = g_vk.swapchain;
+    g_pt.sem = sem;
+    g_pt.idx = idx;
+    g_pt.game = game;
+    g_pt.due = due;
+    g_pt.handed = now;
+    g_pt.seq++;
+    pm_unlock(&g_pt_lock);
+    if (due <= now || g_pt_started < 0)
+        pt_present();
+    else
+        pc_signal(&g_pt_cond);
+}
+
 /* The window's image: src's g_last_ rectangle (a frame of fw x fh, flipped by transform) letterboxed on black, or
    black alone, with the on-screen controls and the game's menu over it; then the frame's commands are submitted and
    the image presented. A game's frame (game) also moves the per-present bookkeeping, and without src shows nothing.
@@ -269,6 +408,9 @@ static void flip_src(VkImageBlit* b, u32 transform) {
 static void show(Surf* src, u32 fw, u32 fh, u32 transform, int game) {
     /* the size the swapchain was made for, not the extent the surface clamped it to: that can stay different */
     int ww, wh, srgb = src ? is_srgb(src->f.vk) : g_sc_srgb, shown = backend_window_shown();
+    vk_queue_lock();
+    if (g_pt.sc) pt_present(); /* the frame before still waits for its slot: it goes first, before any new swapchain */
+    vk_queue_unlock();
     backend_window_size(&ww, &wh);
     if (shown && (g_lost || backend_window_generation() != g_generation)) {
         vk_finish();
@@ -294,7 +436,9 @@ static void show(Surf* src, u32 fw, u32 fh, u32 transform, int game) {
         VkSemaphore acq = g_acquired[vk_frame_id() % VK_FRAMES];
         /* no wait: vk_lock is held (guest threads mapping memory take it too), and the game's pace is present_pace's.
            Every image still on the display or queued for it (FIFO behind) leaves this frame unshown */
+        vk_queue_lock();
         VkResult r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, 0, acq, VK_NULL_HANDLE, &idx);
+        vk_queue_unlock();
         if (r == VK_NOT_READY || r == VK_TIMEOUT) {
             /* the game faster than the display (vsync=1 with fps_limit over its refresh, or a 59.94 Hz one) */
             static u64 dropped;
@@ -379,21 +523,15 @@ static void show(Surf* src, u32 fw, u32 fh, u32 transform, int game) {
     /* Offscreen frames still submit and advance the frame ring. g_last remains available for readback. */
     vk_submit(wait, VK_PIPELINE_STAGE_2_CLEAR_BIT, signal);
     vk_frame_next(); /* every show used this frame's slot and acquire semaphore, the menu's own too */
-    if (signal) {
-        VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-                               .waitSemaphoreCount = 1,
-                               .pWaitSemaphores = &signal,
-                               .swapchainCount = 1,
-                               .pSwapchains = &g_vk.swapchain,
-                               .pImageIndices = &idx};
-        VkResult r = vkQueuePresentKHR(g_vk.gfx, &pi);
-        if (r == VK_ERROR_OUT_OF_DATE_KHR || (r == VK_SUBOPTIMAL_KHR && !g_vk.sc_turned))
-            recreate = 1;
-        else if (r == VK_ERROR_SURFACE_LOST_KHR)
-            g_lost = 1;
-        else
-            VK_OK(r);
-    }
+    vk_queue_lock();
+    if (signal) pt_hand(idx, signal, game);
+    /* what the presents since the last show() answered, this one's when it went out at once */
+    if (g_pt_result == VK_ERROR_OUT_OF_DATE_KHR || (g_pt_result == VK_SUBOPTIMAL_KHR && !g_vk.sc_turned))
+        recreate = 1;
+    else if (g_pt_result == VK_ERROR_SURFACE_LOST_KHR)
+        g_lost = 1;
+    g_pt_result = VK_SUCCESS;
+    vk_queue_unlock();
     if (recreate && !g_lost && !g_vk.sc_lost) { /* not when this frame's create found the surface lost */
         vk_finish();
         vk_swapchain_create(srgb);

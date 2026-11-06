@@ -36,6 +36,9 @@ extern u64 g_pace_slept_ns, g_pace_restarts; /* time present_pace held the game 
 /* the swap interval of the frame present_pace last paced: 2 and more are the game's own 30 FPS (or lower) stretches,
    loads and in-engine scenes, which the renderer's smoothness numbers leave out */
 extern u32 g_pace_interval;
+/* the time between two of the game's frames on the display, as fps_limit and the last swap interval say; 0 when they
+   aren't paced (fps_limit=0, or the game's interval 0) */
+u64 present_period_ns(void);
 /* a buffer in guest memory at a as RGBA8 into out (w * h words), for one no render target holds */
 void vi_convert_cpu(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt, u32* out);
 
