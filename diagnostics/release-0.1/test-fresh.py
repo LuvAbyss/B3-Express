@@ -1,5 +1,5 @@
 """A new player's path on the unzipped package, run by the package's own Python: a real Install window from an extracted dump, then the game
-starts. Writes only under the test folder. test-fresh.py <unzipped package> <folder with exefs and romfs> <result.json>"""
+starts. Writes only under the test folder. --web drives the new window's logic (web_launcher.Api) instead. test-fresh.py <unzipped package> <folder with exefs and romfs> <result.json>"""
 import json
 import os
 import subprocess
@@ -14,18 +14,29 @@ import bayonetta_launcher as L
 
 assert Path(L.__file__).resolve().parent == (pack / 'launcher').resolve(), L.__file__
 assert L.GAME.resolve() == (pack / 'Bayo3_120').resolve(), L.GAME
-window = L.tk.Tk()
-app = L.Launcher(window)
-r = {'button_before': app.install_button['text'], 'play_before': str(app.play_button['state'])}
-app.source.set(str(source))
-t0 = time.time()
-app.install()
-while app.installing and time.time() - t0 < 1500:
+if '--web' in sys.argv:
+    import web_launcher as W
+    api = W.Api()
+    r = {'step_before': api.state()['step']}
+    t0 = time.time()
+    r['install_answer'] = api.install(str(source))
+    while api.state()['job'] and not api.state()['job']['done'] and time.time() - t0 < 1500:
+        time.sleep(1)
+    job = api.state()['job'] or {}
+    r.update(seconds=round(time.time() - t0), error=job.get('error'), ready=L.installed() and L.module_ready(), step=api.state()['step'])
+else:
+    window = L.tk.Tk()
+    app = L.Launcher(window)
+    r = {'button_before': app.install_button['text'], 'play_before': str(app.play_button['state'])}
+    app.source.set(str(source))
+    t0 = time.time()
+    app.install()
+    while app.installing and time.time() - t0 < 1500:
+        window.update()
+        time.sleep(.05)
     window.update()
-    time.sleep(.05)
-window.update()
-r.update(seconds=round(time.time() - t0), status=app.install_status.get(), ready=L.installed(), play=str(app.play_button['state']))
-window.destroy()
+    r.update(seconds=round(time.time() - t0), status=app.install_status.get(), ready=L.installed(), play=str(app.play_button['state']))
+    window.destroy()
 r['module_size'] = L.CODE.stat().st_size if L.CODE.is_file() else 0
 if r['ready']:
     env = dict(os.environ, **L.ENV)

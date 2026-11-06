@@ -25,8 +25,11 @@ shutil.copytree(root / 'licenses', out / 'licenses')
 shutil.copyfile(root / 'docs/INSTALL.md', out / 'INSTALL.txt')
 launcher = out / 'launcher'
 launcher.mkdir()
-for f in ('bayonetta_launcher.py', 'theme.py', 'code-hints.txt', 'code-tablecalls.txt', 'README.md', 'ATTRIBUTION.md', 'LICENSE'):
+for f in ('bayonetta_launcher.py', 'web_launcher.py', 'theme.py', 'code-hints.txt', 'code-tablecalls.txt', 'README.md', 'ATTRIBUTION.md', 'LICENSE'):
     shutil.copyfile(root / 'launcher' / f, launcher / f)
+shutil.copytree(root / 'launcher/ui', launcher / 'ui', ignore=shutil.ignore_patterns('prototype.html'))
+(out / 'VERSION').write_text(VERSION + '
+', encoding='ascii')  # the launcher's update check reads it
 shutil.copytree(root / 'launcher/python', launcher / 'python', ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
 
 BANNED = ('_code.dll', '.abi', '.hints', '.ini', '.log', '.nso', '.nca', '.nsp', '.xci', '.keys', '.ppm', '.snxs', '.bnk', '.webm')

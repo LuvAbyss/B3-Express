@@ -1,0 +1,552 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>B3-Express</title>
+<link rel="stylesheet" href="fonts/fonts.css">
+<style>
+/* Layout: a desktop app window. A left rail of five pages; the Play page puts one clock-ring behind the next step.
+   Deliberately single-theme (a night palette), every colour set explicitly. */
+:root {
+  --night: #0e0b15;      /* window ground */
+  --panel: #161120;      /* rail and cards */
+  --raise: #201929;      /* inputs, hovered rows */
+  --line: #33283f;       /* hairlines */
+  --text: #eee8f4;
+  --muted: #a79bb6;
+  --moon: #e2c27e;       /* the accent: moon gold */
+  --moon-ink: #1a1408;   /* text on gold */
+  --violet: #8b5fc4;     /* the second voice: progress, toggles */
+  --ok: #73c99a; --warn: #e6a64c; --bad: #e07070;
+  --display: "Italiana", "Didot", "Bodoni 72", Georgia, serif;
+  --body: "Manrope", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", "Cascadia Mono", Consolas, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; } /* the pages and notices are shown and hidden with the hidden attribute */
+html, body { height: 100%; }
+body { margin: 0; background: var(--night); color: var(--text); font: 15px/1.5 var(--body); }
+button, select, input { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--moon); outline-offset: 2px; }
+
+.app { display: grid; grid-template-columns: 220px 1fr; min-height: 100%; }
+.rail { background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 24px 14px; gap: 28px; }
+.brand { display: flex; flex-direction: column; gap: 2px; padding: 0 10px; }
+.brand b { font: 400 30px/1 var(--display); letter-spacing: .02em; color: var(--text); }
+.brand span { font: 500 11px/1.4 var(--mono); color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
+.nav { display: flex; flex-direction: column; gap: 4px; }
+.nav a { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 8px; color: var(--muted); text-decoration: none; font-weight: 600; }
+.nav a:hover { background: var(--raise); color: var(--text); }
+.nav a[aria-current="page"] { background: var(--raise); color: var(--text); box-shadow: inset 2px 0 0 var(--moon); }
+.nav svg { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.6; }
+.nav .badge { margin-left: auto; font: 500 10px/1 var(--mono); color: var(--warn); border: 1px solid currentColor; border-radius: 99px; padding: 3px 6px; }
+.rail-foot { margin-top: auto; padding: 0 10px; font: 400 12px/1.6 var(--mono); color: var(--muted); }
+.rail-foot div { display: flex; justify-content: space-between; gap: 8px; }
+
+main { display: flex; flex-direction: column; min-width: 0; }
+.update { display: flex; align-items: center; gap: 12px; padding: 10px max(24px, env(safe-area-inset-right, 0px)) 10px 24px; background: #241c10; border-bottom: 1px solid #4a3a1c; color: var(--moon); font-weight: 600; font-size: 14px; }
+.update a { color: var(--moon); }
+.update button { margin-left: auto; background: none; border: 0; color: var(--muted); cursor: pointer; }
+.page { flex: 1; padding: 32px max(32px, env(safe-area-inset-right, 0px)) 40px 32px; display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+h1 { font: 400 40px/1.1 var(--display); margin: 0; letter-spacing: .01em; text-wrap: balance; }
+h2 { font: 700 13px/1 var(--body); text-transform: uppercase; letter-spacing: .12em; color: var(--muted); margin: 0; }
+.lede { color: var(--muted); max-width: 62ch; margin: 0; }
+
+/* ---- Play */
+.stage { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 32px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 36px; overflow: hidden; }
+#clock { position: absolute; right: -140px; top: 50%; translate: 0 -50%; width: 560px; height: 560px; opacity: .55; pointer-events: none; }
+.stage > * { position: relative; }
+.steps { list-style: none; margin: 0 0 24px; padding: 0; display: flex; gap: 8px; flex-wrap: wrap; }
+.steps li { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; color: var(--muted); padding: 6px 12px 6px 8px; border: 1px solid var(--line); border-radius: 99px; background: var(--night); }
+.steps li i { width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid currentColor; display: grid; place-items: center; font-style: normal; font-size: 11px; }
+.steps li.done { color: var(--ok); }
+.steps li.now { color: var(--moon); border-color: #5a4826; }
+.headline { font: 400 46px/1.05 var(--display); margin: 0 0 10px; text-wrap: balance; }
+.what { color: var(--muted); margin: 0 0 24px; max-width: 52ch; }
+.primary { display: inline-flex; align-items: center; gap: 12px; background: var(--moon); color: var(--moon-ink); border: 0; border-radius: 10px; padding: 16px 30px; font-weight: 700; font-size: 17px; letter-spacing: .02em; cursor: pointer; box-shadow: 0 8px 30px -10px #e2c27e88; }
+.primary:hover { filter: brightness(1.06); }
+.primary:disabled { background: var(--raise); color: var(--muted); box-shadow: none; cursor: default; }
+.secondary { background: var(--raise); border: 1px solid var(--line); border-radius: 8px; padding: 9px 16px; font-weight: 600; cursor: pointer; }
+.secondary:hover { border-color: var(--muted); }
+.ghost { background: none; border: 0; color: var(--muted); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; padding: 0; }
+.row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+
+.progress { display: flex; flex-direction: column; gap: 10px; }
+.bar { height: 10px; background: var(--night); border: 1px solid var(--line); border-radius: 99px; overflow: hidden; }
+.bar > div { height: 100%; width: 0; background: linear-gradient(90deg, var(--violet), var(--moon)); border-radius: 99px; transition: width .4s ease; }
+.pmeta { display: flex; justify-content: space-between; gap: 12px; font: 500 13px/1.4 var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; flex-wrap: wrap; }
+.pmeta b { color: var(--text); font-weight: 500; }
+.side { display: flex; flex-direction: column; gap: 12px; }
+.fact { display: flex; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.fact:last-child { border-bottom: 0; }
+.fact span { color: var(--muted); }
+.fact b { font-weight: 600; text-align: right; }
+.fact b.ok { color: var(--ok); } .fact b.warn { color: var(--warn); }
+
+.folder { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0 0 20px; }
+.path { flex: 1 1 280px; min-width: 0; background: var(--night); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font: 400 13px/1.4 var(--mono); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.path.empty { color: var(--muted); }
+
+.tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; display: flex; flex-direction: column; gap: 6px; }
+.tile .k { font: 500 12px/1 var(--mono); color: var(--muted); letter-spacing: .06em; text-transform: uppercase; }
+.tile .v { font: 400 28px/1.1 var(--display); }
+.tile .n { font-size: 13px; color: var(--muted); }
+
+/* ---- Options */
+.sections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; align-items: start; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 22px; display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.field { display: flex; flex-direction: column; gap: 8px; }
+.field > label, .field > .lab { font-weight: 600; font-size: 14px; }
+.hint { font-size: 13px; color: var(--muted); margin: 0; }
+select { background: var(--raise); border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; min-width: 0; }
+.seg { display: flex; background: var(--night); border: 1px solid var(--line); border-radius: 9px; padding: 3px; gap: 3px; flex-wrap: wrap; }
+.seg button { flex: 1 1 auto; background: none; border: 0; border-radius: 7px; padding: 8px 10px; font-weight: 600; font-size: 13px; color: var(--muted); cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--raise); color: var(--text); box-shadow: inset 0 0 0 1px var(--violet); }
+.switch { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.switch input { appearance: none; width: 42px; height: 24px; border-radius: 99px; background: var(--raise); border: 1px solid var(--line); position: relative; cursor: pointer; flex: none; transition: background .2s; }
+.switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--muted); transition: transform .2s, background .2s; }
+.switch input:checked { background: var(--violet); border-color: var(--violet); }
+.switch input:checked::after { transform: translateX(18px); background: #fff; }
+.savebar { position: sticky; bottom: 0; display: flex; align-items: center; gap: 14px; padding: 14px 0 0; background: linear-gradient(transparent, var(--night) 30%); }
+.status { font-size: 14px; color: var(--muted); }
+.status.ok { color: var(--ok); }
+
+/* ---- lists (saves, mods) */
+.list { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--line); }
+.item:last-child { border-bottom: 0; }
+.item .t { font-weight: 600; }
+.item .s { font: 400 13px/1.5 var(--mono); color: var(--muted); }
+.example { font: 500 10px/1 var(--mono); color: var(--muted); border: 1px solid var(--line); border-radius: 99px; padding: 3px 7px; margin-left: 8px; vertical-align: 2px; text-transform: uppercase; letter-spacing: .06em; }
+.notice { display: flex; gap: 14px; align-items: flex-start; background: #1d1626; border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 10px; padding: 14px 18px; font-size: 14px; color: var(--muted); }
+.notice b { color: var(--text); }
+.confirm { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 14px; color: var(--warn); }
+
+
+@media (max-width: 900px) {
+  .stage { grid-template-columns: 1fr; }
+  #clock { right: -220px; opacity: .3; }
+  .sections, .tiles { grid-template-columns: 1fr; }
+}
+@media (max-width: 680px) {
+  .app { grid-template-columns: 1fr; }
+  .rail { flex-direction: row; flex-wrap: wrap; align-items: center; padding: 12px max(16px, env(safe-area-inset-right, 0px)) 12px max(16px, env(safe-area-inset-left, 0px)); gap: 10px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .brand b { font-size: 24px; }
+  .brand span, .rail-foot { display: none; }
+  .nav { flex-direction: row; flex-wrap: wrap; gap: 2px; width: 100%; }
+  .nav a { padding: 8px 10px; font-size: 13px; }
+  .nav a[aria-current="page"] { box-shadow: inset 0 -2px 0 var(--moon); }
+  .nav svg { display: none; }
+  .page { padding: 20px max(16px, env(safe-area-inset-right, 0px)) 28px max(16px, env(safe-area-inset-left, 0px)); }
+  .update { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  .stage { padding: 22px; }
+  .headline { font-size: 34px; }
+  h1 { font-size: 32px; }
+}
+@media (prefers-reduced-motion: reduce) { .bar > div { transition: none; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="rail">
+    <div class="brand"><b>B3-Express</b><span>Bayonetta 3 · v1.2.0</span></div>
+    <nav class="nav" aria-label="Pages">
+      <a href="#play" data-page="play"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10 8.5v7l5.5-3.5z"/></svg>Play</a>
+      <a href="#options" data-page="options"><svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>Options</a>
+      <a href="#saves" data-page="saves"><svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z"/><path d="M8 4v5h7V4M8 20v-6h8v6"/></svg>Saves</a>
+      <a href="#mods" data-page="mods"><svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>Mods<span class="badge">soon</span></a>
+      <a href="#help" data-page="help"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.3 2.4c-.5.2-.8.6-.8 1.1V14M12 17.2v.3"/></svg>Help</a>
+    </nav>
+    <div class="rail-foot">
+      <div><span>Launcher</span><span id="r-version">…</span></div>
+      <div><span>GPU</span><span id="r-gpu" title="">…</span></div>
+    </div>
+  </aside>
+
+  <main>
+    <div class="update" id="update" role="status" hidden>
+      <span id="update-t">A new version is out.</span><a href="#" id="update-link">See what's new</a>
+      <button type="button" id="update-close" aria-label="Hide this notice">Later</button>
+    </div>
+
+    <!-- ===== Play ===== -->
+    <section class="page" data-view="play" aria-labelledby="play-h">
+      <h1 id="play-h" hidden>Play</h1>
+      <div class="stage">
+        <canvas id="clock" aria-hidden="true"></canvas>
+        <div>
+          <ol class="steps" id="steps" aria-label="Setup steps">
+            <li data-step="install"><i>1</i>Install</li>
+            <li data-step="prepare"><i>2</i>Prepare shaders</li>
+            <li data-step="play"><i>3</i>Play</li>
+          </ol>
+          <p class="headline" id="headline">One moment…</p>
+          <p class="what" id="what"></p>
+          <div class="folder" id="folder" hidden>
+            <div class="path empty" id="path">No folder chosen</div>
+            <button class="secondary" type="button" id="browse">Choose folder</button>
+          </div>
+          <div class="progress" id="progress" hidden>
+            <div class="bar" role="progressbar" aria-labelledby="ptask" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="fill"></div></div>
+            <div class="pmeta"><span id="ptask">Working</span><span><b id="ppct"></b><span id="peta"></span></span></div>
+          </div>
+          <p class="what" id="note" hidden style="color:var(--warn);margin:16px 0 0;white-space:pre-line"></p>
+          <div class="row" style="margin-top:24px">
+            <button class="primary" type="button" id="go" disabled>Play</button>
+            <button class="ghost" type="button" id="alt" hidden>Stop</button>
+          </div>
+        </div>
+        <div class="side" aria-label="This installation">
+          <div class="fact"><span>Game</span><b id="f-game">…</b></div>
+          <div class="fact"><span>Game code</span><b id="f-code">…</b></div>
+          <div class="fact"><span>Shaders</span><b id="f-shaders">…</b></div>
+          <div class="fact"><span>Graphics card</span><b id="f-gpu">…</b></div>
+        </div>
+      </div>
+      <div class="tiles" id="tiles" aria-label="Last session" hidden>
+        <div class="tile"><span class="k">Average</span><span class="v" id="t-fps"></span><span class="n" id="t-min"></span></div>
+        <div class="tile"><span class="k">1% low</span><span class="v" id="t-low"></span><span class="n">typical 10-second stretch</span></div>
+        <div class="tile"><span class="k">Frame time</span><span class="v" id="t-ft"></span><span class="n">median, as frames reach the screen</span></div>
+      </div>
+      <p class="hint" style="margin:0">In the game: F11 fullscreen, F2 the game's menu, F3 screenshot, F1 help.</p>
+    </section>
+
+    <!-- ===== Options ===== -->
+    <section class="page" data-view="options" aria-labelledby="opt-h" hidden>
+      <div><h1 id="opt-h">Options</h1><p class="lede">Saved in the game's own settings file, which its in-game menu also uses. Changes apply the next time the game starts.</p></div>
+      <div class="sections">
+        <div class="card">
+          <h2>Display</h2>
+          <div class="field">
+            <label for="o-screen">Window size</label>
+            <div class="row"><select id="o-screen"></select><button class="secondary" type="button" id="o-myscreen">Use my screen</button></div>
+          </div>
+          <div class="field">
+            <span class="lab" id="o-quality-l">Quality</span>
+            <div class="seg" role="group" aria-labelledby="o-quality-l" data-seg="quality">
+              <button type="button" data-v="Smooth 60">Smooth 60</button><button type="button" data-v="Balanced">Balanced</button><button type="button" data-v="Sharp">Sharp</button>
+            </div>
+            <p class="hint" id="o-quality-h"></p>
+          </div>
+          <div class="switch"><label for="o-fullscreen">Start in fullscreen</label><input type="checkbox" id="o-fullscreen" data-o="fullscreen"></div>
+          <div class="switch"><label for="o-shadows">Shadows</label><input type="checkbox" id="o-shadows" data-o="shadows"></div>
+          <div class="field">
+            <label for="o-anisotropy">Texture filtering</label>
+            <select id="o-anisotropy" data-o="anisotropy"><option value="0">As the game asks</option><option value="2">2x</option><option value="4">4x</option><option value="8">8x</option><option value="16">16x</option></select>
+          </div>
+          <div class="field">
+            <span class="lab" id="o-fade-l">Object fade</span>
+            <div class="seg" role="group" aria-labelledby="o-fade-l" data-seg="fade">
+              <button type="button" data-v="Game">Game</button><button type="button" data-v="Off">Off</button><button type="button" data-v="Even pattern">Even pattern</button><button type="button" data-v="Transparent">Transparent</button>
+            </div>
+            <p class="hint" id="o-fade-h"></p>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Controller</h2>
+          <div class="field">
+            <span class="lab" id="o-prompts-l">Button prompts</span>
+            <div class="seg" role="group" aria-labelledby="o-prompts-l" data-seg="prompts">
+              <button type="button" data-v="Auto">Auto</button><button type="button" data-v="Switch">Switch</button><button type="button" data-v="PlayStation">PlayStation</button><button type="button" data-v="Xbox">Xbox</button>
+            </div>
+            <p class="hint">Auto shows the buttons of the controller you use.</p>
+          </div>
+          <div class="switch"><label for="o-swap">Swap A and B</label><input type="checkbox" id="o-swap" data-o="gamepad_swap_ab"></div>
+          <div class="field">
+            <label for="o-deadzone">Stick dead zone</label>
+            <select id="o-deadzone" data-o="deadzone"><option value="10">10%</option><option value="15">15%</option><option value="20">20%</option><option value="25">25%</option><option value="30">30%</option></select>
+          </div>
+          <div class="field">
+            <label for="o-rumble">Vibration</label>
+            <select id="o-rumble" data-o="rumble"><option value="0">Off</option><option value="25">25%</option><option value="50">50%</option><option value="75">75%</option><option value="100">100%</option></select>
+          </div>
+          <h2 style="margin-top:8px">Sound</h2>
+          <div class="switch"><label for="o-mute">Mute when the game isn't the active window</label><input type="checkbox" id="o-mute" data-o="mute_unfocused"></div>
+        </div>
+      </div>
+      <div class="savebar"><button class="primary" type="button" id="save" disabled>Save options</button><span class="status" id="save-s" role="status">No changes</span></div>
+    </section>
+
+    <!-- ===== Saves ===== -->
+    <section class="page" data-view="saves" aria-labelledby="sv-h" hidden>
+      <div><h1 id="sv-h">Saves</h1><p class="lede">Back up your progress before trying a new version or a mod. Backups stay on this PC, in the <span style="font-family:var(--mono)">backups</span> folder beside the launcher.</p></div>
+      <div class="row"><button class="primary" type="button" id="backup">Back up my save</button><span class="status" id="backup-s" role="status"></span></div>
+      <div class="list" id="backups"></div>
+      <p class="hint">Restoring replaces the current save. The current one is backed up first, so nothing is lost. Close the game before restoring.</p>
+    </section>
+
+    <!-- ===== Mods ===== -->
+    <section class="page" data-view="mods" aria-labelledby="md-h" hidden>
+      <div><h1 id="md-h">Mods</h1><p class="lede">Mods will replace game files without touching your installed copy. Turning one off goes back to the original files.</p></div>
+      <div class="notice"><span>⚠</span><div><b>Coming with a later version.</b> The game can't load mods yet. Once it can, they will live as folders in <span style="font-family:var(--mono)">mods</span>, each holding replacement game files, and be turned on and off here.</div></div>
+    </section>
+
+    <!-- ===== Help ===== -->
+    <section class="page" data-view="help" aria-labelledby="hp-h" hidden>
+      <div><h1 id="hp-h">Help</h1><p class="lede">Something wrong? A bug report with your log helps most.</p></div>
+      <div class="sections">
+        <div class="card">
+          <h2>Report a problem</h2>
+          <p class="hint">Makes one zip with the game's log, your options and your PC's graphics card and driver. It holds no game files and no saves. Logs show your folder paths, so look inside before sharing if that matters to you.</p>
+          <div class="row"><button class="primary" type="button" id="export">Make a bug report</button></div>
+          <div class="path empty" id="export-path" aria-live="polite">No report made yet</div>
+          <p class="hint">Then attach it to an issue at <span style="font-family:var(--mono);color:var(--text)">github.com/LuvAbyss/B3-Express/issues</span></p>
+          <div class="row"><button class="secondary" type="button" id="issues">Open GitHub issues</button><button class="secondary" type="button" id="logs">Open the log folder</button></div>
+        </div>
+        <div class="card">
+          <h2>Updates</h2>
+          <div class="fact"><span>This version</span><b id="h-version">…</b></div>
+          <div class="fact"><span>Newest</span><b id="h-newest">Not checked yet</b></div>
+          <div class="row"><button class="secondary" type="button" id="check">Check now</button><span class="status" id="check-s" role="status"></span></div>
+          <p class="hint">The launcher only checks and links to the release page. Updating means unzipping the new version and running Install again.</p>
+          <h2 style="margin-top:8px">Shaders</h2>
+          <p class="hint">Prepared shaders are kept for your graphics card and driver. Prepare them again if the game stutters more than it used to.</p>
+          <div class="row"><button class="secondary" type="button" id="reprep">Prepare shaders again</button></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+(function () {
+  const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  let api = null;
+  const call = (name, ...a) => api ? api[name](...a) : Promise.reject(new Error('not ready'));
+
+  /* ---- pages, by the address's #name */
+  const pages = ['play', 'options', 'saves', 'mods', 'help'];
+  function route() {
+    const p = pages.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'play';
+    $$('[data-view]').forEach(v => v.hidden = v.dataset.view !== p);
+    $$('.nav a').forEach(a => a.dataset.page === p ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
+    if (p === 'options') loadOptions();
+    if (p === 'saves') loadBackups();
+  }
+  addEventListener('hashchange', route);
+
+  /* ---- Play: one button always does the next step */
+  let folder = '', last = null, shownDone = false;
+  const order = ['install', 'prepare', 'play'];
+  function eta(s) {
+    if (s == null) return '';
+    if (s > 90) return ' · about ' + Math.ceil(s / 60) + ' min left';
+    if (s > 5) return ' · about ' + Math.ceil(s / 5) * 5 + ' s left';
+    return ' · almost done';
+  }
+  function setFact(id, text, cls) { const e = $(id); e.textContent = text; e.className = cls || ''; }
+  function render(st) {
+    last = st;
+    $('#r-version').textContent = st.version; $('#h-version').textContent = st.version;
+    const gpu = st.gpu || 'Looking…';
+    $('#r-gpu').textContent = gpu.split(',')[0].replace(/^NVIDIA GeForce /, ''); $('#r-gpu').title = gpu;
+    setFact('#f-gpu', gpu.split(',')[0]);
+    setFact('#f-game', st.files ? 'v1.2.0 ✓' : 'Not installed', st.files ? 'ok' : '');
+    setFact('#f-code', st.code ? 'Compiled ✓' : 'Not compiled', st.code ? 'ok' : '');
+    setFact('#f-shaders', st.prepared ? 'Prepared ✓' : st.stale ? 'For another driver' : 'Not prepared', st.prepared ? 'ok' : st.stale ? 'warn' : '');
+    const job = st.job, step = st.step;
+    $$('#steps li').forEach(li => {
+      const i = order.indexOf(li.dataset.step), now = order.indexOf(step);
+      li.className = i < now ? 'done' : i === now ? 'now' : '';
+      li.querySelector('i').textContent = i < now ? '✓' : i + 1;
+    });
+    const go = $('#go'), alt = $('#alt');
+    $('#note').hidden = true;
+    if (job && !job.done) {
+      $('#progress').hidden = false; $('#folder').hidden = true;
+      $('#headline').textContent = job.kind === 'install' ? (st.files ? 'Compiling the game code' : 'Installing') : 'Preparing shaders';
+      $('#what').textContent = job.kind === 'install'
+        ? 'This happens once. The PC stays usable, but the compile uses most of its CPU.'
+        : 'The game\'s window opens at its title while this runs. Leave it open: it closes by itself when the shaders are ready.';
+      $('#ptask').textContent = job.label;
+      const known = job.pct != null;
+      $('#fill').style.width = (known ? job.pct : 4) + '%';
+      $('.bar').setAttribute('aria-valuenow', known ? job.pct : 0);
+      $('#ppct').textContent = known ? job.pct + '%' : 'Starting…';
+      $('#peta').textContent = known ? eta(job.eta) : '';
+      go.disabled = true; go.textContent = job.kind === 'install' ? 'Installing' : 'Preparing';
+      alt.hidden = false; alt.textContent = 'Stop';
+      return;
+    }
+    $('#progress').hidden = true;
+    if (job && job.done) {
+      if (job.error) { $('#note').hidden = false; $('#note').textContent = job.error; }
+      if (!shownDone) { shownDone = true; setTimeout(() => call('dismiss'), job.error ? 15000 : 0); }
+    } else shownDone = false;
+    if (st.note) { $('#note').hidden = false; $('#note').textContent = st.note; }
+    alt.hidden = true;
+    if (st.running) {
+      $('#headline').textContent = 'Bayonetta 3 is running';
+      $('#what').textContent = 'The launcher stays out of the way. Close the game to come back here.';
+      go.textContent = 'Playing'; go.disabled = true; $('#folder').hidden = true;
+    } else if (step === 'install') {
+      const compileOnly = st.files && !st.code;
+      $('#headline').textContent = compileOnly ? 'Compile the game code' : 'Install Bayonetta 3';
+      $('#what').textContent = compileOnly
+        ? 'Your game files are here. The game code is compiled for this PC from them, once, in about 5 minutes.'
+        : 'Choose your extracted copy of the game: the folder that holds both exefs and romfs, updated to v1.2.0. The launcher checks it, copies it and compiles the game code for this PC. Your folder stays as it is.';
+      $('#folder').hidden = compileOnly;
+      go.textContent = compileOnly ? 'Compile' : 'Install';
+      go.disabled = !st.program || (!compileOnly && !folder);
+      if (!st.program) { $('#note').hidden = false; $('#note').textContent = 'The game\'s program is missing from this folder. Unzip the whole package again.'; }
+    } else if (step === 'prepare') {
+      $('#folder').hidden = true;
+      $('#headline').textContent = st.stale ? 'Your graphics driver changed' : 'One more step';
+      $('#what').textContent = st.stale
+        ? 'Shaders are prepared again for the new driver, about 3 minutes. You can also play now and let them compile while you play, with some stutter at first.'
+        : 'Shaders are prepared once for your graphics card, so the game doesn\'t stutter compiling them while you play. It takes about 3 minutes.';
+      go.textContent = 'Prepare shaders'; go.disabled = false;
+      alt.hidden = false; alt.textContent = 'Play now';
+    } else {
+      $('#folder').hidden = true;
+      $('#headline').textContent = 'Ready when you are.';
+      $('#what').textContent = 'Everything is prepared for your graphics card. Options and saves are on the left.';
+      go.textContent = 'Play'; go.disabled = false;
+    }
+    const s = st.last;
+    $('#tiles').hidden = !s;
+    if (s) {
+      $('#t-fps').textContent = s.fps.toFixed(1) + ' FPS';
+      $('#t-min').textContent = 'your last session, ' + Math.round(s.minutes) + ' min';
+      $('#t-low').textContent = s.low.toFixed(1) + ' FPS';
+      $('#t-ft').textContent = s.frame_ms != null ? s.frame_ms.toFixed(2) + ' ms' : '–';
+    }
+  }
+  function tick() { call('state').then(render).catch(() => {}).finally(() => setTimeout(tick, 500)); }
+  function say(msg) { if (msg) { $('#note').hidden = false; $('#note').textContent = msg; } }
+
+  $('#browse').onclick = () => call('choose_folder').then(f => {
+    if (!f) return;
+    folder = f; $('#path').textContent = f; $('#path').classList.remove('empty');
+    call('check_folder', f).then(problem => { say(problem); if (last) render(last); if (problem) $('#go').disabled = true; });
+  });
+  $('#go').onclick = () => {
+    if (!last) return;
+    const st = last;
+    if (st.step === 'install') call('install', folder).then(say);
+    else if (st.step === 'prepare') call('prepare', false).then(say);
+    else call('play').then(say);
+  };
+  $('#alt').onclick = () => {
+    if (last && last.job && !last.job.done) call('stop');
+    else call('play').then(say);
+  };
+
+  /* ---- Options */
+  let opts = null, helps = {};
+  function setSeg(name, v) {
+    $$(`[data-seg="${name}"] button`).forEach(b => b.setAttribute('aria-pressed', b.dataset.v === v));
+    const h = name === 'quality' ? helps.quality : name === 'fade' ? helps.fade : null;
+    if (h) $('#o-' + name + '-h').textContent = h[v] || 'Set by hand in the settings file.';
+  }
+  function loadOptions() {
+    call('options').then(r => {
+      opts = r.values; helps = { quality: r.quality_help, fade: r.fade_help };
+      const sel = $('#o-screen'); sel.innerHTML = '';
+      const screens = r.screens.includes(opts.screen) ? r.screens : [...r.screens, opts.screen];
+      for (const n of screens) { const o = document.createElement('option'); o.textContent = n; sel.appendChild(o); }
+      sel.value = opts.screen;
+      for (const s of ['quality', 'fade', 'prompts']) setSeg(s, opts[s]);
+      $$('[data-o]').forEach(e => e.type === 'checkbox' ? e.checked = !!opts[e.dataset.o] : e.value = opts[e.dataset.o]);
+      $('#save').disabled = true; $('#save-s').textContent = r.has_file ? 'No changes' : 'The game makes its settings file the first time it runs.'; $('#save-s').className = 'status';
+    });
+  }
+  function dirty() { $('#save').disabled = false; $('#save-s').textContent = 'Unsaved changes'; $('#save-s').className = 'status'; }
+  $$('.seg').forEach(g => g.addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b || !opts) return;
+    opts[g.dataset.seg] = b.dataset.v; setSeg(g.dataset.seg, b.dataset.v); dirty();
+  }));
+  $('#o-screen').addEventListener('change', e => { opts.screen = e.target.value; dirty(); });
+  $$('[data-o]').forEach(e => e.addEventListener('change', () => { opts[e.dataset.o] = e.type === 'checkbox' ? e.checked : e.value; dirty(); }));
+  $('#o-myscreen').onclick = () => call('my_screen').then(n => { opts.screen = n; $('#o-screen').value = n; dirty(); });
+  $('#save').onclick = () => call('save_options', opts).then(err => {
+    $('#save-s').textContent = err || 'Saved. They apply the next time the game starts.';
+    $('#save-s').className = err ? 'status' : 'status ok'; if (!err) $('#save').disabled = true;
+  });
+
+  /* ---- Saves */
+  function loadBackups() {
+    call('backups').then(list => {
+      const box = $('#backups'); box.innerHTML = '';
+      if (!list.length) { box.innerHTML = '<div class="item"><div><div class="t">No backups yet</div><div class="s">Back up my save makes the first one.</div></div></div>'; return; }
+      for (const b of list) {
+        const el = document.createElement('div'); el.className = 'item';
+        el.innerHTML = '<div><div class="t"></div><div class="s"></div></div><div class="row"><button class="secondary" type="button">Restore</button></div>';
+        el.querySelector('.t').textContent = b.when;
+        el.querySelector('.s').textContent = (b.note || 'backup') + ' · ' + (b.size / 1048576).toFixed(1) + ' MB';
+        el.querySelector('button').onclick = () => confirmRestore(el.querySelector('.row'), b.name);
+        box.appendChild(el);
+      }
+    });
+  }
+  function confirmRestore(row, name) {
+    row.innerHTML = '<span class="confirm">Replace the current save?</span><button class="primary" type="button" style="padding:9px 16px;font-size:14px">Restore</button><button class="ghost" type="button">Cancel</button>';
+    const [yes, no] = row.querySelectorAll('button');
+    no.onclick = loadBackups;
+    yes.onclick = () => call('restore', name).then(err => {
+      row.innerHTML = ''; const s = document.createElement('span'); s.className = err ? 'confirm' : 'status ok';
+      s.textContent = err || 'Restored. The old save was backed up first.'; row.appendChild(s);
+      if (!err) setTimeout(loadBackups, 1500);
+    });
+  }
+  $('#backup').onclick = () => call('backup_now').then(r => {
+    $('#backup-s').textContent = r.error || 'Backed up.'; $('#backup-s').className = r.error ? 'status' : 'status ok';
+    if (!r.error) loadBackups();
+  });
+
+  /* ---- Help */
+  $('#export').onclick = () => call('report').then(r => {
+    $('#export-path').textContent = r.error || ('Saved: ' + r.path + ' · ' + r.kb + ' KB');
+    $('#export-path').classList.toggle('empty', !!r.error);
+  });
+  $('#issues').onclick = () => call('open_link', 'issues');
+  $('#logs').onclick = () => call('open_logs');
+  function checkUpdate(quiet) {
+    $('#check-s').textContent = 'Checking…';
+    call('check_update').then(r => {
+      const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      if (r.error) { $('#check-s').textContent = r.error; return; }
+      $('#check-s').textContent = 'Checked at ' + now;
+      $('#h-newest').textContent = r.tag || 'You have the newest'; $('#h-newest').className = r.tag ? 'warn' : 'ok';
+      if (r.tag) { $('#update-t').textContent = 'B3-Express ' + r.tag.replace(/^v/, '') + ' is out.'; $('#update').hidden = false; }
+    });
+  }
+  $('#check').onclick = () => checkUpdate(false);
+  $('#update-link').onclick = e => { e.preventDefault(); call('open_link', 'releases'); };
+  $('#update-close').onclick = () => $('#update').hidden = true;
+  $('#reprep').onclick = () => { location.hash = '#play'; call('prepare', true).then(say); };
+
+  /* ---- the clock-ring: thin gold rings turning slowly */
+  const c = $('#clock'), g = c.getContext('2d'), still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const r0 = devicePixelRatio || 1; c.width = 560 * r0; c.height = 560 * r0; g.setTransform(r0, 0, 0, r0, 0, 0);
+  function draw(t) {
+    g.clearRect(0, 0, 560, 560); g.save(); g.translate(280, 280);
+    for (const [r, n, sp, a] of [[250, 72, 0.012, 0.9], [205, 48, -0.02, 0.7], [160, 24, 0.03, 0.55], [118, 12, -0.05, 0.45]]) {
+      g.strokeStyle = `rgba(226,194,126,${a * 0.5})`; g.lineWidth = 1;
+      g.beginPath(); g.arc(0, 0, r, 0, Math.PI * 2); g.stroke();
+      g.save(); g.rotate(t * sp);
+      for (let i = 0; i < n; i++) {
+        const ang = i / n * Math.PI * 2, long = i % (n / 12) === 0, d = long ? 14 : 6;
+        g.strokeStyle = `rgba(226,194,126,${a * (long ? 0.9 : 0.45)})`;
+        g.beginPath(); g.moveTo(Math.cos(ang) * (r - d), Math.sin(ang) * (r - d)); g.lineTo(Math.cos(ang) * r, Math.sin(ang) * r); g.stroke();
+      }
+      g.restore();
+    }
+    g.strokeStyle = 'rgba(139,95,196,0.6)'; g.lineWidth = 2;
+    g.save(); g.rotate(t * 0.08); g.beginPath(); g.moveTo(0, 0); g.lineTo(0, -150); g.stroke(); g.restore();
+    g.save(); g.rotate(t * 0.011 + 2); g.beginPath(); g.moveTo(0, 0); g.lineTo(0, -95); g.stroke(); g.restore();
+    g.fillStyle = 'rgba(226,194,126,0.8)'; g.beginPath(); g.arc(0, 0, 4, 0, Math.PI * 2); g.fill(); g.restore();
+  }
+  if (still) draw(0); else (function loop(ms) { if (!document.hidden) draw(ms / 1000); requestAnimationFrame(loop); })(0);
+
+  /* ---- start once pywebview has put its bridge in */
+  function start() { api = window.pywebview.api; route(); tick(); checkUpdate(true); }
+  if (window.pywebview && window.pywebview.api) start(); else addEventListener('pywebviewready', start);
+  route();
+})();
+</script>
+</body>
+</html>

@@ -399,6 +399,181 @@ def log_error(kind, value, trace):
     return f'The launcher hit an error: {value!r}\n{where}\nPlease attach that file to a GitHub issue.'
 
 
+# ---- what the new launcher window (web_launcher.py) asks for, kept here with the rest of the logic and its tests
+
+SAVE = DATA / 'save'
+BACKUPS = ROOT / 'backups'
+REPORTS = ROOT / 'reports'
+REPO = 'LuvAbyss/B3-Express'
+FLAGS = (('fullscreen', '1'), ('shadows', '1'), ('mute_unfocused', '1'), ('gamepad_swap_ab', '0'))
+
+
+def launcher_version():
+    """The package's version (VERSION, written by make-release.py), 'dev' when run from the repository"""
+    try:
+        return (ROOT / 'VERSION').read_text(encoding='ascii').strip() or 'dev'
+    except OSError:
+        return 'dev'
+
+
+def options_read(text):
+    """Every option the launcher shows, as the settings file has it, with the names its pages use"""
+    res = to_float(ini_get(text, 'resolution', '1'), 1)
+    fsr = to_float(ini_get(text, 'fsr', '0'), 0)
+    return {'screen': screen_of(res), 'quality': quality_of(res, fsr),
+            **{key: ini_get(text, key, default) == '1' for key, default in FLAGS},
+            'anisotropy': ini_get(text, 'anisotropy', '0'),
+            'fade': dict((v, n) for n, v in FADES).get(ini_get(text, 'dither', '3'), FADES[3][0]),
+            'prompts': dict((v, n) for n, v in PROMPTS).get(ini_get(text, 'button_prompts', '0'), PROMPTS[0][0]),
+            'deadzone': ini_get(text, 'gamepad_deadzone', '20'), 'rumble': ini_get(text, 'gamepad_rumble', '100')}
+
+
+def options_apply(text, o):
+    """The settings file's text with the options o set, every comment kept. A screen or quality the pages don't name
+    (set by hand) stays as it is"""
+    res, scene = dict(SCREENS).get(o['screen']), dict(QUALITY).get(o['quality'], 1.0)
+    if res is not None and o['quality'] in dict(QUALITY):
+        resolution, fsr = scale_settings(res, scene)
+        text = ini_set(text, 'resolution', f'{resolution:g}', 'docked')
+        text = ini_set(text, 'fsr', f'{fsr:g}', 'resolution')
+    for key, _ in FLAGS:
+        text = ini_set(text, key, '1' if o[key] else '0', 'fullscreen')
+    if o['anisotropy'] not in ('0', '2', '4', '8', '16') or o['deadzone'] not in ('10', '15', '20', '25', '30') \
+            or o['rumble'] not in ('0', '25', '50', '75', '100'):
+        raise ValueError('an option has a value the launcher doesn\'t offer')
+    text = ini_set(text, 'anisotropy', o['anisotropy'], 'vsync')
+    text = ini_set(text, 'dither', dict(FADES)[o['fade']], 'resolution')
+    text = ini_set(text, 'gamepad_deadzone', o['deadzone'], 'gamepad_swap_ab')
+    text = ini_set(text, 'gamepad_rumble', o['rumble'], 'gamepad_deadzone')
+    return ini_set(text, 'button_prompts', dict(PROMPTS)[o['prompts']], 'gamepad_swap_ab')
+
+
+def write_ini(text):
+    """The settings file replaced whole, the first version kept beside it as .before-launcher"""
+    backup = INI.with_suffix('.ini.before-launcher')
+    if INI.is_file() and not backup.exists():
+        shutil.copy2(INI, backup)
+    temporary = INI.with_suffix('.tmp')
+    temporary.write_text(text, encoding='utf8', newline='')
+    temporary.replace(INI)
+
+
+def backup_list():
+    """The save backups, newest first: (file name, time, bytes, note)"""
+    out = []
+    for path in BACKUPS.glob('save-*.zip') if BACKUPS.is_dir() else []:
+        note = ''
+        try:
+            import zipfile
+            with zipfile.ZipFile(path) as z:
+                note = z.comment.decode('utf8', errors='replace')
+        except (OSError, ValueError):
+            continue
+        out.append((path.name, path.stat().st_mtime, path.stat().st_size, note))
+    return sorted(out, key=lambda b: b[1], reverse=True)
+
+
+def backup_save(note='made by hand'):
+    """The game's save folder zipped into backups/; the file's name, or None when there is no save to back up"""
+    import zipfile
+    files = [p for p in SAVE.rglob('*') if p.is_file()] if SAVE.is_dir() else []
+    if not files:
+        return None
+    BACKUPS.mkdir(exist_ok=True)
+    name = time.strftime('save-%Y%m%d-%H%M%S.zip')
+    n = 1
+    while (BACKUPS / name).exists():
+        n += 1
+        name = time.strftime(f'save-%Y%m%d-%H%M%S-{n}.zip')
+    temporary = BACKUPS / (name + '.part')
+    with zipfile.ZipFile(temporary, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.comment = note.encode('utf8')[:200]
+        for p in files:
+            z.write(p, p.relative_to(SAVE).as_posix())
+    temporary.replace(BACKUPS / name)
+    return name
+
+
+def restore_save(name):
+    """The backup name put in place of the save folder, the current save backed up first. None when it worked"""
+    import zipfile
+    path = BACKUPS / name
+    if path.parent != BACKUPS or not re.fullmatch(r'save-[\d-]+\.zip', name) or not path.is_file():
+        return 'That backup isn\'t there any more.'
+    if game_running():
+        return 'Close the game first.'
+    backup_save('before a restore')
+    temporary = DATA / 'save.restoring'
+    shutil.rmtree(temporary, ignore_errors=True)
+    with zipfile.ZipFile(path) as z:
+        for member in z.namelist():  # nothing may land outside the save folder
+            target = (temporary / member).resolve()
+            if temporary.resolve() not in target.parents:
+                return 'That backup holds files outside a save folder: it was not restored.'
+        z.extractall(temporary)
+    old = DATA / 'save.old'
+    shutil.rmtree(old, ignore_errors=True)
+    if SAVE.exists():
+        os.replace(SAVE, old)
+    os.replace(temporary, SAVE)
+    shutil.rmtree(old, ignore_errors=True)
+    return None
+
+
+def system_text():
+    import platform
+    return (f'B3-Express {launcher_version()}\nWindows {platform.version()} ({platform.machine()})\n'
+            f'CPU threads {os.cpu_count()}\nGraphics {gpu_info()}\nGame folder {GAME}\n'
+            f'Installed {installed()}, game code {module_ready()}\n')
+
+
+def make_report():
+    """A zip for a bug report: the game's logs, the settings and what PC this is. No game files, no saves. Its path"""
+    import zipfile
+    REPORTS.mkdir(exist_ok=True)
+    path = REPORTS / time.strftime('report-%Y%m%d-%H%M%S.zip')
+    sessions = sorted(LOGS.glob('session-*.log'))[-2:] if LOGS.is_dir() else []
+    with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr('system.txt', system_text())
+        for p in [GAME / (NAME + '.log'), INI, LOGS / 'launcher-errors.log', LOGS / 'build-code.log', *sessions]:
+            if p.is_file():
+                z.write(p, p.name)
+    return path
+
+
+def session_stats(path):
+    """The Play page's last session: average FPS, the typical 10-second stretch's 1% low and the median frame time
+    on the display, from the game's reports every 600 frames. None before there are two reports"""
+    try:
+        text = path.read_text(encoding='utf8', errors='replace')
+    except OSError:
+        return None
+    reports = re.findall(r'^\[\s*([\d.]+)\] nvn-live: frame times: median \d+ ms, p99 \d+ ms, 1% low ([\d.]+) FPS', text, re.M)
+    shown = [float(x) for x in re.findall(r'frames on the display: median ([\d.]+) ms', text)]
+    if len(reports) < 2:
+        return None
+    first, last = float(reports[0][0]), float(reports[-1][0])
+    lows = sorted(float(x) for _, x in reports)
+    return {'minutes': last / 60, 'fps': 600 * (len(reports) - 1) / max(last - first, 1e-3),
+            'low': lows[len(lows) // 2], 'frame_ms': sorted(shown)[len(shown) // 2] if shown else None}
+
+
+def newer_release(current, timeout=6):
+    """(tag, page) of the latest GitHub release when it's newer than current, (None, None) when it isn't, or raises"""
+    import urllib.request
+    request = urllib.request.Request(f'https://api.github.com/repos/{REPO}/releases/latest',
+                                     headers={'User-Agent': 'B3-Express-launcher', 'Accept': 'application/vnd.github+json'})
+    with urllib.request.urlopen(request, timeout=timeout) as answer:
+        release = json.loads(answer.read().decode('utf8'))
+    tag, page = release.get('tag_name', ''), release.get('html_url', '')
+
+    def parts(v):
+        return tuple(int(x) for x in re.findall(r'\d+', v)[:3])
+    if current == 'dev' or not parts(tag) or parts(tag) <= parts(current):
+        return None, None
+    return tag, page
+
+
 class Launcher(LauncherTheme):
     def __init__(self, root):
         self.root, self.tk, self.ttk = root, tk, ttk

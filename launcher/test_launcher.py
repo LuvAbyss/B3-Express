@@ -272,4 +272,68 @@ assert 'KeyError' in (L.LOGS / 'launcher-errors.log').read_text(encoding='utf8')
 assert L.prep_mode('resolution=1.6\nfsr=0\n') == 7
 assert L.prep_mode('resolution=1\nfsr=0\ndither=0\n') == 0 and L.prep_mode('resolution=1.6\ndither=0\n') == 1
 assert L.prep_mode('resolution=1\ndither=x\n') == 0 and L.prep_mode('resolution=1\ndither=9\n') == 6
+
+# the new window's options: what is read writes back the same, every comment kept
+GAME_INI = ('; settings\r\n[Display]\r\ndocked=1\r\nresolution=1.6\r\nfsr=1.6\r\nfullscreen=1\r\nvsync=1\r\n'
+            '; pad\r\n[Input]\r\ngamepad_swap_ab=0\r\n')
+o = L.options_read(GAME_INI)
+assert o['screen'] == '2560 x 1440' and o['quality'] == 'Smooth 60' and o['fullscreen'] is True, o
+assert o['fade'] == 'Transparent' and o['prompts'] == 'Auto' and o['deadzone'] == '20' and o['rumble'] == '100', o
+again = L.options_apply(GAME_INI, o)
+assert L.options_read(again) == o and '; pad\r\n' in again and again.count('resolution=') == 1, repr(again)
+o2 = dict(o, screen='3840 x 2160', quality='Balanced', shadows=False, fade='Off', prompts='Xbox', deadzone='25', rumble='50')
+t = L.options_apply(GAME_INI, o2)  # Balanced on 1080p is stored as native, the same as Sharp: a bigger screen
+assert L.options_read(t) == o2, (L.options_read(t), o2)
+assert L.ini_get(t, 'dither') == '1' and L.ini_get(t, 'button_prompts') == '3' and L.ini_get(t, 'shadows') == '0'
+for bad in ({'anisotropy': '3'}, {'deadzone': '99'}, {'rumble': '-1'}):
+    try:
+        L.options_apply(GAME_INI, dict(o, **bad))
+        raise SystemExit(f'{bad} must be refused')
+    except ValueError:
+        pass
+custom = 'docked=1\r\nresolution=1.7\r\nfsr=0\r\nfullscreen=1\r\nvsync=1\r\ngamepad_swap_ab=0\r\n'  # set by hand: kept
+assert L.ini_get(L.options_apply(custom, L.options_read(custom)), 'resolution') == '1.7'
+
+# save backups: made, listed newest first, restored with the current save backed up first, nothing outside the folder
+import zipfile
+L.SAVE = L.DATA / 'save'
+L.BACKUPS = Path(tempfile.mkdtemp()) / 'backups'
+L.game_running = lambda name=L.NAME: False
+assert L.backup_save() is None and L.backup_list() == []  # no save yet
+(L.SAVE / 'slot').mkdir(parents=True)
+(L.SAVE / 'slot' / 'data.bin').write_bytes(b'chapter 3')
+first = L.backup_save('first')
+(L.SAVE / 'slot' / 'data.bin').write_bytes(b'chapter 9')
+assert first and L.backup_list()[0][3] == 'first'
+assert L.restore_save(first) is None and (L.SAVE / 'slot' / 'data.bin').read_bytes() == b'chapter 3'
+notes = [b[3] for b in L.backup_list()]
+assert 'before a restore' in notes and len(notes) == 2, notes
+assert L.restore_save('../x.zip') and L.restore_save('save-1.zip')  # names outside backups/, or missing
+evil = L.BACKUPS / 'save-20990101-000000.zip'
+with zipfile.ZipFile(evil, 'w') as z:
+    z.writestr('../escaped.bin', b'x')
+assert 'outside' in L.restore_save(evil.name) and not (L.DATA / 'escaped.bin').exists()
+assert (L.SAVE / 'slot' / 'data.bin').read_bytes() == b'chapter 3'  # a refused restore leaves the save alone
+
+# the bug report: logs and settings, never a save or game file
+L.REPORTS = Path(tempfile.mkdtemp()) / 'reports'
+L.gpu_info = lambda: 'test GPU'
+(L.GAME / (L.NAME + '.log')).write_text('[ 1.00] log line\n', encoding='utf8')
+with zipfile.ZipFile(L.make_report()) as z:
+    names = z.namelist()
+    assert 'system.txt' in names and L.NAME + '.log' in names, names
+    assert not any('save' in n or n.endswith(('.nca', '.nso', 'main')) for n in names), names
+    assert b'test GPU' in z.read('system.txt')
+
+# the last session's tiles, from the game's reports every 600 frames (10 s at 60)
+log = L.GAME / 'stats.log'
+log.write_text(''.join(f'[{10 + 10 * i:7.2f}] nvn-live: frame times: median 17 ms, p99 20 ms, 1% low {low} FPS; ASTC 0.0 Mpx\n'
+                       f'[{10 + 10 * i:7.2f}] vulkan: frames on the display: median 16.75 ms, p99 19.00 ms; under 14 ms 0\n'
+                       for i, low in enumerate((40.0, 50.0, 47.6))), encoding='utf8')
+s = L.session_stats(log)
+assert abs(s['fps'] - 60) < 0.01 and s['low'] == 47.6 and s['frame_ms'] == 16.75 and abs(s['minutes'] - 0.5) < 0.01, s
+assert L.session_stats(L.GAME / 'none.log') is None
+
+# a release is newer only by its numbers
+assert L.launcher_version() == 'dev'
 print('launcher logic: all passed')
