@@ -534,7 +534,7 @@ static void reg_texture(CPU* RESTRICT c, const NvnFn* f) { /* (pool, id, texture
     tic_check(pool, id, tex);
     {
         TexRec* t = tex_slot(tex, 0);
-        if (t && t->live) vk_nvn_tex_registered(t->gpu);
+        if (t && t->live) vk_nvn_tex_registered(t->gpu, t->width, t->height);
     }
     pm_unlock(&g_lk);
 }

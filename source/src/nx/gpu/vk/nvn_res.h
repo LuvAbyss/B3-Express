@@ -150,7 +150,7 @@ void vk_nvn_live_present(u64 gpu, u64 cpu, const char* out, int all);
 void vk_nvn_live_tex_free(u64 gpu); /* nvnTextureFinalize: the image kept for that address goes */
 /* nvnTexturePoolRegisterTexture (game thread): the texture at gpu can be drawn from now. A measure for decoding ahead:
    vk_nvn_tex_known gives the present it was first registered at, or -1 when it wasn't */
-void vk_nvn_tex_registered(u64 gpu);
+void vk_nvn_tex_registered(u64 gpu, u32 w, u32 h);
 long long vk_nvn_tex_known(u64 gpu);
 void vk_nvn_live_show(void); /* SNX_NVN_FRONTEND=2: vi's presents show the host's images (vk_nvn_live_surf) */
 /* SNX_NVN_RELEASE_ONLY (step 4.3): what the frame writes goes to guest memory for real, each list goes to the GPU when

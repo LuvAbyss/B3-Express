@@ -8,7 +8,11 @@
 #include <string.h>
 #include "nx/gpu/gpu.h"
 #include "nx/gpu/renderer.h"
+#include "nx/gpu/texture/astc.h"
+#include "nx/gpu/texture/bc7.h"
 #include "nx/gpu/texture/etc2.h"
+#include "nx/gpu/texture/texpack.h"
+#include "nx/runtime/main.h"
 #include "nx/runtime/platform/log.h"
 #include "nx/gpu/vk/vk.h"
 #include "nx/gpu/vk/prompts.h"
@@ -40,8 +44,7 @@ static u32 bl_row_bytes(u32 tw, u32 th, u32 td, const VkFmt* f, u32 bh, u32 bd, 
     return (rb + al - 1) / al * al;
 }
 /* bytes of one mip level of a block-linear texture; lbh and lbd (may be NULL) get its block height and depth */
-static u64 bl_level_size(u32 w, u32 h, u32 d, const VkFmt* f, u32 bh, u32 bd, u32 tws, u32 level, u32* lbh,
-                         u32* lbd) {
+static u64 bl_level_size(u32 w, u32 h, u32 d, const VkFmt* f, u32 bh, u32 bd, u32 tws, u32 level, u32* lbh, u32* lbd) {
     u32 lw = w >> level ? w >> level : 1, lh = h >> level ? h >> level : 1, ld = d >> level ? d >> level : 1;
     u32 tw = (lw + f->bw - 1) / f->bw, th = (lh + f->bh - 1) / f->bh;
     u32 gx = (bl_row_bytes(tw, th, ld, f, bh, bd, tws) + 63) / 64, gy = (th + 7) / 8, b, bdd;
@@ -171,7 +174,7 @@ static int g_nspread;
 static u64 g_spread_px = ~0ull; /* the budget a present, texels; ~0 until read */
 static struct {
     u64 n, px, done, done_px, frames;
-} g_spread_st; /* since the last report */
+} g_spread_st;                                /* since the last report */
 static void tex_set_base(Surf* t, u32 base) { /* views from level base: the old ones go, made again when asked */
     if (t->astc_base == base) return;
     t->astc_base = (u8)base;
@@ -237,9 +240,8 @@ static int tex_upload_levels(Surf* t, u32 l0, u32 l1) {
     int packed_depth = f->depth && f->stencil;
     int is3d = t->type == VK_IMAGE_VIEW_TYPE_3D;
     u32 layers = t->layers, d3 = is3d ? t->depth3d : 1;
-    VkBufferImageCopy* reg = f->conv == VKC_ASTC
-                                ? NULL
-                                : calloc((size_t)layers * t->levels * (packed_depth ? 2 : 1), sizeof *reg);
+    VkBufferImageCopy* reg =
+        f->conv == VKC_ASTC ? NULL : calloc((size_t)layers * t->levels * (packed_depth ? 2 : 1), sizeof *reg);
     if (f->conv != VKC_ASTC && !reg) return 0;
     u32 nreg = 0;
     int complete = 1;
@@ -254,7 +256,8 @@ static int tex_upload_levels(Surf* t, u32 l0, u32 l1) {
             if (!ld) ld = 1;
             u32 tw = (lw + f->bw - 1) / f->bw, th = (lh + f->bh - 1) / f->bh;
             u32 rowb = tw * f->bpp, lbh = 0, lbd = 0;
-            u64 lsz = t->bl ? bl_level_size(t->w, t->h, d3, f, t->bh, t->bd, t->tws, l, &lbh, &lbd) : (u64)t->pitch * th * ld;
+            u64 lsz =
+                t->bl ? bl_level_size(t->w, t->h, d3, f, t->bh, t->bd, t->tws, l, &lbh, &lbd) : (u64)t->pitch * th * ld;
             if (l < l0 || l >= l1) {
                 at += lsz;
                 continue;
@@ -301,8 +304,7 @@ static int tex_upload_levels(Surf* t, u32 l0, u32 l1) {
                     level_convert(f, lin, lw, lh, ld, rowb, p);
                 reg[nreg++] = (VkBufferImageCopy){
                     .bufferOffset = off,
-                    .imageSubresource = {f->depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, l, layer,
-                                         1},
+                    .imageSubresource = {f->depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, l, layer, 1},
                     .imageExtent = {lw, lh, ld}};
                 if (packed_depth) {
                     reg[nreg] = reg[nreg - 1];
@@ -323,9 +325,222 @@ done:
     if (complete) t->uploaded = 1;
     return t->upload_valid = complete;
 }
+/* SNX_TEX_HASHLOG=file: each ASTC texture's first upload as a BC7 pack would key it (a hash of its bytes, as Witch Time's
+   tex_pack_hash; their size: one layer's levels for a single layer, else every layer at its stride), with its size and
+   footprint, to check a pack made from the game's archives finds the textures the renderer uploads */
+static void tex_hashlog(const Surf* t) {
+    static FILE* f;
+    static int tried;
+    u32 d3 = t->type == VK_IMAGE_VIEW_TYPE_3D ? t->depth3d : 1;
+    u64 one = 0, size, h, w;
+    u8* p;
+    u8* tmp = NULL;
+    if (!tried) {
+        const char* e = getenv("SNX_TEX_HASHLOG");
+        tried = 1;
+        if (e && *e) f = fopen(e, "w");
+    }
+    if (!f || t->f.conv != VKC_ASTC || t->uploaded || !t->bl) return;
+    for (u32 l = 0; l < t->levels; l++)
+        one += bl_level_size(t->w, t->h, d3, &t->f, t->bh, t->bd, t->tws, l, NULL, NULL);
+    size = t->layers == 1 ? one : t->layer_size * t->layers;
+    p = gmem_ptr(t->gva, size);
+    if (!p && (tmp = p = malloc(size ? size : 1)) != NULL) gmem_read(t->gva, tmp, size);
+    if (!p) return;
+    h = 0x9E3779B97F4A7C15ull ^ size;
+    for (u64 i = 0; i + 8 <= size; i += 8) {
+        memcpy(&w, p + i, 8);
+        h = (h ^ w) * 0x100000001B3ull;
+        h ^= h >> 29;
+    }
+    free(tmp);
+    fprintf(f, "%016llx\t%llu\t%u\t%u\t%u\t%u\t%ux%u\n", (unsigned long long)h, (unsigned long long)size, t->w, t->h,
+            t->levels, t->layers, t->f.bw, t->f.bh);
+    fflush(f);
+}
+
+/* ---- the texture pack (gpu/texture/texpack.h): the game's ASTC textures made BC7 ahead by texpack.exe, from the
+   game's own archives. A new ASTC texture the pack holds is made a BC7 image and filled from the pack; one it doesn't
+   goes the ASTC way. When the game rewrites a pack texture's memory, its new bytes are looked up again and, when the pack
+   lacks them (a mod, a texture the game makes), encoded here: the image stays BC7. SNX_TEXPACK=dir reads the pack there
+   (shader_cache/texpack by default), SNX_TEXPACK=0 not at all */
+static int g_pack = -1; /* textures in the pack; -1 before it is opened */
+static PMutex g_pack_lk = PMUTEX_INIT;
+static struct {
+    u64 hits, misses, encoded, bytes, ns;
+} g_pack_st;
+int vk_texpack_ready(void) {
+    if (__atomic_load_n(&g_pack, __ATOMIC_ACQUIRE) < 0) {
+        pm_lock(&g_pack_lk); /* the game's thread (registrations) and the render thread both ask first */
+        if (g_pack < 0) {
+            const char* e = getenv("SNX_TEXPACK");
+            char dir[1100];
+            int n = 0;
+            if (!e || strcmp(e, "0")) {
+                if (e && *e)
+                    snprintf(dir, sizeof dir, "%s", e);
+                else
+                    snprintf(dir, sizeof dir, "%sshader_cache/texpack", g_cachedir);
+                n = (int)texpack_open(dir);
+                LOG("vulkan: texture pack %s: %d textures%s\n", dir, n, n ? "" : " (none, ASTC is decoded as before)");
+            }
+            __atomic_store_n(&g_pack, n, __ATOMIC_RELEASE);
+        }
+        pm_unlock(&g_pack_lk);
+    }
+    return g_pack > 0;
+}
+/* the format number the game's texture records give an ASTC format, which the pack is keyed by */
+static u32 astc_format(const VkFmt* f) {
+    static const u8 k[14][2] = {{4, 4}, {5, 4},  {5, 5},  {6, 5},  {6, 6},   {8, 5},   {8, 6},
+                                {8, 8}, {10, 5}, {10, 6}, {10, 8}, {10, 10}, {12, 10}, {12, 12}};
+    int srgb = f->vk == VK_FORMAT_BC3_SRGB_BLOCK || f->vk == VK_FORMAT_R8G8B8A8_SRGB, i;
+    for (i = 0; i < 14; i++)
+        if (k[i][0] == f->bw && k[i][1] == f->bh) return 0x79 + (u32)i + (srgb ? 14 : 0);
+    return 0;
+}
+static VkFmt bc7_of(const VkFmt* astc) {
+    VkFmt r = {astc_format(astc) >= 0x87 ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK, 16, 4, 4, 0, 0, 0, 0};
+    r.conv = VKC_NONE;
+    return r;
+}
+/* the bytes the pack keys a texture by: one layer's levels for a single layer, else every layer at its stride */
+static u64 pack_size(u32 w, u32 h, u32 levels, u32 layers, const VkFmt* f, u32 bh, u32 bd, u32 tws, u64 stride) {
+    u64 one = 0;
+    for (u32 l = 0; l < levels; l++) one += bl_level_size(w, h, 1, f, bh, bd, tws, l, NULL, NULL);
+    return layers == 1 ? one : stride * layers;
+}
+/* the pack's BC7 of the ASTC texture of size bytes at gva (malloc'd, *raw bytes), or NULL */
+static u8* pack_lookup(u64 gva, u64 size, u32 w, u32 h, u32 levels, u32 layers, const VkFmt* f, u32* raw) {
+    u64 t0 = plat_ns(), hash;
+    u8* p = gmem_ptr(gva, size);
+    u8* tmp = NULL;
+    u8* out;
+    const TexPackEntry* e;
+    if (!p) {
+        if (!(tmp = p = malloc(size ? size : 1))) return NULL;
+        gmem_read(gva, tmp, size);
+    }
+    hash = texpack_hash(p, size);
+    free(tmp);
+    e = texpack_find(hash, size, astc_format(f), w, h, levels, layers);
+    if (!e || !(out = malloc(e->raw ? e->raw : 1))) {
+        g_pack_st.misses++;
+        return NULL;
+    }
+    if (!vk_texahead_copy(e, out)) { /* read ahead by texahead.c, or read now */
+        WARN_LIMIT(4, "vulkan: the texture pack's entry for a %ux%u texture couldn't be read\n", w, h);
+        free(out);
+        g_pack_st.misses++;
+        return NULL;
+    }
+    *raw = e->raw;
+    g_pack_st.hits++;
+    g_pack_st.bytes += e->stored;
+    g_pack_st.ns += plat_ns() - t0;
+    return out;
+}
+/* BC7 blocks of every level of every layer into t, as the pack lays them out: 1 when copied */
+static int pack_upload(Surf* t, const u8* data, u32 raw) {
+    VkBufferImageCopy reg[16 * 6];
+    VkBuffer buf = VK_NULL_HANDLE;
+    u64 off = 0, o = 0;
+    u32 n = 0, layer, l;
+    VkCommandBuffer cb;
+    u8* p;
+    t->upload_valid = 0;
+    if ((u64)t->layers * t->levels > sizeof reg / sizeof reg[0]) return 0;
+    for (layer = 0; layer < t->layers; layer++)
+        for (l = 0; l < t->levels; l++) {
+            u32 lw = t->w >> l ? t->w >> l : 1, lh = t->h >> l ? t->h >> l : 1;
+            reg[n++] = (VkBufferImageCopy){.bufferOffset = o,
+                                           .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, layer, 1},
+                                           .imageExtent = {lw, lh, 1}};
+            o += (u64)((lw + 3) / 4) * ((lh + 3) / 4) * 16;
+        }
+    if (o != raw) {
+        WARN_LIMIT(4, "vulkan: a %ux%u texture's pack entry has %u bytes, its levels %llu: left to the ASTC decoder\n",
+                   t->w, t->h, raw, (unsigned long long)o);
+        return 0;
+    }
+    t->wgen = ++g_tex_upload_gen;
+    vk_render_end();
+    cb = vk_cmd();
+    if (!(p = vk_stage(raw, 16, &buf, &off))) return 0; /* staging ran out: tried again, as an upload is */
+    memcpy(p, data, raw);
+    for (l = 0; l < n; l++) reg[l].bufferOffset += off;
+    vk_surf_use(cb, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    vkCmdCopyBufferToImage(cb, buf, t->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, n, reg);
+    t->uploaded = 1;
+    return t->upload_valid = 1;
+}
+/* a pack texture whose memory the game rewrote, encoded here from its new ASTC blocks (malloc'd), or NULL */
+static u8* pack_encode(const Surf* t, u32* raw) {
+    Surf as = *t; /* its levels read as the ASTC texture they are */
+    u64 total = 0, o = 0;
+    u8 *out, *lin = NULL, *rgba = NULL, *tmp = NULL;
+    as.f = t->src;
+    for (u32 l = 0; l < t->levels; l++) {
+        u32 lw = t->w >> l ? t->w >> l : 1, lh = t->h >> l ? t->h >> l : 1;
+        total += (u64)((lw + 3) / 4) * ((lh + 3) / 4) * 16;
+    }
+    total *= t->layers;
+    if (!(out = malloc(total ? total : 1))) return NULL;
+    for (u32 layer = 0; layer < t->layers; layer++) {
+        u64 at = layer * t->layer_size;
+        for (u32 l = 0; l < t->levels; l++) {
+            u32 lw = t->w >> l ? t->w >> l : 1, lh = t->h >> l ? t->h >> l : 1, lbh = 0, lbd = 0;
+            u32 tw = (lw + as.f.bw - 1) / as.f.bw, th = (lh + as.f.bh - 1) / as.f.bh;
+            u64 lsz = bl_level_size(t->w, t->h, 1, &as.f, t->bh, t->bd, t->tws, l, &lbh, &lbd);
+            u8* src = gmem_ptr(t->gva + at, lsz);
+            lin = realloc(lin, (size_t)tw * th * 16);
+            rgba = realloc(rgba, (size_t)lw * lh * 4);
+            if (!src) {
+                tmp = realloc(tmp, lsz ? lsz : 1);
+                if (tmp) gmem_read(t->gva + at, tmp, lsz);
+                src = tmp;
+            }
+            if (!src || !lin || !rgba) {
+                free(out);
+                out = NULL;
+                goto done;
+            }
+            level_rows(&as, src, lsz, tw * 16, th, 1, lbh, lbd, lin);
+            astc_decode_image(lin, lw, lh, as.f.bw, as.f.bh, rgba, astc_format(&t->src) >= 0x87);
+            bc7_encode_image(rgba, lw, lh, out + o);
+            o += (u64)((lw + 3) / 4) * ((lh + 3) / 4) * 16;
+            at += lsz;
+        }
+    }
+    *raw = (u32)total;
+    g_pack_st.encoded++;
+done:
+    free(lin);
+    free(rgba);
+    free(tmp);
+    return out;
+}
+/* a pack texture's memory changed: its new bytes from the pack, or encoded here */
+static int pack_reupload(Surf* t) {
+    u32 raw = 0;
+    u8* data =
+        pack_lookup(t->gva, pack_size(t->w, t->h, t->levels, t->layers, &t->src, t->bh, t->bd, t->tws, t->layer_size),
+                    t->w, t->h, t->levels, t->layers, &t->src, &raw);
+    int ok;
+    if (!data) data = pack_encode(t, &raw);
+    if (!data) return t->upload_valid = 0;
+    ok = pack_upload(t, data, raw);
+    free(data);
+    return ok;
+}
+
 /* the whole texture, or for a big new ASTC one its lower levels with the rest queued (astc_spread) */
 static int tex_upload(Surf* t) {
-    u32 first = spread_first(t);
+    u32 first;
+    if (t->packed) return pack_reupload(t);
+    first = spread_first(t);
+    tex_hashlog(t);
     int ok = tex_upload_levels(t, first, t->levels);
     if (ok && first) {
         tex_set_base(t, first);
@@ -676,8 +891,8 @@ texture_from_memory:
     u32 fkey = (tic[0] & 0x7FFFF) | ((u32)srgb << 31) | ((u32)raw << 30);
     for (Surf* t = vk_surf_first(gva); t; t = t->next) {
         if (t->is_rt || t->gva != gva || t->w != w || t->h != h || t->layers != layers || t->depth3d != d3 ||
-            t->fkey != fkey || t->levels != levels || t->type != vt || t->bl != (u32)bl || t->bh != bh || t->bd != bd || t->tws != tws ||
-            t->pitch != pitch || t->layer_size != stride)
+            t->fkey != fkey || t->levels != levels || t->type != vt || t->bl != (u32)bl || t->bh != bh || t->bd != bd ||
+            t->tws != tws || t->pitch != pitch || t->layer_size != stride)
             continue;
         t->last_used = g_vk_present;
         /* an upload that ran out of memory or staging (here, or a re-upload below) is tried again once a frame. A
@@ -751,16 +966,34 @@ texture_from_memory:
         }
         return t->upload_valid ? t : NULL;
     }
-    if (!format_samples(f.vk)) return NULL;
+    /* an ASTC texture the pack holds becomes a BC7 image, filled from the pack below; its memory stays ASTC (src) */
+    VkFmt src = f;
+    u8* pdata = NULL;
+    u32 praw = 0;
+    if (f.conv == VKC_ASTC && bl && vt != VK_IMAGE_VIEW_TYPE_3D && (u64)layers * levels <= 96 && vk_texpack_ready()) {
+        vk_prompts_texture(gva, &f, w, h, bh); /* painted first, so a button atlas is looked up as it will be */
+        pdata =
+            pack_lookup(gva, pack_size(w, h, levels, layers, &f, bh, bd, tws, stride), w, h, levels, layers, &f, &praw);
+        if (pdata && format_samples(bc7_of(&f).vk)) f = bc7_of(&f);
+    }
+    if (!format_samples(f.vk)) {
+        free(pdata);
+        return NULL;
+    }
     Surf* t = tex_create(gva, w, h, layers, d3, levels, vt, f, fkey, bl, bh, bd, pitch, stride);
-    if (!t) return NULL;
+    if (!t) {
+        free(pdata);
+        return NULL;
+    }
     t->tws = tws;
     t->tex_inval_gen = g_tex_inval_gen;
+    t->src = src;
+    t->packed = f.vk != src.vk && pdata;
     /* this texture's levels in one layer; the layers before the last one take their whole stride */
     u64 sz = 0;
-    for (u32 l = 0; l < levels; l++) sz += bl ? bl_level_size(w, h, d3, &f, bh, bd, tws, l, NULL, NULL) : stride;
+    for (u32 l = 0; l < levels; l++) sz += bl ? bl_level_size(w, h, d3, &src, bh, bd, tws, l, NULL, NULL) : stride;
     t->size = stride * (layers - 1) + sz;
-    vk_prompts_texture(gva, &f, w, h, bh); /* the button atlas is painted before it is hashed and loaded */
+    vk_prompts_texture(gva, &src, w, h, bh); /* the button atlas is painted before it is hashed and loaded */
     t->wseen = vk_ww_now();
     vk_written_since(gmem_ptr(gva, t->size), t->size, 0); /* starts tracking it */
     t->wseen = vk_ww_now();
@@ -768,6 +1001,12 @@ texture_from_memory:
     t->hash = mem_hash(gva, t->size);
     t->checked = g_vk_present;
     t->next_check = g_vk_present + 4;
+    if (t->packed) {
+        int ok = pack_upload(t, pdata, praw);
+        free(pdata);
+        return ok ? t : NULL;
+    }
+    free(pdata);
     if (f.conv != VKC_ASTC) return tex_upload(t) ? t : NULL;
     { /* the ahead-of-draw measure: how long a first ASTC upload takes, and how long before it the game registered it */
         u64 t0 = plat_ns();
@@ -1048,6 +1287,14 @@ void vk_tex_frame(void) {
             (double)g_ahead.worst_ns / 1e6, (unsigned long long)g_ahead.early, (double)g_ahead.early_px / 1e6,
             (unsigned long long)g_ahead.unknown);
         memset(&g_ahead, 0, sizeof g_ahead);
+    }
+    if (g_vk_present % 600 == 0 && (g_pack_st.hits || g_pack_st.misses)) {
+        LOG("texpack: %llu textures from the pack (%.1f MB read, %.1f ms), %llu not in it, %llu changed by the game and "
+            "encoded here\n",
+            (unsigned long long)g_pack_st.hits, (double)g_pack_st.bytes / 1e6, (double)g_pack_st.ns / 1e6,
+            (unsigned long long)g_pack_st.misses, (unsigned long long)g_pack_st.encoded);
+        memset(&g_pack_st, 0, sizeof g_pack_st);
+        vk_texahead_report();
     }
     /* textures and render targets not used for ten seconds go; textures come back from memory if they are needed
        again */

@@ -29,6 +29,7 @@
 #include "volk.h"
 #include "vk_mem_alloc.h"
 #include "nx/gpu/shader/shader.h"
+#include "nx/gpu/texture/texpack.h"
 
 #define VK_FRAMES 2  /* frames in flight */
 #define VK_SC_MAX 16 /* swapchain images */
@@ -84,6 +85,13 @@ int vk_swapchain_create(int srgb);
 int vk_surface_recreate(void);
 int vk_window_release(void); /* Renderer.release_window */
 void vk_present_drop(void);  /* renderer.c: a frame waiting to be presented on a swapchain that goes is dropped */
+/* texture.c: the texture pack opened (once, any thread); 1 when it holds textures */
+int vk_texpack_ready(void);
+/* texahead.c: the pack read ahead of a texture's first use. registered: the game registered a w x h texture at gva
+   (its thread). copy: e's blocks into out, from the cache or read now (render thread); 1 when copied */
+void vk_texahead_registered(u64 gva, u32 w, u32 h);
+int vk_texahead_copy(const TexPackEntry* e, u8* out);
+void vk_texahead_report(void);
 /* logs a failed call with where it happened; evaluates to 1 on success */
 #define VK_OK(call) vk_ok_((call), #call, __FILE__, __LINE__)
 int vk_ok_(VkResult r, const char* what, const char* file, int line);
@@ -263,6 +271,10 @@ typedef struct Surf {
     /* the first level its views show: a big new ASTC texture is decoded from this level down, and drawn from it
        (blurrier), until the levels above are decoded at the next presents (texture.c astc_spread). 0 when whole */
     u8 astc_base;
+    /* an ASTC texture the texture pack holds (texture.c pack_*): its image is BC7 (f), filled from the pack, and src is
+       its ASTC format, which its guest memory keeps */
+    u8 packed;
+    VkFmt src;
     struct Surf* next;
     struct Surf* rt_next; /* real render targets, for overlapping guest-memory writes */
 } Surf;

@@ -4772,9 +4772,10 @@ static struct {
 } g_known[KNOWN];
 static PMutex g_known_lk = PMUTEX_INIT;
 static u64 g_known_count;
-void vk_nvn_tex_registered(u64 gpu) {
+void vk_nvn_tex_registered(u64 gpu, u32 w, u32 h) {
     u32 i = (u32)(gpu >> 8) & (KNOWN - 1), n;
     if (!gpu) return;
+    vk_texahead_registered(gpu, w, h); /* the texture pack, read ahead of the texture's first use */
     pm_lock(&g_known_lk);
     for (n = 0; n < 64; n++, i = (i + 1) & (KNOWN - 1)) {
         if (g_known[i].gpu == gpu) break; /* known already: the first registration counts */
