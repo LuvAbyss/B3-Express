@@ -2646,8 +2646,8 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
             if (B(insn[i], 3, 3) < 7) pred_used[B(insn[i], 3, 3)] = 1;
             if (B(insn[i], 0, 3) < 7) pred_used[B(insn[i], 0, 3)] = 1;
         }
-        if (scaled_tex && (op->id == O_TLD || op->id == O_TLD_B || op->id == O_TLDS || op->id == O_TXQ ||
-                           op->id == O_TXQ_B))
+        if (scaled_tex &&
+            (op->id == O_TLD || op->id == O_TLD_B || op->id == O_TLDS || op->id == O_TXQ || op->id == O_TXQ_B))
             needs_scale = needs_glsl = 1;
         if (op->id == O_TLDS) {
             u32 off = B(insn[i], 36, 13);
@@ -3310,9 +3310,8 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
         interfaces[count++] = fragcoord;
     }
     if (needs_scale) {
-        c->scale_buffer =
-            spv_emit_uniform_vec4_array(&c->emit, vec4, c->f32_type, c->u32_type, 1, SNX_VKB_RS,
-                                        scaled_tex ? 1 + SH_MAXTEX : 1, &c->scale_pointer);
+        c->scale_buffer = spv_emit_uniform_vec4_array(&c->emit, vec4, c->f32_type, c->u32_type, 1, SNX_VKB_RS,
+                                                      scaled_tex ? 1 + SH_MAXTEX : 1, &c->scale_pointer);
         interfaces[count++] = c->scale_buffer;
     }
     for (u32 i = 0; i < 18; i++) {
@@ -3545,8 +3544,7 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                 case_literals[case_count] = i;
                 case_labels[case_count++] = spv_emit_id(&c->emit);
             }
-        linear =
-            g_shader_linear && !has_barrier && !has_calls && !has_pexit && !dynamic_stack && !unknown_brx;
+        linear = g_shader_linear && !has_barrier && !has_calls && !has_pexit && !dynamic_stack && !unknown_brx;
         for (u32 i = 11; linear && i < n; i++) {
             if (!IDX_OK(i)) continue;
             int id = decode(insn[i])->id;
@@ -5607,8 +5605,7 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                     u32 zero_index = spv_emit_constant_u32(&c->emit, c->u32_type, 0);
                     u32 scale = spv_emit_uniform_component(
                         &c->emit, c->scale_pointer, c->scale_buffer, zero_index, zero_index,
-                        scaled_tex ? spv_emit_constant_u32(&c->emit, c->u32_type, component) : zero_index,
-                        c->f32_type);
+                        scaled_tex ? spv_emit_constant_u32(&c->emit, c->u32_type, component) : zero_index, c->f32_type);
                     value = spv_emit_fmul(&c->emit, c->f32_type, value, scale);
                     spv_emit_no_contraction(&c->emit, value);
                 }
@@ -5697,9 +5694,12 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                 u32 one = spv_emit_constant_f32(&c->emit, c->f32_type, 1.0f);
                 u32 minus = spv_emit_constant_f32(&c->emit, c->f32_type, -1.0f);
                 u32 fzero = spv_emit_constant_f32(&c->emit, c->f32_type, 0.0f);
-                u32 is1 = spv_emit_i_equal(&c->emit, c->bool_type, mode, spv_emit_constant_u32(&c->emit, c->u32_type, 1));
-                u32 is2 = spv_emit_i_equal(&c->emit, c->bool_type, mode, spv_emit_constant_u32(&c->emit, c->u32_type, 2));
-                u32 is3 = spv_emit_i_equal(&c->emit, c->bool_type, mode, spv_emit_constant_u32(&c->emit, c->u32_type, 3));
+                u32 is1 =
+                    spv_emit_i_equal(&c->emit, c->bool_type, mode, spv_emit_constant_u32(&c->emit, c->u32_type, 1));
+                u32 is2 =
+                    spv_emit_i_equal(&c->emit, c->bool_type, mode, spv_emit_constant_u32(&c->emit, c->u32_type, 2));
+                u32 is3 =
+                    spv_emit_i_equal(&c->emit, c->bool_type, mode, spv_emit_constant_u32(&c->emit, c->u32_type, 3));
                 u32 fa = spv_emit_select(&c->emit, c->f32_type, is1, minus,
                                          spv_emit_select(&c->emit, c->f32_type, is3, fzero, one));
                 u32 fb = spv_emit_select(&c->emit, c->f32_type, is2, minus, one);

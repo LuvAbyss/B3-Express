@@ -69,8 +69,7 @@ static u32 expand(u32 v, unsigned bits) { return bits == 4 ? v * 17 : bits == 5 
 static u32 to_rgba8(u32 fmt, u32 p) {
     switch (fmt) {
         case 2: return p | 0xFF000000u;
-        case 4:
-            return expand(p >> 11 & 31, 5) | expand(p >> 5 & 63, 6) << 8 | expand(p & 31, 5) << 16 | 0xFF000000u;
+        case 4: return expand(p >> 11 & 31, 5) | expand(p >> 5 & 63, 6) << 8 | expand(p & 31, 5) << 16 | 0xFF000000u;
         case 5: return (p & 0xFF00FF00u) | (p >> 16 & 0xFFu) | (p & 0xFFu) << 16;
         case 6:
             return expand(p >> 11 & 31, 5) | expand(p >> 6 & 31, 5) << 8 | expand(p >> 1 & 31, 5) << 16 |

@@ -51,7 +51,7 @@ typedef struct {
     int sc_win_w, sc_win_h; /* the window size it was made for (sc_extent: that as the surface takes it) */
     int sc_srgb;            /* its format is sRGB: what presented frames in sRGB formats are blitted to */
     VkFormat sc_format;     /* its images' format, which the on-screen controls draw to (gpu/vk/ui.c) */
-    int sc_vsync;  /* the vsync setting it was made for (2: FIFO; the others are FIFO too on a surface with nothing else) */
+    int sc_vsync; /* the vsync setting it was made for (2: FIFO; the others are FIFO too on a surface with nothing else) */
     int sc_turned; /* upright on a display held another way: Android calls each present suboptimal for it */
     int sc_lost;   /* the last create found the surface lost: show() has it made anew */
     u32 sc_count;
@@ -345,8 +345,8 @@ VkImageView vk_null_view(VkImageViewType type, int num);
 /* the sampler for a TSC: raise lets anisotropy= raise its filtering (a 2D texture with mipmaps), integer gives its
    border color as integers (an integer texture) */
 VkSampler vk_sampler(const u32* tsc, int raise, int integer);
-extern int g_vk_anisotropy; /* anisotropy=, read once at start: the sampler table keeps the samplers it made */
-void vk_tex_frame(void);    /* a frame was presented: evicts what wasn't used for a while */
+extern int g_vk_anisotropy;  /* anisotropy=, read once at start: the sampler table keeps the samplers it made */
+void vk_tex_frame(void);     /* a frame was presented: evicts what wasn't used for a while */
 void vk_tex_forget(Surf* s); /* s goes: out of the queue of textures whose top levels wait to be decoded */
 
 /* gpu/vk/buffer.c: guest memory [gva, gva + len) as a buffer the GPU reads, valid until the next submit */
