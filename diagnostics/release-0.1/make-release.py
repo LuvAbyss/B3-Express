@@ -4,12 +4,12 @@ import shutil
 import zipfile
 from pathlib import Path
 
-VERSION = '0.1.6'
+VERSION = '0.1.7'
 root = Path.cwd()
 name = f'B3-Express-{VERSION}-windows-x64'
 out = root / 'release' / name
-exe = root / 'diagnostics/release-0.1/Bayo3_120-0.1.6-release.exe'  # 0.1.5 + 32-bit depth fallback (AMD) + no pool copies on integrated GPUs, built from 754db7e
-assert hashlib.sha256(exe.read_bytes()).hexdigest().startswith('24a5f7b8')
+exe = root / 'diagnostics/release-0.1/Bayo3_120-0.1.7-release.exe'  # 0.1.6 + present thread on even slots + compute barriers outside the flow loop (issue 2), built from fbf7bf6
+assert hashlib.sha256(exe.read_bytes()).hexdigest().startswith('30e053b5')
 assert not (root / 'release' / (name + '.zip')).exists(), 'this version is already packaged: raise VERSION'
 if out.exists():
     shutil.rmtree(out)
