@@ -50,3 +50,4 @@ __pycache__/
 /diagnostics/release-0.1/*
 !/diagnostics/release-0.1/make-release.py
 !/diagnostics/release-0.1/test-fresh.py
+/launcher/exe/b3express.rc

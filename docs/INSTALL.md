@@ -36,7 +36,7 @@ Unzip the whole `B3-Express` folder somewhere with room, like `D:\Games`. Keep t
 
 ## Step 3: Install
 
-1. Start **`Launch-Bayonetta3.cmd`**.
+1. Start **`B3-Express.exe`**.
 2. Open the **Install** page.
 3. Choose your folder holding `exefs` and `romfs`.
 4. Press **Install**.

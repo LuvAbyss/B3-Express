@@ -19,8 +19,12 @@ game.mkdir()
 shutil.copyfile(exe, game / 'Bayo3_120.exe')
 for dll in ('libLLVM-23', 'libc++', 'libffi-8', 'libiconv-2', 'libxml2-16', 'libzstd', 'zlib1'):
     shutil.copyfile(root / 'output/Bayo3_120' / (dll + '.dll'), game / (dll + '.dll'))
-for f in ('Launch-Bayonetta3.cmd', 'game-files.txt', 'LICENSE'):
+for f in ('game-files.txt', 'LICENSE'):
     shutil.copyfile(root / f, out / f)
+# the launcher's starter, built with this version in its details (launcher/exe/build.py)
+import subprocess, sys
+subprocess.run([sys.executable, '-I', str(root / 'launcher/exe/build.py'), VERSION], check=True)
+shutil.copyfile(root / 'launcher/exe/B3-Express.exe', out / 'B3-Express.exe')
 shutil.copytree(root / 'licenses', out / 'licenses')
 shutil.copyfile(root / 'docs/INSTALL.md', out / 'INSTALL.txt')
 launcher = out / 'launcher'

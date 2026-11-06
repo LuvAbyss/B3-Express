@@ -1,6 +1,6 @@
 # B3-Express launcher
 
-Start it with `Launch-Bayonetta3.cmd`. It uses the Python in `launcher/python`, so nothing needs installing.
+Start it with `B3-Express.exe`, a small starter (`exe/b3express.c`, built with its icon by `exe/build.py`) that runs `web_launcher.py` with the Python in `launcher/python`, so nothing needs installing. `Launch-Bayonetta3.cmd` does the same from a repository checkout.
 
 The window is `ui/index.html`, shown by Microsoft Edge WebView2 (part of Windows 11, and of Windows 10 with a current
 Edge) through pywebview; `web_launcher.py` holds what its buttons call, and `bayonetta_launcher.py` the logic. On a PC

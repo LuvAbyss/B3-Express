@@ -16,6 +16,7 @@ from pathlib import Path
 import bayonetta_launcher as L
 
 UI = Path(__file__).resolve().parent / 'ui' / 'index.html'
+ICON = UI.parent / 'b3express.ico'  # the window's and taskbar's icon, the same as B3-Express.exe's (exe/build.py)
 ISSUES = f'https://github.com/{L.REPO}/issues'
 RELEASES = f'https://github.com/{L.REPO}/releases'
 
@@ -295,13 +296,17 @@ def main():
         import webview
     except Exception:  # no pywebview in this Python: the old window
         return old_window()
+    try:  # its own taskbar button and icon, not grouped under Python's
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('B3Express.Launcher')
+    except (AttributeError, OSError):
+        pass
     api = Api()
     window = webview.create_window('B3-Express', url=str(UI), js_api=api, width=1180, height=760, min_size=(900, 620),
                                    background_color='#0e0b15')
     api._window = window
     window.events.closing += api.closing
     try:
-        webview.start(gui='edgechromium', private_mode=True)
+        webview.start(gui='edgechromium', private_mode=True, icon=str(ICON) if ICON.is_file() else None)
     except Exception as e:  # no WebView2 on this PC
         L.log_error(type(e), e, e.__traceback__)
         return old_window()

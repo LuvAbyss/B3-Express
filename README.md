@@ -21,7 +21,7 @@ Players: download a release and follow [docs/INSTALL.md](docs/INSTALL.md). To bu
 
 1. Build the runtime from `source/` (`source/docs/BUILD.md`).
 2. Extract your own 1.2.0 dump into a folder holding `exefs` and `romfs`.
-3. Start `Launch-Bayonetta3.cmd`, then Install on that folder. It checks the version against `game-files.txt`, copies the files and compiles the game code on your PC. It never asks for keys.
+3. Start `B3-Express.exe` (built by `launcher/exe/build.py`), then Install on that folder. It checks the version against `game-files.txt`, copies the files and compiles the game code on your PC. It never asks for keys.
 
 The launcher's bundled Python isn't in this repo. Releases include it.
 
