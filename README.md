@@ -6,6 +6,16 @@ An undergraduate graduate project: Bayonetta 3 v1.2.0 running natively on Window
 
 Current state, measurements and what's left: [docs/STATUS.md](docs/STATUS.md).
 
+## Coming in 0.2.5
+
+The next release is a big one, so it skips ahead to 0.2.5. It is in testing now and not released yet.
+
+- **Mods.** A new Mods page in the launcher adds a mod from its folder or its zip, turns mods on and off, sets their order and removes them. Mods that replace game files (a `romfs` folder) and code patches (`.ips` and `.pchtxt` for v1.2.0) both work, in the layouts made for yuzu, Ryujinx and Atmosphère. Your installed game files are never changed, and turning a mod off brings the originals back. Turning code patches on or off compiles the game code again at the next Play, which takes about 3 minutes.
+- **More detail.** New options for sharper textures in the distance, every model at its finest level of detail, and the game's film grain off. In our tests fine detail went up by 11 to 49 percent at no measurable cost in frame rate.
+- **Widescreen (experimental).** The game's picture at 16:10, 21:9 and 32:9 instead of black bars. Wider screens show more at the sides, 16:10 shows more above and below, and the HUD stays at its normal size in the middle. Some menus still end short of the screen's edges, and markers over enemies aren't placed right yet.
+
+The detail options and widescreen are ported from [Witch Time](https://github.com/Zexyen/Witch-Time), with thanks. As before, updating means unzipping the new version and running Install again.
+
 ## Layout
 
 | folder | what |
