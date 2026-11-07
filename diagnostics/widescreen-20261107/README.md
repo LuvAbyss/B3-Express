@@ -54,7 +54,32 @@ gets the 16:9 picture letterboxed (`gpu/vk/renderer.c`), as B2recomp does; Witch
   something down `0x86a2090`'s chain refuses any size but its own (`wide-p3-t2096`, `wide-p3-t2096-m6`,
   `wide-p4-h688`). p4 did make a 1600x688 target before failing.
 
-## Next
+## Decision: port Witch Time's (2026-11-07, the user)
+
+Witch Time v0.4.5 (GPL-3.0, `E:\download\WitchTime-v0.4.5-windows-x86_64`) has experimental widescreen, checked in
+gameplay at 21:9, 32:9 and 9:10: `docs/STATUS.md` "Aspect ratios", `runtime/game_shim_eh.c` from line 535,
+`runtime/nvn_vk_draw.c` `rs_xstretch`. Their addresses are `0x7100000000` + main's offset (ours `0x8005000` +).
+It explains p3: the graphics setup's render-target heap (config + 0x90, 0x10400000) is sized for 16:9, and at 21:9
+the 84th target didn't fit.
+
+Port in stages, each tested in the isolated copy at 21:9 on the title and the fight route:
+
+1. **The 3D view, HUD centred** (`hud_area = 16:9`): screen size getters `main+0x70a740` / `0x70a760` (width =
+   height x ratio, even), heap at `main+0xd01380` (+ (ratio x 9/16 - 1) of it, 2 MB aligned, and the memory the game
+   is told grows as much), camera perspective `main+0xcba90c` (a 16:9 width / height gets the screen's shape) and
+   fov `main+0xcba97c` (narrower than 16:9 only), the UI's flat projection `main+0xd07610` (the 1280x720 in the
+   middle, more around it). Renderer: 16:9-class scene targets widened on x by ratio x 9/16 (our `rp_scale_of`
+   becomes per axis, with the FragCoord scale the translator already takes per axis), the screen filters' viewport,
+   movies pillarboxed, the dither at the image's pixels. All addresses into `code-tablecalls.txt`.
+2. **The interface's details:** clip rectangles (`0xd02d90`, `0xd02db0`, `0xd04414`), capture effects (`0xc025a4`,
+   `0xc00b98`), elements placed over 3D points (`0xc1656c`, `0xbfcf70`, `0xbfcf80`, `0xa6f5a0`), the screen width
+   for aim, arrows and picks (`0xd02d70`, about 30 call sites by return address).
+3. **HUD at the screen's edges** (`hud_area = screen`): `0xc0ef04`, the layout's roots moved out by half the extra
+   width, with their exceptions (rules, Game Over, event0015).
+4. **Options:** `aspect_ratio` (16:9, auto from the window, 21:9, 32:9, 16:10) and `hud_area` in the `.ini` and the
+   launcher.
+
+## Next (before the decision)
 
 1. With the GDB stub (`runtime/gdbstub.c`) instead of a 3-minute compile per guess: break on the returns of the
    calls `main+0x69c698` makes, with p4 on, and find which one fails for 1600x688, then what it checks. Then the
