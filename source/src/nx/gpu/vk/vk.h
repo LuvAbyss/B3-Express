@@ -213,7 +213,7 @@ typedef struct Surf {
     u32 w, h, layers, levels;
     u32 sw, sh;  /* the image's size: render targets are w x h times the resolution scale */
     u32 depth3d; /* 3D textures: depth (layers is 1) */
-    u32 fkey;    /* render targets: guest format | 0x10000 for depth. Textures: TIC word 0's format bits (0x7FFFF), sRGB
+    u32 fkey; /* render targets: guest format | 0x10000 for depth. Textures: TIC word 0's format bits (0x7FFFF), sRGB
                     in bit 31, raw (vk_tex_from_tic_raw) in bit 30 */
     VkFmt f;
     u32 bl, bh, bd, pitch; /* guest layout: block linear with block height 2^bh GOBs, or pitch linear */
@@ -351,6 +351,7 @@ VkImageView vk_null_view(VkImageViewType type, int num);
 /* the sampler for a TSC: raise lets anisotropy= raise its filtering (a 2D texture with mipmaps), integer gives its
    border color as integers (an integer texture) */
 VkSampler vk_sampler(const u32* tsc, int raise, int integer);
+extern float g_vk_lod_bias;  /* texture_lod_bias=, read once at start, for the same samplers as anisotropy */
 extern int g_vk_anisotropy;  /* anisotropy=, read once at start: the sampler table keeps the samplers it made */
 void vk_tex_frame(void);     /* a frame was presented: evicts what wasn't used for a while */
 void vk_tex_forget(Surf* s); /* s goes: out of the queue of textures whose top levels wait to be decoded */

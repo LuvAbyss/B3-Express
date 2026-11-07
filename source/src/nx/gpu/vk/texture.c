@@ -40,8 +40,7 @@ static u32 bl_row_bytes(u32 tw, u32 th, u32 td, const VkFmt* f, u32 bh, u32 bd, 
     return (rb + al - 1) / al * al;
 }
 /* bytes of one mip level of a block-linear texture; lbh and lbd (may be NULL) get its block height and depth */
-static u64 bl_level_size(u32 w, u32 h, u32 d, const VkFmt* f, u32 bh, u32 bd, u32 tws, u32 level, u32* lbh,
-                         u32* lbd) {
+static u64 bl_level_size(u32 w, u32 h, u32 d, const VkFmt* f, u32 bh, u32 bd, u32 tws, u32 level, u32* lbh, u32* lbd) {
     u32 lw = w >> level ? w >> level : 1, lh = h >> level ? h >> level : 1, ld = d >> level ? d >> level : 1;
     u32 tw = (lw + f->bw - 1) / f->bw, th = (lh + f->bh - 1) / f->bh;
     u32 gx = (bl_row_bytes(tw, th, ld, f, bh, bd, tws) + 63) / 64, gy = (th + 7) / 8, b, bdd;
@@ -171,7 +170,7 @@ static int g_nspread;
 static u64 g_spread_px = ~0ull; /* the budget a present, texels; ~0 until read */
 static struct {
     u64 n, px, done, done_px, frames;
-} g_spread_st; /* since the last report */
+} g_spread_st;                                /* since the last report */
 static void tex_set_base(Surf* t, u32 base) { /* views from level base: the old ones go, made again when asked */
     if (t->astc_base == base) return;
     t->astc_base = (u8)base;
@@ -237,9 +236,8 @@ static int tex_upload_levels(Surf* t, u32 l0, u32 l1) {
     int packed_depth = f->depth && f->stencil;
     int is3d = t->type == VK_IMAGE_VIEW_TYPE_3D;
     u32 layers = t->layers, d3 = is3d ? t->depth3d : 1;
-    VkBufferImageCopy* reg = f->conv == VKC_ASTC
-                                ? NULL
-                                : calloc((size_t)layers * t->levels * (packed_depth ? 2 : 1), sizeof *reg);
+    VkBufferImageCopy* reg =
+        f->conv == VKC_ASTC ? NULL : calloc((size_t)layers * t->levels * (packed_depth ? 2 : 1), sizeof *reg);
     if (f->conv != VKC_ASTC && !reg) return 0;
     u32 nreg = 0;
     int complete = 1;
@@ -254,7 +252,8 @@ static int tex_upload_levels(Surf* t, u32 l0, u32 l1) {
             if (!ld) ld = 1;
             u32 tw = (lw + f->bw - 1) / f->bw, th = (lh + f->bh - 1) / f->bh;
             u32 rowb = tw * f->bpp, lbh = 0, lbd = 0;
-            u64 lsz = t->bl ? bl_level_size(t->w, t->h, d3, f, t->bh, t->bd, t->tws, l, &lbh, &lbd) : (u64)t->pitch * th * ld;
+            u64 lsz =
+                t->bl ? bl_level_size(t->w, t->h, d3, f, t->bh, t->bd, t->tws, l, &lbh, &lbd) : (u64)t->pitch * th * ld;
             if (l < l0 || l >= l1) {
                 at += lsz;
                 continue;
@@ -301,8 +300,7 @@ static int tex_upload_levels(Surf* t, u32 l0, u32 l1) {
                     level_convert(f, lin, lw, lh, ld, rowb, p);
                 reg[nreg++] = (VkBufferImageCopy){
                     .bufferOffset = off,
-                    .imageSubresource = {f->depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, l, layer,
-                                         1},
+                    .imageSubresource = {f->depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, l, layer, 1},
                     .imageExtent = {lw, lh, ld}};
                 if (packed_depth) {
                     reg[nreg] = reg[nreg - 1];
@@ -676,8 +674,8 @@ texture_from_memory:
     u32 fkey = (tic[0] & 0x7FFFF) | ((u32)srgb << 31) | ((u32)raw << 30);
     for (Surf* t = vk_surf_first(gva); t; t = t->next) {
         if (t->is_rt || t->gva != gva || t->w != w || t->h != h || t->layers != layers || t->depth3d != d3 ||
-            t->fkey != fkey || t->levels != levels || t->type != vt || t->bl != (u32)bl || t->bh != bh || t->bd != bd || t->tws != tws ||
-            t->pitch != pitch || t->layer_size != stride)
+            t->fkey != fkey || t->levels != levels || t->type != vt || t->bl != (u32)bl || t->bh != bh || t->bd != bd ||
+            t->tws != tws || t->pitch != pitch || t->layer_size != stride)
             continue;
         t->last_used = g_vk_present;
         /* an upload that ran out of memory or staging (here, or a re-upload below) is tried again once a frame. A
@@ -926,6 +924,7 @@ static VkSamplerAddressMode wrap(u32 m) {
 /* tsc[0] bit 9 compare, bits 10-12 the compare function; tsc[1] filters (gpu/vk/render.c forces nearest for integer
    textures and the compare mode the shader declares) */
 int g_vk_anisotropy;
+float g_vk_lod_bias;
 VkSampler vk_sampler(const u32* tsc, int raise, int integer) {
     /* samplers are kept for good, and a device allows at least 4000 (maxSamplerAllocationCount): past 3072, a quarter
        of the table left free for probing, new sampler states get the first sampler made */
@@ -959,8 +958,12 @@ VkSampler vk_sampler(const u32* tsc, int raise, int integer) {
     float af = aniso_lut[aniso];
     /* anisotropy=N raises a mipmapped 2D texture's linear filtering (raise), a 3D scene's surfaces, to N. Nearest
        filtering (2D art, the HUD), samplers without a mip filter and depth compares (shadow maps) keep the game's */
-    if (raise && (float)g_vk_anisotropy > af && min == 2 && mag == 2 && mip >= 2 && !((tsc[0] >> 9) & 1))
-        af = (float)g_vk_anisotropy;
+    if (raise && min == 2 && mag == 2 && mip >= 2 && !((tsc[0] >> 9) & 1)) {
+        if ((float)g_vk_anisotropy > af) af = (float)g_vk_anisotropy;
+        lb += g_vk_lod_bias; /* texture_lod_bias: finer mip levels for the same surfaces (Witch Time's option) */
+        if (lb > lbmax) lb = lbmax;
+        if (lb < -lbmax) lb = -lbmax;
+    }
     if ((tsc[1] >> 10) & 3)
         LOG_LIMIT(1, "vulkan: min/max sampler reduction isn't supported (filtered as an average)\n");
     VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,

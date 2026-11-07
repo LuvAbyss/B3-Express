@@ -9,7 +9,8 @@ without WebView2 the old window opens instead, with the same logic.
 - **Play:** one button that always does the next step: Install, then Prepare shaders (once for a graphics card and
   driver, about 3 minutes, the game sits at its title meanwhile), then Play. Progress with time left while it works,
   and the last session's average FPS, 1% low and frame time.
-- **Options:** window size and quality, fullscreen, shadows, texture filtering, object fade, button prompts, A/B swap,
+- **Options:** window size and quality, fullscreen, shadows, texture filtering, texture detail, highest model detail,
+  film grain, object fade, button prompts, A/B swap,
   dead zone, vibration, muting. Saved in the game's `Bayo3_120.ini`, which its own menu also uses, every comment kept.
   The first version of that file stays beside it as `Bayo3_120.ini.before-launcher`.
 - **Saves:** back up the game's save folder to `backups/`, and restore one (the current save is backed up first).

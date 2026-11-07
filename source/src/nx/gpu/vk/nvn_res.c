@@ -257,6 +257,26 @@ static void dither_stage(u32** spv, size_t* words, ShaderInfo* si) {
     stages++, compares += n;
     if (stages <= 3 || stages % 100 == 0) LOG("nvn-live: object fade: %d stages changed, %d fades\n", stages, compares);
 }
+/* film_grain=0: the constant buffer word to read as 0 in a pixel stage, or 0. Bayonetta 3 draws its grain in four
+   tonemap stages as colour * (1 + (0.5 - noise) * c4[13]) (m_GrainIntensity), so 0 there removes it and keeps the
+   vignette. The stages are known by the FNV-1a hash of their code (from the program header at data + 0x30,
+   control + 0x6f8 bytes, the offset basis xor 1) that Witch Time found by translating every pixel stage of the game:
+   4 of 5,485 have it (github.com/Zexyen/Witch-Time, runtime/nvn_vk_m4.c stage_fx, GPL-3.0, issue 86) */
+static u32 grain_word(int stage, const u8* code, u32 window) {
+    static const u64 tonemap[] = {0x44931dbda608639dull, 0x48c1d6be354413c1ull, 0xe84083dddb26435cull,
+                                  0xe3b5d8050915b977ull};
+    static int logged;
+    u64 h = 0xcbf29ce484222325ull ^ 1u;
+    u32 i;
+    if (g_opt_film_grain || stage != ST_FS || window < 0x50) return 0;
+    for (i = 0; i < window - 0x50; i++) h = (h ^ code[i]) * 0x100000001b3ull;
+    for (i = 0; i < 4; i++)
+        if (h == tonemap[i]) {
+            if (logged++ < 4) LOG("nvn-live: film grain off in tonemap stage %016llx\n", (unsigned long long)h);
+            return (4u << 16 | 13u) + 1;
+        }
+    return 0;
+}
 /* the stage's SPIR-V for key, the caller to free it. Under vk_lock: the translator's state is shared */
 static u32* stage_spirv(int stage, const u8* code, u32 window, int compute_stub, u64 cb1_gva, u32 cb1_size,
                         const u32* cs_local, u32 shared, const NvnStageKey* key, ShaderInfo* out, size_t* words) {
@@ -273,6 +293,7 @@ static u32* stage_spirv(int stage, const u8* code, u32 window, int compute_stub,
     memset(&si, 0, sizeof si);
     si.stage = stage;
     si.host_scale = rp_scaling();
+    si.zero_cbuf = grain_word(stage, code, window);
     if (stage == ST_CS && cs_local) {
         memcpy(si.cs_local, cs_local, sizeof si.cs_local);
         si.shared_size = (int)shared;

@@ -250,7 +250,15 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
           <div class="field">
             <label for="o-anisotropy">Texture filtering</label>
             <select id="o-anisotropy" data-o="anisotropy"><option value="0">As the game asks</option><option value="2">2x</option><option value="4">4x</option><option value="8">8x</option><option value="16">16x</option></select>
+            <p class="hint">8x makes ground and walls seen at an angle sharper, for very little.</p>
           </div>
+          <div class="field">
+            <label for="o-lod-bias">Texture detail</label>
+            <select id="o-lod-bias" data-o="lod_bias"><option value="0">As the game draws it</option><option value="-0.5">Sharper</option><option value="-1">Sharpest</option></select>
+            <p class="hint">Sharper textures in the distance, at no measurable cost. Sharpest can shimmer a little on fine patterns.</p>
+          </div>
+          <div class="switch"><label for="o-model_lod">Highest model detail<span class="hint" style="display:block;font-weight:400">Every model at its finest level, and distant ones stay drawn. Weaker graphics cards may lose some frame rate.</span></label><input type="checkbox" id="o-model_lod" data-o="model_lod"></div>
+          <div class="switch"><label for="o-film_grain">Film grain<span class="hint" style="display:block;font-weight:400">The game's moving noise over the picture. Off gives a cleaner picture; the vignette stays.</span></label><input type="checkbox" id="o-film_grain" data-o="film_grain"></div>
           <div class="field">
             <span class="lab" id="o-fade-l">Object fade</span>
             <div class="seg" role="group" aria-labelledby="o-fade-l" data-seg="fade">

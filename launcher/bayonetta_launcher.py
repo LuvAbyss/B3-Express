@@ -424,7 +424,9 @@ SAVE = DATA / 'save'
 BACKUPS = ROOT / 'backups'
 REPORTS = ROOT / 'reports'
 REPO = 'LuvAbyss/B3-Express'
-FLAGS = (('fullscreen', '1'), ('shadows', '1'), ('mute_unfocused', '1'), ('gamepad_swap_ab', '0'))
+FLAGS = (('fullscreen', '1'), ('shadows', '1'), ('mute_unfocused', '1'), ('gamepad_swap_ab', '0'), ('model_lod', '0'),
+         ('film_grain', '1'))
+LOD_BIASES = ('0', '-0.5', '-1')  # texture_lod_bias the Options page offers: the game's, sharper, sharpest
 
 
 def launcher_version():
@@ -441,7 +443,7 @@ def options_read(text):
     fsr = to_float(ini_get(text, 'fsr', '0'), 0)
     return {'screen': screen_of(res), 'quality': quality_of(res, fsr),
             **{key: ini_get(text, key, default) == '1' for key, default in FLAGS},
-            'anisotropy': ini_get(text, 'anisotropy', '0'),
+            'anisotropy': ini_get(text, 'anisotropy', '0'), 'lod_bias': ini_get(text, 'texture_lod_bias', '0'),
             'fade': dict((v, n) for n, v in FADES).get(ini_get(text, 'dither', '3'), FADES[3][0]),
             'prompts': dict((v, n) for n, v in PROMPTS).get(ini_get(text, 'button_prompts', '0'), PROMPTS[0][0]),
             'deadzone': ini_get(text, 'gamepad_deadzone', '20'), 'rumble': ini_get(text, 'gamepad_rumble', '100')}
@@ -460,7 +462,10 @@ def options_apply(text, o):
     if o['anisotropy'] not in ('0', '2', '4', '8', '16') or o['deadzone'] not in ('10', '15', '20', '25', '30') \
             or o['rumble'] not in ('0', '25', '50', '75', '100'):
         raise ValueError('an option has a value the launcher doesn\'t offer')
+    if o['lod_bias'] not in LOD_BIASES:
+        raise ValueError('an option has a value the launcher doesn\'t offer')
     text = ini_set(text, 'anisotropy', o['anisotropy'], 'vsync')
+    text = ini_set(text, 'texture_lod_bias', o['lod_bias'], 'anisotropy')
     text = ini_set(text, 'dither', dict(FADES)[o['fade']], 'resolution')
     text = ini_set(text, 'gamepad_deadzone', o['deadzone'], 'gamepad_swap_ab')
     text = ini_set(text, 'gamepad_rumble', o['rumble'], 'gamepad_deadzone')

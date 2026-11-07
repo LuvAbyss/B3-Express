@@ -54,7 +54,7 @@ typedef struct {
     char first_unsupported[64];
     u32 cs_local[3];
     int shared_size;
-    u32 gbuf_wmask; /* global buffers the program writes */
+    u32 gbuf_wmask;   /* global buffers the program writes */
     int dither_blend; /* gpu/vk/dither.c made the fade a blend: it writes its alpha at location 0, index 1 */
     struct {
         u32 cbuf_off;
@@ -81,6 +81,9 @@ typedef struct {
        queries go through a per-slot ratio at SNX_VKB_RS (element 1 + slot), so a program keeps the game's pixels on
        images that have more of them */
     int host_scale;
+    /* nonzero: one constant buffer word reads as 0.0, (bank << 16 | word index) + 1. The renderer sets it for a few
+       known stages (film_grain=0, gpu/vk/nvn_res.c grain_word) */
+    u32 zero_cbuf;
 } ShaderInfo;
 #define SH_DC_COLOR_MAX  10 /* slots tex_dc_color_funcs has room for */
 /* Each stage has a descriptor set (shader_vk_set), its bindings grouped by kind. */
@@ -91,12 +94,12 @@ typedef struct {
 #define SNX_VKB_RS       (SNX_VKB_IMG + 8)         /* fragment: 1 / the resolution scale (SNX_RS) */
 #define SNX_VKB_FMT      (SNX_VKB_RS + 1)          /* compute: the images' format classes (SNX_FMT) */
 #define SNX_VKB_SMAP     (SNX_VKB_FMT + 1)         /* graphics: storage buffer page indices for aliased bindings */
-#define SNX_VKB_IMGBUF   (SNX_VKB_SMAP + 1)        /* 8 storage texel buffers, surface access to buffer images (compute) */
-#define SNX_VKB_TEXARRAY (SNX_VKB_IMGBUF + 8)      /* up to SNX_TEX_ARRAY distinct indexed handles */
-#define SNX_VKB_TEXFUNCS (SNX_VKB_TEXARRAY + 1)    /* their depth compare functions */
-#define SNX_VKB_TEXDEPTH (SNX_VKB_TEXFUNCS + 1)    /* their depth views */
-#define SNX_VKB_TEXMAP   (SNX_VKB_TEXDEPTH + 1)    /* table and element to compact descriptor index */
-#define SNX_VKB_END      (SNX_VKB_TEXMAP + 1)      /* one past the last binding */
+#define SNX_VKB_IMGBUF   (SNX_VKB_SMAP + 1)     /* 8 storage texel buffers, surface access to buffer images (compute) */
+#define SNX_VKB_TEXARRAY (SNX_VKB_IMGBUF + 8)   /* up to SNX_TEX_ARRAY distinct indexed handles */
+#define SNX_VKB_TEXFUNCS (SNX_VKB_TEXARRAY + 1) /* their depth compare functions */
+#define SNX_VKB_TEXDEPTH (SNX_VKB_TEXFUNCS + 1) /* their depth views */
+#define SNX_VKB_TEXMAP   (SNX_VKB_TEXDEPTH + 1) /* table and element to compact descriptor index */
+#define SNX_VKB_END      (SNX_VKB_TEXMAP + 1)   /* one past the last binding */
 /* An indexed texture loads its handle with an LDC whose address has a register in it: one of SNX_TEX_ARRAY handles
    from cbuf_off on, each (1 << shift) bytes after the last, with the shift in bits 4-7 of ShTex.flags. */
 #define SNX_TEX_ARRAY    256

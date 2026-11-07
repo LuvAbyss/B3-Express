@@ -281,11 +281,14 @@ assert o['screen'] == '2560 x 1440' and o['quality'] == 'Smooth 60' and o['fulls
 assert o['fade'] == 'Transparent' and o['prompts'] == 'Auto' and o['deadzone'] == '20' and o['rumble'] == '100', o
 again = L.options_apply(GAME_INI, o)
 assert L.options_read(again) == o and '; pad\r\n' in again and again.count('resolution=') == 1, repr(again)
-o2 = dict(o, screen='3840 x 2160', quality='Balanced', shadows=False, fade='Off', prompts='Xbox', deadzone='25', rumble='50')
+assert o['lod_bias'] == '0' and o['model_lod'] is False and o['film_grain'] is True, o  # the game's, when not set
+o2 = dict(o, screen='3840 x 2160', quality='Balanced', shadows=False, fade='Off', prompts='Xbox', deadzone='25', rumble='50',
+          lod_bias='-1', model_lod=True, film_grain=False, anisotropy='8')
 t = L.options_apply(GAME_INI, o2)  # Balanced on 1080p is stored as native, the same as Sharp: a bigger screen
 assert L.options_read(t) == o2, (L.options_read(t), o2)
 assert L.ini_get(t, 'dither') == '1' and L.ini_get(t, 'button_prompts') == '3' and L.ini_get(t, 'shadows') == '0'
-for bad in ({'anisotropy': '3'}, {'deadzone': '99'}, {'rumble': '-1'}):
+assert L.ini_get(t, 'texture_lod_bias') == '-1' and L.ini_get(t, 'model_lod') == '1' and L.ini_get(t, 'film_grain') == '0'
+for bad in ({'anisotropy': '3'}, {'deadzone': '99'}, {'rumble': '-1'}, {'lod_bias': '-3'}):
     try:
         L.options_apply(GAME_INI, dict(o, **bad))
         raise SystemExit(f'{bad} must be refused')

@@ -701,8 +701,8 @@ VkSampler vk_tex_bind_sampler(const u32* tsc, const ShTex* st, int num, const Su
         u32 mip = (tc[1] >> 6) & 3;
         tc[1] = (tc[1] & ~0xF3u) | 0x11u | (mip == 3 ? 2u : mip) << 6;
     }
-    /* raised only with anisotropy= set: without it the cache keeps one sampler per TSC */
-    int raise = g_vk_anisotropy > 1 && tex && tex->levels > 1 &&
+    /* raised only with anisotropy= or texture_lod_bias= set: without them the cache keeps one sampler per TSC */
+    int raise = (g_vk_anisotropy > 1 || g_vk_lod_bias != 0.0f) && tex && tex->levels > 1 &&
                 (want == VK_IMAGE_VIEW_TYPE_2D || want == VK_IMAGE_VIEW_TYPE_2D_ARRAY);
     return vk_sampler(tc, raise, num != 0);
 }
@@ -822,8 +822,8 @@ static void image_record(Surf* surf, u8* original, u32 size) {
         if (cpu) pages[npages++] = cpu >> 12;
     }
     qsort(pages, npages, sizeof *pages, image_page_cmp);
-    g_img_out[g_img_count++] = (GfxImageOut){.surf = surf, .original = original, .size = size, .pages = pages,
-                                             .npages = npages};
+    g_img_out[g_img_count++] =
+        (GfxImageOut){.surf = surf, .original = original, .size = size, .pages = pages, .npages = npages};
     g_gfx_img_any = 1;
 }
 static int image_overlaps(const GfxImageOut* out, u64 gva, u64 size) {

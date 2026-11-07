@@ -24,8 +24,8 @@
 
 int g_opt_fullscreen, g_opt_docked = 1, g_opt_lang = 1, g_opt_fps = SNX_FPS_GAME, g_opt_diag, g_opt_shadows = 1;
 int g_opt_prof, g_opt_auto_stub_ipc = 1, g_opt_network, g_opt_vsync = 1, g_opt_aniso, g_opt_mute_unfocused = 1;
-int g_opt_cutscene_fps = 30, g_opt_dither = 3, g_opt_fast_renderer = 1;
-float g_opt_resf = 1, g_opt_fsr, g_opt_fsr_sharpness = 0.2f;
+int g_opt_cutscene_fps = 30, g_opt_film_grain = 1, g_opt_model_lod, g_opt_dither = 3, g_opt_fast_renderer = 1;
+float g_opt_resf = 1, g_opt_lod_bias, g_opt_fsr, g_opt_fsr_sharpness = 0.2f;
 
 /* ---- the runtime's own settings ---- */
 
@@ -87,8 +87,9 @@ static const IniOpt g_display[] = {
      "1 = starts fullscreen, except in timed test runs. -f or --fullscreen=0 sets it for one run, and F11 or\n"
      "Alt+Enter switches while the game runs without changing it",
      INI_INT, INI_STARTUP, &g_opt_fullscreen, 0, 1, NULL, "Fullscreen", "Off|On", 0, 0},
-    {"mute_unfocused", "1", "1 = no sound while another window has the focus, and the game keeps running; 0 = sound stays",
-     INI_INT, 0, &g_opt_mute_unfocused, 0, 1, NULL, "Mute when unfocused", "Off|On", 0, 0},
+    {"mute_unfocused", "1",
+     "1 = no sound while another window has the focus, and the game keeps running; 0 = sound stays", INI_INT, 0,
+     &g_opt_mute_unfocused, 0, 1, NULL, "Mute when unfocused", "Off|On", 0, 0},
     {"cutscene_fps", "30",
      "30 = the title, menus and cutscenes run at the game's 30; 60 = they run at 60, keeping real time. 60 needs a game\n"
      "module compiled with the .tablecalls file, and does nothing for a game hle/scene60.c doesn't know",
@@ -102,6 +103,15 @@ static const IniOpt g_display[] = {
      "2 = the pattern at the screen's own pixels, even at any resolution, 3 = see-through by blending instead.\n"
      "Bayonetta 3 only (gpu/vk/dither.c). 3 costs nothing measurable (diagnostics/dither-20261104)",
      INI_INT, INI_STARTUP, &g_opt_dither, 0, 3, NULL, "Object fade", "Game|Off|Even|Blend", 0, 0},
+    {"model_lod", "0",
+     "0 = models lose detail with distance as on the console; 1 = every model with detail levels stays at its finest\n"
+     "(far ones with a single level still go). Needs a game module compiled with the .tablecalls file. Bayonetta 3\n"
+     "v1.2.0 only (hle/model_lod.c, as Witch Time)",
+     INI_INT, INI_STARTUP, &g_opt_model_lod, 0, 1, NULL, "Model detail", "Game|Highest", 0, 0},
+    {"film_grain", "1",
+     "1 = the game's moving noise over the picture; 0 = a clean picture, the vignette stays. Bayonetta 3 v1.2.0 only:\n"
+     "its four tonemap stages, found as Witch Time finds them (gpu/vk/nvn_res.c grain_word)",
+     INI_INT, INI_STARTUP, &g_opt_film_grain, 0, 1, NULL, "Film grain", "Off|On", 0, 0},
     {"language", "1",
      "The game's language: 0 Japanese, 1 English (US), 2 French, 3 German, 4 Italian, 5 Spanish, 6 Chinese, 7 Korean,\n"
      "8 Dutch, 9 Portuguese, 10 Russian, 11 Taiwanese, 12 English (UK), 13 French (Canada), 14 Spanish (Latin\n"
@@ -128,6 +138,10 @@ static const IniOpt g_graphics[] = {
      INI_INT, 0, &g_opt_vsync, 0, 2, NULL, "VSync", "Off|Mailbox|FIFO", 0, 0},
     {"anisotropy", "0", "0 = textures filtered as the game asks, 2 to 16 = sharper surfaces seen at an angle", INI_INT,
      INI_STARTUP, &g_opt_aniso, 0, 16, NULL, "Anisotropic filtering", "Game's|#x", 0, 0},
+    {"texture_lod_bias", "0",
+     "Added to the mip level of mipmapped 3D surfaces: 0 = as the game samples them, -0.5 to -1 = sharper textures in\n"
+     "the distance (lower can shimmer), above 0 = blurrier. The HUD and shadow maps keep the game's. As Witch Time's",
+     INI_FLOAT, INI_STARTUP, &g_opt_lod_bias, -3, 3, NULL, "Texture detail", NULL, 0, 0},
     END_ROW};
 static const IniOpt g_performance[] = {
     {"fps_limit", "game",
@@ -148,8 +162,8 @@ static const IniOpt g_network[] = {
      INI_INT, 0, &g_opt_network, 0, 1, NULL, "Network", "Offline|Online", 0, 0},
     END_ROW};
 static const IniOpt g_debug[] = {
-    {"log", "1", "The log's detail, 0 to 2: 2 logs everything, which slows the game down", INI_INT, 0, &g_verbose, 0,
-     2, NULL, NULL, NULL, 0, 0},
+    {"log", "1", "The log's detail, 0 to 2: 2 logs everything, which slows the game down", INI_INT, 0, &g_verbose, 0, 2,
+     NULL, NULL, NULL, 0, 0},
     {"auto_stub_ipc", "1",
      "1 = a service command the runtime doesn't know answers success (logged as [undeclared]); 0 = it answers\n"
      "the console's UnknownCommandId, which shows the gap where the game makes the call",
@@ -158,8 +172,8 @@ static const IniOpt g_debug[] = {
      "1 = saves each new compute shader's data to captures/compute, and each new shader to captures/shaders\n"
      "(snx-shaderc's corpus)",
      INI_INT, 0, &g_opt_diag, 0, 1, NULL, "Shader captures", "Off|On", 0, 0},
-    {"profile", "0", "1 = writes profile.txt every 10 seconds (the CPU profiler is Windows only)", INI_INT,
-     INI_STARTUP, &g_opt_prof, 0, 1, NULL, "Profiler", "Off|On", 0, 0},
+    {"profile", "0", "1 = writes profile.txt every 10 seconds (the CPU profiler is Windows only)", INI_INT, INI_STARTUP,
+     &g_opt_prof, 0, 1, NULL, "Profiler", "Off|On", 0, 0},
     END_ROW};
 
 /* The file's sections in its order. A section has up to three tables, and a table with a page has a page of its own
@@ -202,11 +216,11 @@ int snx_setting_known(const char* key) { return find_row(key, NULL) || unattende
 
 /* ---- the file's values, the command line's, and the menu's waiting to be written ---- */
 
-#define KEY_MAX 64
-#define STORE_MAX 128
-#define VALUE_MAX 2048
-#define OVERRIDE_MAX 64
-#define PENDING_MAX 64
+#define KEY_MAX       64
+#define STORE_MAX     128
+#define VALUE_MAX     2048
+#define OVERRIDE_MAX  64
+#define PENDING_MAX   64
 #define PENDING_VALUE 256 /* a gamepad map's text is up to 165 bytes (pad_map.h) */
 
 /* The file as last read, with the menu's changes merged in: only the thread that opens and polls it touches it */
@@ -581,8 +595,8 @@ void ini_list(void) {
                 if (o->help) help = o->help; /* none: the one before covers it */
                 if (o->flags & INI_IN_GAME) continue;
                 printf("%s%s%s\t%s\t%s\t%s\t%g\t%g\t", g_sections[s].name, g_sections[s].page[t] ? "/" : "",
-                       g_sections[s].page[t] ? g_sections[s].page[t] : "", o->key, o->def ? o->def : "",
-                       types[o->type], o->lo, o->hi);
+                       g_sections[s].page[t] ? g_sections[s].page[t] : "", o->key, o->def ? o->def : "", types[o->type],
+                       o->lo, o->hi);
                 list_help(help);
                 printf("\t%s\t", o->name ? o->name : "");
                 list_values(o);

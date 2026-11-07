@@ -11,6 +11,7 @@
 #include "nx/hle/kernel/kernel.h"
 #include "nx/hle/nvn/nvn.h"
 #include "nx/hle/scene60.h"
+#include "nx/hle/model_lod.h"
 #include "nx/hle/services/hid.h"
 #include "nx/hle/services/nvdrv.h"
 #include "nx/hle/services/services.h"
@@ -419,8 +420,7 @@ int snx_main(int argc, char** argv) {
     /* the code before anything is written: a mistyped --game leaves no .ini and no log behind */
     mod = load_module(module);
     if (mod->abi != SNX_ABI)
-        fatal("The recompiled code is from another ScarletNX version: recompile the game with this one (%s)",
-              module);
+        fatal("The recompiled code is from another ScarletNX version: recompile the game with this one (%s)", module);
     kind_dir(g_confdir, sizeof g_confdir, SNX_USER_CONFIG, "settings");
     kind_dir(g_statedir, sizeof g_statedir, SNX_USER_STATE, "log and threads.txt");
     kind_dir(g_cachedir, sizeof g_cachedir, SNX_USER_CACHE, "caches");
@@ -462,6 +462,7 @@ int snx_main(int argc, char** argv) {
     kernel_load_symbols();
     nvn_init(); /* before the game runs: the entry points it finds go through hle/nvn */
     scene60_init();
+    model_lod_init();
     read_npdm();
     svc_core_init();
     svc_fs_init();

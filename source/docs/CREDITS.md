@@ -81,6 +81,13 @@ issues 92, 100 and 107). The code is written from its notes.
 shapes, and the dual-plane ASTC block. `prompt_art.h` is unchanged. The hook in this renderer's texture cache and the
 choice from the pad last used are written here.
 
+Detail options for Bayonetta 3, from [Witch Time](https://github.com/Zexyen/Witch-Time) v0.4.5 (GPL-3.0-or-later,
+`docs/STATUS.md` "Level of detail", issue 86): `texture_lod_bias` (`src/nx/gpu/vk/texture.c`), the option and its
+meaning; `film_grain=0` (`src/nx/gpu/vk/nvn_res.c` `grain_word`), the four tonemap stages' code hashes and the
+constant buffer word they draw the grain with, from `runtime/nvn_vk_m4.c` `stage_fx`; `model_lod=1`
+(`src/nx/hle/model_lod.c`), the level selector's address and the rule after it, from `runtime/game_shim_eh.c`
+`h_model_lod`. The code is written for this runtime.
+
 `src/nx/gpu/vk/nvn_res.c`, storage buffers the GPU writes kept in video memory (`mir_own`, `own_merge`, `own_land_now`,
 `own_idle`): the design, keeping a compute-written buffer on the GPU, landing it in guest memory only when something
 needs the bytes there, merging against the snapshot taken when it was filled so a word the game wrote meanwhile stays

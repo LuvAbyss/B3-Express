@@ -22,6 +22,7 @@ typedef struct {
     u32 swapped; /* 1 + the slot whose sampler is an array element for this instruction */
     u32 image[8], image_type[8];
     u32 gbuf[16], gbuf_pointer, smap, subgroup_lane_input;
+    u32 zero_cbuf; /* ShaderInfo.zero_cbuf */
 } DirectCtx;
 
 int g_shader_texture_arrays;
@@ -652,6 +653,8 @@ static void geometry_passthrough(DirectCtx* c, const ShaderInfo* si, u32 vertice
    denormal (Adreno does, in a shader that declares DenormFlushToZero), and a jump table of small offsets reads 0. */
 static u32 cbuf_word(DirectCtx* c, u64 w) {
     u32 idx = B(w, 34, 5), off = B(w, 20, 14) * 4;
+    if (c->zero_cbuf && c->zero_cbuf - 1 == (idx << 16 | off >> 2))
+        return spv_emit_constant_u32(&c->emit, c->u32_type, 0);
     u32 member = spv_emit_constant_u32(&c->emit, c->u32_type, 0);
     u32 element = spv_emit_constant_u32(&c->emit, c->u32_type, off >> 4);
     u32 component = spv_emit_constant_u32(&c->emit, c->u32_type, (off >> 2) & 3);
@@ -3069,6 +3072,7 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
         free(pop_targets);
         return NULL;
     }
+    c->zero_cbuf = si->zero_cbuf;
     spv_emit_init(&c->emit, (size_t)n * 20 + 128);
     spv_emit_shader_capability(&c->emit);
     if (stage == ST_TCS || stage == ST_TES) spv_emit_capability(&c->emit, 3); /* Tessellation */

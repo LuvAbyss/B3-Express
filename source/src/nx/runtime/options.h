@@ -40,11 +40,15 @@ extern int g_opt_auto_stub_ipc;
 extern int g_opt_network; /* network: 1 = the game is online through the host (hle/services/network) */
 extern float g_opt_resf;  /* resolution: the scale of render targets */
 extern float g_opt_fsr, g_opt_fsr_sharpness; /* fsr: scene smaller than resolution by this, 0 off; stops */
-extern int g_opt_vsync;   /* vsync: 0 = at once, 1 = mailbox, 2 = FIFO */
+extern int g_opt_vsync;                      /* vsync: 0 = at once, 1 = mailbox, 2 = FIFO */
 extern int g_opt_mute_unfocused; /* mute_unfocused: 1 = the sound stops while another window has the focus */
 extern int g_opt_cutscene_fps;   /* cutscene_fps: 30 as the game asks, 60 where hle/scene60.c knows the game */
 extern int g_opt_dither;         /* dither: the game's screen-door fade, gpu/vk/dither.h's DITHER_* */
 extern int g_opt_fast_renderer;  /* fast_renderer: 1 = SNX_NVN_FRONTEND=2 and RELEASE_ONLY=1 unless set (main.c) */
-extern int g_opt_aniso;   /* anisotropy: 0 = the game's, else at least that much for mipmapped 2D textures */
+extern int g_opt_aniso;          /* anisotropy: 0 = the game's, else at least that much for mipmapped 2D textures */
+extern float g_opt_lod_bias;
+extern int g_opt_model_lod; /* model_lod: 0 the game's, 1 every model at its finest (hle/model_lod.c) */
+extern int g_opt_film_grain;
+    /* film_grain: 1 the game's, 0 its tonemap stages draw none (gpu/vk/nvn_res.c) */ /* texture_lod_bias: added to the mip level of the same samplers */
 
 #endif

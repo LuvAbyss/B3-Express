@@ -68,6 +68,8 @@ static int vkr_start(void) {
     if (!vk_init()) return 0;
     g_vk_scale = g_opt_resf;       /* the .ini keeps resolution within 0.25 to 4 (options.c) */
     g_vk_anisotropy = g_opt_aniso; /* the sampler table keeps what it makes: anisotropy applies at start */
+    g_vk_lod_bias = g_opt_lod_bias;
+    if (g_vk_lod_bias != 0.0f) LOG("vulkan: texture LOD bias %+.2f on mipmapped 3D surfaces\n", (double)g_vk_lod_bias);
     if (g_vk_anisotropy > 1 && !g_vk.feat.samplerAnisotropy)
         LOG("vulkan: this GPU has no anisotropic filtering, so anisotropy=%d does nothing\n", g_vk_anisotropy);
     if (g_vk_scale != 1.0f) LOG("vulkan: render targets at %.2fx\n", g_vk_scale);
