@@ -79,6 +79,28 @@ Port in stages, each tested in the isolated copy at 21:9 on the title and the fi
 4. **Options:** `aspect_ratio` (16:9, auto from the window, 21:9, 32:9, 16:10) and `hud_area` in the `.ini` and the
    launcher.
 
+## Stage 1 done (2026-11-07): the 3D view, HUD centred
+
+`aspect_ratio=` (width / height, 0 the game's 16:9) in the `.ini`, and an Aspect ratio row in the launcher's Options
+(16:9, 16:10, 21:9, 32:9, marked experimental). `source/src/nx/hle/aspect.c` hooks the six functions of stage 1
+(addresses in `launcher/code-tablecalls.txt`), checking their words first; `mem_total` grows with the heap;
+`nvn_res.c` `rp_xstretch` widens 16:9-class scene targets on x. Build w1 (`w1/Bayo3_120.exe`, `b530a720...`).
+
+Runs in the isolated copy (`desktop-launch-20261028/ws-*`), game code compiled with the new list, copy restored after
+each, every one exit 0 with saves unchanged:
+
+| Run | Frame | Camera P11/P00 | Seen |
+|---|---|---|---|
+| `ws-21x9-title` (2.333) | 2100x900 | | title 3D across the width, text centred and unstretched |
+| `ws-21x9-fight` (2.333, 1a: stretched) | 2100x900 | 2.3333 (56 of 56) | Giza: Bayonetta the same size as at 16:9, more of the arena at the sides; area title centred |
+| `ws-21x9-fight-b` (2.333, 1b: widened) | 2100x900 | | the same, sharper: fine detail +7 to +40 % against 1a on the same frames, no faults seen |
+| `ws-16x10-fight` (1.6) | 1440x900 | 1.6000 (60 of 60) | Giza, Vert+, title centred |
+| `ws-32x9-title` (3.556) | 3200x900 | | heap 0x20a00000, title 3D across, text centred |
+
+Not right yet (stages 2-3): the chapter select's bottom bar and panels end inside the screen; elements placed over
+3D points, clipped gauges and the aim aren't moved; movies aren't pillarboxed. Not tried: a real ultrawide monitor,
+cutscenes, the pause menu.
+
 ## Next (before the decision)
 
 1. With the GDB stub (`runtime/gdbstub.c`) instead of a 3-minute compile per guess: break on the returns of the

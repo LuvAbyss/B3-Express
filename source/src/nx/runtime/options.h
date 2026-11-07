@@ -47,8 +47,9 @@ extern int g_opt_dither;         /* dither: the game's screen-door fade, gpu/vk/
 extern int g_opt_fast_renderer;  /* fast_renderer: 1 = SNX_NVN_FRONTEND=2 and RELEASE_ONLY=1 unless set (main.c) */
 extern int g_opt_aniso;          /* anisotropy: 0 = the game's, else at least that much for mipmapped 2D textures */
 extern float g_opt_lod_bias;
+extern float g_opt_aspect;  /* aspect_ratio: the game's picture width / height, 0 its 16:9 (hle/aspect.c) */
 extern int g_opt_model_lod; /* model_lod: 0 the game's, 1 every model at its finest (hle/model_lod.c) */
 extern int g_opt_film_grain;
-    /* film_grain: 1 the game's, 0 its tonemap stages draw none (gpu/vk/nvn_res.c) */ /* texture_lod_bias: added to the mip level of the same samplers */
+/* film_grain: 1 the game's, 0 its tonemap stages draw none (gpu/vk/nvn_res.c) */ /* texture_lod_bias: added to the mip level of the same samplers */
 
 #endif

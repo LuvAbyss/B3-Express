@@ -9,6 +9,7 @@
 /* the memory SVCs (heap, physical memory, permissions and attributes, MapMemory, shared, transfer and code memory,
    QueryMemory), the process's memory accounting, and GetInfo */
 #include "nx/hle/kernel/kernel_int.h"
+#include "nx/hle/aspect.h"
 #include "nx/runtime/clock.h"
 
 #define R_BADPERM    0xD801 /* InvalidNewMemoryPermission */
@@ -22,14 +23,16 @@
 #define MSF_CAN_CHANGE_ATTR (1u << 24)
 #define MSF_CAN_CODE_MEMORY (1u << 25)
 /* MemoryAttribute: Locked, IpcLocked, DeviceShared, Uncached, PermissionLocked */
-#define MA_LOCKED   1u
-#define MA_SET_MASK 0x18u /* what SetMemoryAttribute may change: Uncached and PermissionLocked */
+#define MA_LOCKED           1u
+#define MA_SET_MASK         0x18u /* what SetMemoryAttribute may change: Uncached and PermissionLocked */
 
 int g_opt_mem_gb;
 u64 g_core_mask = 0xF, g_prio_mask = 0xFFFFFFFFFFFFFFF0ull; /* until the npdm says (main.c): an application's */
 
 /* ============================================================ helpers */
-static int in_region(u64 a, u64 size, u64 base, u64 rsize) { return a >= base && size <= rsize && a - base <= rsize - size; }
+static int in_region(u64 a, u64 size, u64 base, u64 rsize) {
+    return a >= base && size <= rsize && a - base <= rsize - size;
+}
 static int overlaps(u64 a, u64 size, u64 base, u64 rsize) { return rsize && a < base + rsize && base < a + size; }
 /* the console's KPageTableBase::CanContain, for the states mapped here: normal memory in the heap region, the stack
    state in the stack region, the rest (shared, generated code, code out) anywhere in the address space outside the
@@ -91,10 +94,12 @@ static int user_writable(u64 a, u64 size) {
 /* ============================================================ accounting */
 /* The application pool for each memory_gb (Mesosphere's KSystemControl application pool sizes for the 4, 6 and 8 GiB
    boards), see docs/MEMORY_ACCOUNTING.md */
+/* what the game is told it has, more wider than 16:9 (hle/aspect.c: its render-target heap grows as much) */
 u64 mem_total(void) {
-    if (g_opt_mem_gb >= 8) return 6964 * MIB;
-    if (g_opt_mem_gb >= 6) return 4916 * MIB;
-    return 3285 * MIB;
+    u64 extra = aspect_extra_memory();
+    if (g_opt_mem_gb >= 8) return 6964 * MIB + extra;
+    if (g_opt_mem_gb >= 6) return 4916 * MIB + extra;
+    return 3285 * MIB + extra;
 }
 /* the loaded images, the main thread's stack, the heap, physical memory and the system resource, charged once */
 u64 used_memory(void) {
@@ -131,8 +136,7 @@ u32 svc_set_heap_size(u64 size) {
         r = R_OUTOFMEM;
     else
         r = mem_result(mem_heap_set(size, heap_budget()));
-    LOG("heap: %llu MB requested%s (result %x)\n", (unsigned long long)(size >> 20), R_FAILED(r) ? ", refused" : "",
-        r);
+    LOG("heap: %llu MB requested%s (result %x)\n", (unsigned long long)(size >> 20), R_FAILED(r) ? ", refused" : "", r);
     return r;
 }
 /* svcMapPhysicalMemory and svcUnmapPhysicalMemory: page-aligned (InvalidAddress), whole pages (InvalidSize), no wrap
@@ -520,7 +524,7 @@ static u32 process_info(u32 id, u64* out) {
         case 21: *out = mem_total() - g_sysres_size; R_SUCCEED();
         case 22: *out = used_memory() - g_sysres_size; R_SUCCEED();
         case 23: *out = 1; R_SUCCEED(); /* IsApplication */
-        case 24: {                   /* FreeThreadCount */
+        case 24: {                      /* FreeThreadCount */
             int live = kthread_live_count();
             *out = live < THREAD_MAX ? (u64)(THREAD_MAX - live) : 0;
             R_SUCCEED();
@@ -532,8 +536,27 @@ static u32 process_info(u32 id, u64* out) {
 /* The rest of svcGetInfo; ResourceLimit (9), which makes a handle, is svc.c's */
 u32 svc_get_info(u32 id0, u32 h, u64 id1, u64* out) {
     switch (id0) {
-        case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 7: case 12: case 13: case 14: case 15: case 16:
-        case 17: case 18: case 20: case 21: case 22: case 23: case 24: case 28: {
+        case 0:
+        case 1:
+        case 2:
+        case 3:
+        case 4:
+        case 5:
+        case 6:
+        case 7:
+        case 12:
+        case 13:
+        case 14:
+        case 15:
+        case 16:
+        case 17:
+        case 18:
+        case 20:
+        case 21:
+        case 22:
+        case 23:
+        case 24:
+        case 28: {
             KObj* p;
             R_UNLESS(!id1, R_BADENUM);
             if (h != H_CUR_PROC) {
@@ -544,7 +567,7 @@ u32 svc_get_info(u32 id0, u32 h, u64 id1, u64* out) {
             return process_info(id0, out);
         }
         case 8: *out = 0; R_SUCCEED(); /* DebuggerAttached */
-        case 10:                    /* IdleTickCount: a core, or -1 for all of them */
+        case 10:                       /* IdleTickCount: a core, or -1 for all of them */
             if (id1 != ~0ull && id1 >= NCORES) R_THROW(R_BADCOMBO);
             R_UNLESS(!h, R_BADHANDLE);
             *out = 0;

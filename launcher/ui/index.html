@@ -257,6 +257,11 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
             <select id="o-lod-bias" data-o="lod_bias"><option value="0">As the game draws it</option><option value="-0.5">Sharper</option><option value="-1">Sharpest</option></select>
             <p class="hint">Sharper textures in the distance, at no measurable cost. Sharpest can shimmer a little on fine patterns.</p>
           </div>
+          <div class="field">
+            <label for="o-aspect">Aspect ratio <span class="example">experimental</span></label>
+            <select id="o-aspect" data-o="aspect"><option value="0">16:9, as made</option><option value="1.6">16:10</option><option value="2.3333">21:9 ultrawide</option><option value="3.5556">32:9 super ultrawide</option></select>
+            <p class="hint">The game's own picture in your screen's shape: wider shows more at the sides, 16:10 more above and below. The HUD stays a 16:9 block in the middle. Menus can still look off at the edges.</p>
+          </div>
           <div class="switch"><label for="o-model_lod">Highest model detail<span class="hint" style="display:block;font-weight:400">Every model at its finest level, and distant ones stay drawn. Weaker graphics cards may lose some frame rate.</span></label><input type="checkbox" id="o-model_lod" data-o="model_lod"></div>
           <div class="switch"><label for="o-film_grain">Film grain<span class="hint" style="display:block;font-weight:400">The game's moving noise over the picture. Off gives a cleaner picture; the vignette stays.</span></label><input type="checkbox" id="o-film_grain" data-o="film_grain"></div>
           <div class="field">

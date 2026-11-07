@@ -283,12 +283,16 @@ again = L.options_apply(GAME_INI, o)
 assert L.options_read(again) == o and '; pad\r\n' in again and again.count('resolution=') == 1, repr(again)
 assert o['lod_bias'] == '0' and o['model_lod'] is False and o['film_grain'] is True, o  # the game's, when not set
 o2 = dict(o, screen='3840 x 2160', quality='Balanced', shadows=False, fade='Off', prompts='Xbox', deadzone='25', rumble='50',
-          lod_bias='-1', model_lod=True, film_grain=False, anisotropy='8')
+          lod_bias='-1', model_lod=True, film_grain=False, anisotropy='8', aspect='2.3333')
 t = L.options_apply(GAME_INI, o2)  # Balanced on 1080p is stored as native, the same as Sharp: a bigger screen
 assert L.options_read(t) == o2, (L.options_read(t), o2)
 assert L.ini_get(t, 'dither') == '1' and L.ini_get(t, 'button_prompts') == '3' and L.ini_get(t, 'shadows') == '0'
+assert L.ini_get(t, 'aspect_ratio') == '2.3333'
+# wider than 16:9 the scene is drawn wider (prepared shaders for scaling); 16:10 and 16:9 aren't
+assert L.scaled_mode('resolution=1\r\naspect_ratio=2.3333\r\n') and not L.scaled_mode('resolution=1\r\naspect_ratio=1.6\r\n')
+assert not L.scaled_mode('resolution=1\r\naspect_ratio=0\r\n')
 assert L.ini_get(t, 'texture_lod_bias') == '-1' and L.ini_get(t, 'model_lod') == '1' and L.ini_get(t, 'film_grain') == '0'
-for bad in ({'anisotropy': '3'}, {'deadzone': '99'}, {'rumble': '-1'}, {'lod_bias': '-3'}):
+for bad in ({'anisotropy': '3'}, {'deadzone': '99'}, {'rumble': '-1'}, {'lod_bias': '-3'}, {'aspect': '2.0'}):
     try:
         L.options_apply(GAME_INI, dict(o, **bad))
         raise SystemExit(f'{bad} must be refused')

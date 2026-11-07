@@ -12,6 +12,7 @@
 #include "nx/hle/nvn/nvn.h"
 #include "nx/hle/scene60.h"
 #include "nx/hle/model_lod.h"
+#include "nx/hle/aspect.h"
 #include "nx/hle/services/hid.h"
 #include "nx/hle/services/nvdrv.h"
 #include "nx/hle/services/services.h"
@@ -463,6 +464,7 @@ int snx_main(int argc, char** argv) {
     nvn_init(); /* before the game runs: the entry points it finds go through hle/nvn */
     scene60_init();
     model_lod_init();
+    aspect_init();
     read_npdm();
     svc_core_init();
     svc_fs_init();

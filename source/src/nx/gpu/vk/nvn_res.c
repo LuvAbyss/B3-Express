@@ -14,6 +14,7 @@
 #include "nx/runtime/main.h"
 #include "nx/runtime/platform/plat.h"
 #include "nx/runtime/options.h"
+#include "nx/hle/aspect.h"
 #include "nx/gpu/vk/vk.h"
 #include "nx/memory/mem.h"
 #include "nx/runtime/platform/log.h"
@@ -25,7 +26,14 @@ void vk_nvn_window_size(u32 w, u32 h) {
 }
 static int rp_fsr_on(void) { return g_opt_fsr > 1.0f && vk_fsr1_ready(); }
 static float rp_scene_scale(void) { return rp_fsr_on() ? g_vk_scale / g_opt_fsr : g_vk_scale; }
-static int rp_scaling(void) { return g_vk_scale != 1.0f || rp_fsr_on(); }
+/* aspect_ratio wider than 16:9 (hle/aspect.c): the game's window is wider but its scene targets keep 16:9 sizes and
+   its last pass stretches them into it. Such a target is made this much wider again, so the scene has the window's
+   pixels across (Witch Time's rs_xstretch, runtime/nvn_vk_draw.c, GPL-3.0-or-later) */
+static float rp_xstretch(void) {
+    float a = aspect_ratio();
+    return a > 16.0f / 9.0f ? a * 9.0f / 16.0f : 1.0f;
+}
+static int rp_scaling(void) { return g_vk_scale != 1.0f || rp_fsr_on() || rp_xstretch() != 1.0f; }
 /* what prepared shaders are for, beside the driver: the scaling (FragCoord in the game's pixels) and dither=N, which
    change pixel stages. 0 and 1 with dither=0, as before it existed. The launcher reads it back (shaders_ready) */
 static int prep_mode(void) { return rp_scaling() + 2 * g_opt_dither; }
@@ -2195,10 +2203,15 @@ static int rp_bound(int i);
 /* What the resolution scale takes: the game's frame and the half sizes of its chains, every step of its dynamic
    resolution (960x540 to 1600x900) among them, by their shape. Shadow maps, atlases and small bloom levels stay. The
    window's textures take resolution itself, the rest resolution / fsr */
-static float rp_scale_of(u32 w, u32 h, u32 layers) {
+static float rp_scale_of(u32 w, u32 h, u32 layers, float* xs) {
+    *xs = 1.0f;
     if (layers > 1) return 1.0f;
-    if (w == g_rp_win_w && h == g_rp_win_h) return g_vk_scale;
-    return w >= 320 && w * 100 >= h * 170 && w * 100 <= h * 180 ? rp_scene_scale() : 1.0f;
+    if (w == g_rp_win_w && h == g_rp_win_h) return *xs = g_vk_scale;
+    if (w >= 320 && w * 100 >= h * 170 && w * 100 <= h * 180) {
+        *xs = rp_scene_scale() * rp_xstretch(); /* wider on x only (aspect_ratio) */
+        return rp_scene_scale();
+    }
+    return 1.0f;
 }
 static int rp_target(const NvnTarget* t) { return rp_target_vk(t, target_fmt(t->format), 1); }
 /* the replay's image for a target texture in format f, made and cleared at first use; storage-capable when f can be.
@@ -2240,8 +2253,8 @@ static int rp_target_vk(const NvnTarget* t, VkFormat f, int scale) {
         r->sw = g_rp_want[0];
         r->sh = g_rp_want[1];
     } else if (scale) {
-        float s = rp_scale_of(t->w, t->h, r->layers);
-        r->sw = (u32)((float)t->w * s + 0.5f);
+        float xs, s = rp_scale_of(t->w, t->h, r->layers, &xs);
+        r->sw = (u32)((float)t->w * xs + 0.5f);
         r->sh = (u32)((float)t->h * s + 0.5f);
     }
     r->sx = (float)r->sw / (float)r->w;

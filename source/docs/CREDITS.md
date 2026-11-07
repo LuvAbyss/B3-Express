@@ -88,6 +88,12 @@ constant buffer word they draw the grain with, from `runtime/nvn_vk_m4.c` `stage
 (`src/nx/hle/model_lod.c`), the level selector's address and the rule after it, from `runtime/game_shim_eh.c`
 `h_model_lod`. The code is written for this runtime.
 
+Aspect ratios other than 16:9 for Bayonetta 3 (`src/nx/hle/aspect.c`, `aspect_extra_memory` in
+`src/nx/hle/svc/svc_mem.c`, `rp_xstretch` in `src/nx/gpu/vk/nvn_res.c`): ported from
+[Witch Time](https://github.com/Zexyen/Witch-Time) v0.4.5 (GPL-3.0-or-later, `runtime/game_shim_eh.c` "aspect ratios",
+`runtime/r2_imports.c` `aspect_extra`, `runtime/nvn_vk_draw.c` `rs_xstretch`; `docs/STATUS.md` "Aspect ratios"): the
+functions hooked, what each is given, the rules and the heap's growth. The code is written for this runtime.
+
 `src/nx/gpu/vk/nvn_res.c`, storage buffers the GPU writes kept in video memory (`mir_own`, `own_merge`, `own_land_now`,
 `own_idle`): the design, keeping a compute-written buffer on the GPU, landing it in guest memory only when something
 needs the bytes there, merging against the snapshot taken when it was filled so a word the game wrote meanwhile stays
