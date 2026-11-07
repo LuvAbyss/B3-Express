@@ -29,11 +29,36 @@ gets the 16:9 picture letterboxed (`gpu/vk/renderer.c`), as B2recomp does; Witch
   A802A872`, compiled in with the new code-patch mods): applied ("8 bytes patched"), but the title's targets were
   the same sizes (`wide-p1-21x9`). That path isn't the title's, and probably not gameplay's either.
 
+## The camera (2026-11-07, second pass)
+
+- The projection, from `SNX_NVN_DRAWLOG`'s `C,` lines (the first depth-writing scene draw's vertex uniform buffer 0:
+  a view matrix, then the projection, row-major) at the title: P[0][0] 1.31241, P[1][1] 2.33317 (ratio 1.7778, so
+  16:9), vertical fov about 46 degrees, P[3][2] -1. Run `desktop-launch-20261028/cam-title-a`.
+- The 37 callers of `tanf` (`main+0x1321480`) with divisions after them are the camera's zoom limits and audio
+  biquad filters (pi, sqrt 2), not the projection: it is built without `tanf`, likely by the SDK's inline matrix
+  helpers.
+- The game knows a screen size: `main+0xd02d70` returns the width and `main+0xd02d80` the height, both read from the
+  object at `*(0xa4b1cc0)` (+0x130, +0x134). Three places correct by (16/9) / (w/h): `main+0xca8dd4` and `0xca921c`
+  (the screen getters, stored at `[x20+0x38]`) and `0xc826e8` (a render target's own size). So the game was written
+  for screens of other shapes as long as that size says so.
+
+- **p2** (code patch: the width getter returns 2560): the projection stays exactly 16:9 in every title shot, so the
+  screen size isn't where the camera's aspect comes from (`wide-p2-w2560`; the title picks different shots per run,
+  so fov can't be compared between runs, only the ratio).
+- **The scene's size is set in the graphics setup at `main+0x69c698`:** 1600x896 docked or 1280x720 (chosen by
+  `bl 0x8ce8f10(0x20000000)`), passed to `0x86a2090(1600, 900, 1600, 900 or 1024)`, `0x86a2344(.., 1600, 900)` and
+  `0x86a2e80(1600, 896, w, h)`. `0x86a2090` builds a settings block (pool sizes such as 0x10400000, a 1280x720
+  default, a 1024 limit) for `0x86a4c44`.
+- **p3** (1600 -> 2096 there) and **p4** (896/900 -> 688 there, 1600x688): both crash 1.2 s in, at the same place
+  (`main+0x6705ac`, a null pointer from an init call, under nnMain), with memory_gb 0 or 6. So it isn't memory:
+  something down `0x86a2090`'s chain refuses any size but its own (`wide-p3-t2096`, `wide-p3-t2096-m6`,
+  `wide-p4-h688`). p4 did make a 1600x688 target before failing.
+
 ## Next
 
-1. Find the camera's projection: the function writing the projection matrix the 3D passes read (a uniform buffer
-   with 1/tan terms). Its x scale is where 16:9 enters. Candidates: the other 16/9 sites (`0xc30668`, `0xc81288`,
-   `0xc826e8`, `0xca8dd4`, `0xca921c`), disassembled with `tools/disasm.py`.
+1. With the GDB stub (`runtime/gdbstub.c`) instead of a 3-minute compile per guess: break on the returns of the
+   calls `main+0x69c698` makes, with p4 on, and find which one fails for 1600x688, then what it checks. Then the
+   same for the projection: watch the camera's uniform data (`C,` lines) back to the code that writes P[0][0].
 2. The game's own window and scene targets (1920x1080 window, 1600x900 top dynamic step): either the game is patched
    to make them wider, or the runtime widens the screen-sized targets on x only, with viewports, scissors and
    pixel-space shaders (FSR, post effects) following.
