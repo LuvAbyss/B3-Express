@@ -75,6 +75,7 @@ class Api:
                 'stale': (cache / 'prepared.txt').is_file() and not prepared, 'running': running,
                 'job': self._job.view() if self._job else None, 'note': self._exit_note, 'gpu': self._gpu,
                 'version': L.launcher_version(), 'last': L.session_stats(L.GAME / (L.NAME + '.log')),
+                'codemods': files and L.CODE.is_file() and L.STAMP.is_file() and L.code_mods_changed(),
                 'program': (L.GAME / (L.NAME + '.exe')).is_file()}
 
     def _busy(self):
@@ -255,6 +256,52 @@ class Api:
             return L.restore_save(name) or ''
         except (OSError, ValueError) as e:
             return f'The save could not be restored: {e}'
+
+    # ---- Mods
+    def mods(self):
+        try:
+            mods = L.mod_list()
+        except OSError as e:
+            return {'error': f'The mods folder can\'t be read: {e}', 'mods': []}
+        return {'mods': mods, 'supported': L.mods_supported(), 'program': (L.GAME / (L.NAME + '.exe')).is_file(),
+                'running': (self._game is not None and self._game.poll() is None) or L.game_running(),
+                'folder': str(L.mods_dir())}
+
+    def mods_save(self, names):
+        """The mods on, in this order, every other one off"""
+        try:
+            L.mods_set(names)
+        except (OSError, ValueError) as e:
+            return f'The list could not be saved: {e}'
+        return ''
+
+    def mod_add(self, kind):
+        """A mod from a folder or a .zip the player picks; {'name'} or {'error'}, or {} when the dialog was closed"""
+        import webview
+        if kind == 'zip':
+            got = self._window.create_file_dialog(webview.FileDialog.OPEN, file_types=('Mod zip (*.zip)',))
+        else:
+            got = self._window.create_file_dialog(webview.FileDialog.FOLDER)
+        if not got:
+            return {}
+        try:
+            return {'name': L.mod_import(got[0])}
+        except ValueError as e:
+            return {'error': str(e)}
+        except OSError as e:
+            return {'error': f'The mod could not be copied: {e}'}
+
+    def mod_remove(self, name):
+        try:
+            L.mod_remove(name)
+        except (OSError, ValueError) as e:
+            return str(e)
+        return ''
+
+    def open_mods(self):
+        L.mods_dir().mkdir(parents=True, exist_ok=True)
+        os.startfile(L.mods_dir())
+        return ''
 
     # ---- Help
     def report(self):

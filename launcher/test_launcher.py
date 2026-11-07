@@ -315,6 +315,123 @@ with zipfile.ZipFile(evil, 'w') as z:
 assert 'outside' in L.restore_save(evil.name) and not (L.DATA / 'escaped.bin').exists()
 assert (L.SAVE / 'slot' / 'data.bin').read_bytes() == b'chapter 3'  # a refused restore leaves the save alone
 
+# mods: listed with the ones on first in mods.txt order, turned on and off by rewriting mods.txt whole
+data_before = L.DATA
+L.DATA = Path(tempfile.mkdtemp()) / 'data'
+assert L.mod_list() == []
+for rel in ('romfs/a.bin', 'romfs/ui/menu.dat'):  # the game's own files
+    (L.DATA / rel).parent.mkdir(parents=True, exist_ok=True)
+    (L.DATA / rel).write_bytes(b'game')
+for name, files in {'b-skin': {'romfs/a.bin': b'one', 'romfs/Ui/menu.dat': b'x'},
+                    'a-music': {'romfs/sound/x.bin': b'four', 'romfs/a.bin': b'two'},
+                    'empty-folder': {'readme.txt': b'no romfs'}}.items():
+    for rel, content in files.items():
+        (L.mods_dir() / name / rel).parent.mkdir(parents=True, exist_ok=True)
+        (L.mods_dir() / name / rel).write_bytes(content)
+assert [(m['name'], m['on']) for m in L.mod_list()] == [('a-music', False), ('b-skin', False), ('empty-folder', False)]
+L.mods_set(['b-skin', 'a-music'])
+mods = {m['name']: m for m in L.mod_list()}
+assert [n for n in mods] == ['b-skin', 'a-music', 'empty-folder'], mods
+# b-skin replaces a.bin, has Ui/menu.dat where the game has ui/menu.dat (never read), and a-music, later, hides a.bin
+assert (mods['b-skin']['replaces'], mods['b-skin']['case'], mods['b-skin']['hidden_by']) == (1, 1, {'a-music': 1})
+assert (mods['a-music']['files'], mods['a-music']['bytes'], mods['a-music']['adds'], mods['a-music']['hidden_by']) \
+    == (2, 7, 1, {})
+assert mods['empty-folder']['usable'] is False
+for bad in (['empty-folder'], ['../x'], ['missing'], ['b-skin', 'b-skin'], [' b-skin']):
+    try:
+        L.mods_set(bad)
+        raise SystemExit(f'{bad} must be refused')
+    except ValueError:
+        pass
+assert L.mods_on() == ['b-skin', 'a-music']  # a refused change leaves mods.txt alone
+(L.mods_dir() / 'mods.txt').write_text('# by hand\r\n  a-music  # first\r\nmissing\r\na-music\r\n', encoding='utf8')
+assert L.mods_on() == ['a-music']  # read as the game reads it
+L.mods_set([])
+assert not any(m['on'] for m in L.mod_list())
+
+# adding mods: from a folder in yuzu's layout, a zip in Atmosphère's, a bare romfs folder; each goes on, last
+import zipfile
+downloads = Path(tempfile.mkdtemp())
+(downloads / 'Cool Hair' / 'romfs' / 'pl').mkdir(parents=True)
+(downloads / 'Cool Hair' / 'romfs' / 'pl' / 'hair.dat').write_bytes(b'hair')
+assert L.mod_import(downloads / 'Cool Hair') == 'Cool Hair'
+with zipfile.ZipFile(downloads / 'outfit-v2.zip', 'w') as z:
+    z.writestr('atmosphere/contents/01004A4010FEF000/romfs/pl/body.dat', b'body')
+    z.writestr('atmosphere/contents/01004A4010FEF000/exefs/main', b'a replaced program: left out')
+    z.writestr('readme.txt', b'thanks')
+assert L.mod_import(downloads / 'outfit-v2.zip') == 'outfit-v2'
+assert (L.mods_dir() / 'outfit-v2' / 'romfs' / 'pl' / 'body.dat').read_bytes() == b'body'
+assert not (L.mods_dir() / 'outfit-v2' / 'exefs').exists()
+assert L.mod_import(downloads / 'Cool Hair' / 'romfs') == 'Cool Hair (2)'  # its name taken: a second one
+assert L.mods_on() == ['Cool Hair', 'outfit-v2', 'Cool Hair (2)']
+with zipfile.ZipFile(downloads / 'two.zip', 'w') as z:
+    z.writestr('Red/romfs/a.bin', b'r')
+    z.writestr('Blue/romfs/a.bin', b'b')
+with zipfile.ZipFile(downloads / 'code.zip', 'w') as z:
+    z.writestr('exefs/main', b'a replaced program, not a patch')
+with zipfile.ZipFile(downloads / 'evil.zip', 'w') as z:
+    z.writestr('m/romfs/../../../escaped.bin', b'x')
+(downloads / 'nothing').mkdir()
+for bad, says in ((downloads / 'two.zip', 'holds 2'), (downloads / 'code.zip', 'no romfs'),
+                  (downloads / 'evil.zip', 'outside'), (downloads / 'nothing', 'no romfs'),
+                  (L.mods_dir() / 'outfit-v2', 'own folder'), (downloads / 'missing.zip', 'Choose')):
+    try:
+        L.mod_import(bad)
+        raise SystemExit(f'{bad} must be refused')
+    except ValueError as e:
+        assert says in str(e), (bad, e)
+assert not (L.mods_dir().parent / 'escaped.bin').exists() and not list(L.mods_dir().glob('*.part'))
+assert L.mods_on() == ['Cool Hair', 'outfit-v2', 'Cool Hair (2)']  # a refused zip changes nothing
+
+# removing: the folder and its line go, never while the game runs
+L.mod_remove('Cool Hair (2)')
+assert not (L.mods_dir() / 'Cool Hair (2)').exists() and L.mods_on() == ['Cool Hair', 'outfit-v2']
+running = L.game_running
+L.game_running = lambda name=L.NAME: True
+try:
+    L.mod_remove('outfit-v2')
+    raise SystemExit('a mod must not be removed while the game runs')
+except ValueError:
+    pass
+L.game_running = running
+assert (L.mods_dir() / 'outfit-v2').is_dir() and 'Mods on Cool Hair, outfit-v2' in L.system_text()
+
+# code mods: Atmosphère's exefs_patches/<name>/ alone, and a widescreen-style zip with both under one atmosphere/
+L.CODEMODS = L.GAME / (L.NAME + '.codemods')
+assert not L.code_mods_changed()  # nothing on, nothing recorded: the same
+with zipfile.ZipFile(downloads / 'fps.zip', 'w') as z:
+    z.writestr('atmosphere/exefs_patches/Bayo3 60fps/A0A1A2A3A4A5A6A7A8A9AAABACADAEAFB0B1B2B3.ips', b'PATCHEOF')
+assert L.mod_import(downloads / 'fps.zip') == 'Bayo3 60fps'
+fps = [m for m in L.mod_list() if m['name'] == 'Bayo3 60fps'][0]
+assert fps['on'] and fps['usable'] and fps['files'] == 0 and fps['patches'] == ['A0A1A2A3A4A5A6A7A8A9AAABACADAEAFB0B1B2B3.ips']
+with zipfile.ZipFile(downloads / 'ultrawide.zip', 'w') as z:
+    z.writestr('atmosphere/contents/01004A4010FEF000/romfs/ui/hud.dat', b'hud')
+    z.writestr('atmosphere/exefs_patches/uw/a0a1a2a3a4a5a6a7.pchtxt', b'@nsobid-a0a1a2a3a4a5a6a7\n')
+    z.writestr('atmosphere/exefs_patches/uw/readme.txt', b'not a patch')
+assert L.mod_import(downloads / 'ultrawide.zip') == 'ultrawide'
+assert (L.mods_dir() / 'ultrawide' / 'romfs' / 'ui' / 'hud.dat').is_file()
+assert L._mod_patches('ultrawide') == ['a0a1a2a3a4a5a6a7.pchtxt']
+assert [(n, f) for n, f, _ in L.code_mods()] == [('Bayo3 60fps', 'A0A1A2A3A4A5A6A7A8A9AAABACADAEAFB0B1B2B3.ips'),
+                                                ('ultrawide', 'a0a1a2a3a4a5a6a7.pchtxt')]
+# the code compiled with nothing: changed, so Play compiles again; recorded as built, the same until a change
+assert L.code_mods_changed()
+L.CODEMODS.write_text(L.code_mods_print() + '\n', encoding='ascii')
+assert not L.code_mods_changed()
+L.mods_set([n for n in L.mods_on() if n != 'Bayo3 60fps'])
+assert L.code_mods_changed()  # one turned off
+L.mods_set(L.mods_on() + ['Bayo3 60fps'])
+assert L.code_mods_changed()  # back on, but later in the order: the patches apply in another order
+L.mods_set([n for n in L.mods_on() if n not in ('Bayo3 60fps', 'ultrawide')])
+L.CODEMODS.unlink()
+assert not L.code_mods_changed()  # only RomFS mods on: nothing to compile
+
+# the game program reads mods only from build m1 on
+assert L.mods_supported() is False  # no program in the test game folder
+(L.GAME / (L.NAME + '.exe')).write_bytes(b'MZ...mods/mods.txt...')
+assert L.mods_supported() is True
+(L.GAME / (L.NAME + '.exe')).unlink()
+L.DATA = data_before
+
 # the bug report: logs and settings, never a save or game file
 L.REPORTS = Path(tempfile.mkdtemp()) / 'reports'
 L.gpu_info = lambda: 'test GPU'

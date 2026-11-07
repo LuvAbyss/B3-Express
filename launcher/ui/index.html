@@ -124,6 +124,20 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
 .notice { display: flex; gap: 14px; align-items: flex-start; background: #1d1626; border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 10px; padding: 14px 18px; font-size: 14px; color: var(--muted); }
 .notice b { color: var(--text); }
 .confirm { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 14px; color: var(--warn); }
+.nav .badge.count { color: var(--violet); }
+
+/* ---- mods: order, name and what it changes, on/off, remove */
+.mod { grid-template-columns: auto minmax(0, 1fr) auto auto; }
+.mod.off .t { color: var(--muted); }
+.mod .order { display: flex; flex-direction: column; align-items: center; gap: 2px; width: 30px; }
+.mod .order b { font: 600 12px/1 var(--mono); color: var(--violet); }
+.mod .order button { background: none; border: 1px solid transparent; border-radius: 6px; color: var(--muted); width: 26px; height: 20px; line-height: 1; cursor: pointer; padding: 0; }
+.mod .order button:hover:not(:disabled) { border-color: var(--line); color: var(--text); }
+.mod .order button:disabled { opacity: .25; cursor: default; }
+.mod .w { font-size: 13px; color: var(--warn); margin-top: 4px; }
+.mod .switch { gap: 10px; font-size: 13px; color: var(--muted); }
+.notice.info { border-left-color: var(--violet); }
+@media (max-width: 680px) { .mod { grid-template-columns: auto minmax(0, 1fr); } .mod > .switch, .mod > .rm { grid-column: 2; justify-self: start; } }
 
 
 @media (max-width: 900px) {
@@ -157,7 +171,7 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
       <a href="#play" data-page="play"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10 8.5v7l5.5-3.5z"/></svg>Play</a>
       <a href="#options" data-page="options"><svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>Options</a>
       <a href="#saves" data-page="saves"><svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z"/><path d="M8 4v5h7V4M8 20v-6h8v6"/></svg>Saves</a>
-      <a href="#mods" data-page="mods"><svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>Mods<span class="badge">soon</span></a>
+      <a href="#mods" data-page="mods"><svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>Mods<span class="badge count" id="mods-badge" hidden></span></a>
       <a href="#help" data-page="help"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.3 2.4c-.5.2-.8.6-.8 1.1V14M12 17.2v.3"/></svg>Help</a>
     </nav>
     <div class="rail-foot">
@@ -280,8 +294,13 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
 
     <!-- ===== Mods ===== -->
     <section class="page" data-view="mods" aria-labelledby="md-h" hidden>
-      <div><h1 id="md-h">Mods</h1><p class="lede">Mods will replace game files without touching your installed copy. Turning one off goes back to the original files.</p></div>
-      <div class="notice"><span>⚠</span><div><b>Coming with a later version.</b> The game can't load mods yet. Once it can, they will live as folders in <span style="font-family:var(--mono)">mods</span>, each holding replacement game files, and be turned on and off here.</div></div>
+      <div><h1 id="md-h">Mods</h1><p class="lede">Mods replace game files without touching your installed copy. Turning one off goes back to the original files the next time the game starts.</p></div>
+      <div class="notice" id="mods-old" hidden><span>⚠</span><div><b>The installed game can't load mods.</b> <span id="mods-old-t">Mods need a newer version of B3-Express. You can add and arrange them now, and they work once the game is updated.</span></div></div>
+      <div class="notice info" id="mods-running" hidden><span>ℹ</span><div><b>The game is running.</b> Changes here apply the next time it starts. Removing a mod waits until it is closed.</div></div>
+      <div class="row"><button class="primary" type="button" id="mod-folder" style="padding:12px 22px;font-size:15px">Add a mod folder</button><button class="secondary" type="button" id="mod-zip">Add a mod zip</button><button class="ghost" type="button" id="mod-open">Open the mods folder</button></div>
+      <div class="status" id="mods-s" role="status" aria-live="polite"></div>
+      <div class="list" id="mods"></div>
+      <p class="hint">Two kinds of mods work, as made for yuzu, Ryujinx or Atmosphère: ones that replace game files (a <span style="font-family:var(--mono)">romfs</span> folder) and code patches for v1.2.0 (<span style="font-family:var(--mono)">.ips</span> or <span style="font-family:var(--mono)">.pchtxt</span> in <span style="font-family:var(--mono)">exefs</span> or <span style="font-family:var(--mono)">exefs_patches</span>). Turning code patches on or off compiles the game code again at the next Play, about 5 minutes. Cheats don't work yet. Where two mods change the same file, the one lower in the list wins. Back up your save before trying a new mod.</p>
     </section>
 
     <!-- ===== Help ===== -->
@@ -325,6 +344,7 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
     $$('.nav a').forEach(a => a.dataset.page === p ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
     if (p === 'options') loadOptions();
     if (p === 'saves') loadBackups();
+    if (p === 'mods') loadMods();
   }
   addEventListener('hashchange', route);
 
@@ -384,8 +404,10 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
       go.textContent = 'Playing'; go.disabled = true; $('#folder').hidden = true;
     } else if (step === 'install') {
       const compileOnly = st.files && !st.code;
-      $('#headline').textContent = compileOnly ? 'Compile the game code' : 'Install Bayonetta 3';
-      $('#what').textContent = compileOnly
+      $('#headline').textContent = st.codemods ? 'Code mods changed' : compileOnly ? 'Compile the game code' : 'Install Bayonetta 3';
+      $('#what').textContent = st.codemods
+        ? 'Code patches were turned on or off on the Mods page. The game code is compiled again with the ones on now, in about 5 minutes.'
+        : compileOnly
         ? 'Your game files are here. The game code is compiled for this PC from them, once, in about 5 minutes.'
         : 'Choose your extracted copy of the game: the folder that holds both exefs and romfs, updated to v1.2.0. The launcher checks it, copies it and compiles the game code for this PC. Your folder stays as it is.';
       $('#folder').hidden = compileOnly;
@@ -497,6 +519,102 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
     if (!r.error) loadBackups();
   });
 
+  /* ---- Mods: the ones on first, in the order the game lays them (a lower one wins), then the ones off */
+  let mods = [];
+  const mb = n => n >= 1073741824 ? (n / 1073741824).toFixed(1) + ' GB' : n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+  const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
+  function modsSay(text, ok) { $('#mods-s').textContent = text || ''; $('#mods-s').className = ok ? 'status ok' : 'status'; }
+  function modsBadge() {
+    const n = mods.filter(m => m.on).length, b = $('#mods-badge');
+    b.hidden = !n; b.textContent = n + ' on';
+  }
+  function loadMods() {
+    return call('mods').then(r => {
+      mods = r.mods;
+      $('#mods-old').hidden = r.supported || !r.program;
+      $('#mods-running').hidden = !r.running;
+      if (r.error) modsSay(r.error);
+      modsBadge(); drawMods();
+    });
+  }
+  function saveMods(note) {
+    const on = mods.filter(m => m.on).map(m => m.name);
+    return call('mods_save', on).then(err => { modsSay(err || note, !err); return loadMods(); });
+  }
+  function drawMods() {
+    const box = $('#mods'); box.innerHTML = '';
+    if (!mods.length) {
+      box.innerHTML = '<div class="item"><div><div class="t">No mods yet</div><div class="s">Add a mod folder copies one in and turns it on. Your download stays where it is.</div></div></div>';
+      return;
+    }
+    const on = mods.filter(m => m.on);
+    mods.forEach(m => {
+      const el = document.createElement('div'), place = on.indexOf(m);
+      el.className = 'item mod' + (m.on ? '' : ' off');
+      el.innerHTML = '<div class="order"></div><div><div class="t"></div><div class="s"></div></div>' +
+        '<label class="switch"><span></span><input type="checkbox"></label><div class="row rm"><button class="ghost" type="button">Remove</button></div>';
+      const order = el.querySelector('.order');
+      if (m.on) {
+        order.innerHTML = '<button type="button" aria-label="Move up">▲</button><b></b><button type="button" aria-label="Move down">▼</button>';
+        order.querySelector('b').textContent = place + 1;
+        const [up, down] = order.querySelectorAll('button');
+        up.disabled = place === 0; down.disabled = place === on.length - 1;
+        up.onclick = () => move(m, -1); down.onclick = () => move(m, 1);
+      }
+      el.querySelector('.t').textContent = m.name;
+      const parts = m.files ? [plural(m.files, 'file', 'files'), mb(m.bytes)] : [];
+      if (m.replaces) parts.push('replaces ' + plural(m.replaces, 'game file', 'game files'));
+      if (m.adds) parts.push('adds ' + m.adds);
+      if (m.patches.length) parts.push(plural(m.patches.length, 'code patch', 'code patches'));
+      el.querySelector('.s').textContent = m.usable ? parts.join(' · ') : 'No romfs folder or code patches inside';
+      const warns = [];
+      if (!m.usable) warns.push('The game can only use a romfs folder or code patches (.ips, .pchtxt), so this one can\'t be turned on.');
+      for (const [later, n] of Object.entries(m.hidden_by)) warns.push(plural(n, 'file is', 'files are') + ' replaced by ' + later + ', lower in the list.');
+      if (m.case) warns.push(plural(m.case, 'file differs', 'files differ') + ' from the game\'s names only in capital letters. The game won\'t use ' + (m.case === 1 ? 'it' : 'them') + '.');
+      for (const w of warns) { const d = document.createElement('div'); d.className = 'w'; d.textContent = w; el.children[1].appendChild(d); }
+      const sw = el.querySelector('input'), label = el.querySelector('.switch span');
+      sw.checked = m.on; sw.disabled = !m.usable; label.textContent = m.on ? 'On' : 'Off';
+      sw.setAttribute('aria-label', 'Turn ' + m.name + (m.on ? ' off' : ' on'));
+      sw.onchange = () => toggle(m, sw.checked);
+      el.querySelector('.rm button').onclick = () => confirmRemove(el.querySelector('.rm'), m.name);
+      box.appendChild(el);
+    });
+  }
+  function toggle(m, wanted) {
+    /* turned on: last, so it wins over the others; off: out of the order */
+    mods = mods.filter(x => x !== m);
+    m.on = wanted;
+    const lastOn = mods.findLastIndex(x => x.on);
+    if (wanted) mods.splice(lastOn + 1, 0, m); else mods.push(m);
+    saveMods(m.name + (wanted ? ' is on.' : ' is off.') + (m.patches.length ? ' It has code patches, so the next Play compiles the game code again first.' : ''));
+  }
+  function move(m, by) {
+    const on = mods.filter(x => x.on), i = on.indexOf(m), j = i + by;
+    if (j < 0 || j >= on.length) return;
+    [on[i], on[j]] = [on[j], on[i]];
+    mods = [...on, ...mods.filter(x => !x.on)];
+    saveMods('Order saved.');
+  }
+  function confirmRemove(row, name) {
+    row.innerHTML = '<span class="confirm">Delete this mod?</span><button class="secondary" type="button">Delete</button><button class="ghost" type="button">Cancel</button>';
+    const [yes, no] = row.querySelectorAll('button');
+    no.onclick = drawMods;
+    yes.onclick = () => call('mod_remove', name).then(err => { modsSay(err || name + ' was removed.', !err); loadMods(); });
+  }
+  function addMod(kind) {
+    modsSay('Adding the mod…');
+    $('#mod-folder').disabled = $('#mod-zip').disabled = true;
+    call('mod_add', kind).then(r => {
+      if (r.error) modsSay(r.error);
+      else if (r.name) modsSay(r.name + ' was added and is on, last in the list.', true);
+      else modsSay('');
+      return loadMods();
+    }).finally(() => { $('#mod-folder').disabled = $('#mod-zip').disabled = false; });
+  }
+  $('#mod-folder').onclick = () => addMod('folder');
+  $('#mod-zip').onclick = () => addMod('zip');
+  $('#mod-open').onclick = () => call('open_mods');
+
   /* ---- Help */
   $('#export').onclick = () => call('report').then(r => {
     $('#export-path').textContent = r.error || ('Saved: ' + r.path + ' · ' + r.kb + ' KB');
@@ -543,7 +661,7 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
   if (still) draw(0); else (function loop(ms) { if (!document.hidden) draw(ms / 1000); requestAnimationFrame(loop); })(0);
 
   /* ---- start once pywebview has put its bridge in */
-  function start() { api = window.pywebview.api; route(); tick(); checkUpdate(true); }
+  function start() { api = window.pywebview.api; route(); tick(); checkUpdate(true); if (location.hash !== '#mods') loadMods().catch(() => {}); }
   if (window.pywebview && window.pywebview.api) start(); else addEventListener('pywebviewready', start);
   route();
 })();

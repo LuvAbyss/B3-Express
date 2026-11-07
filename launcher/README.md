@@ -13,7 +13,17 @@ without WebView2 the old window opens instead, with the same logic.
   dead zone, vibration, muting. Saved in the game's `Bayo3_120.ini`, which its own menu also uses, every comment kept.
   The first version of that file stays beside it as `Bayo3_120.ini.before-launcher`.
 - **Saves:** back up the game's save folder to `backups/`, and restore one (the current save is backed up first).
-- **Mods:** not yet: the game can't load mods.
+- **Mods:** add a mod from its folder or its `.zip` (yuzu's and Ryujinx's `<name>/romfs/` layout, Atmosphère's
+  `atmosphere/contents/<title>/romfs/`, or a bare `romfs` folder), turn mods on and off, set their order (a lower one
+  wins where two change the same file), remove one. Each shows how many game files it replaces and adds, files a
+  later mod covers, and files whose names differ from the game's only in capitals (the game won't read those). Mods
+  are copied into `Bayo3_120_data/mods/`, and `mods/mods.txt` lists the ones on. The game reads it at start (from
+  runtime build m1 on, the page says when the installed game is older). Code patches work from build m2 on: `.ips`
+  (IPS, IPS32) and `.pchtxt` (IPSwitch) files for v1.2.0 in a mod's `exefs/`, or Atmosphère's
+  `exefs_patches/<name>/`. They are compiled into the game code, so turning one on or off makes the next Play
+  compile again (about 3 minutes). `Bayo3_120.codemods` records what the code was built with, and the game itself
+  refuses code built with other patches (`Bayo3_120.patches`). Cheats aren't supported. The bug report names the
+  mods on.
 - **Help:** a bug report zip in `reports/` (the game's log, the settings, the graphics card; no game files, no saves),
   the GitHub issues page, the update check against GitHub's latest release, preparing shaders again.
 

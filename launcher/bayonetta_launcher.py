@@ -47,6 +47,8 @@ INI = GAME / (NAME + '.ini')
 DATA = GAME / (NAME + '_data')
 CODE = GAME / (NAME + '_code.dll')
 STAMP = GAME / (NAME + '.abi')
+PATCHES = GAME / (NAME + '.patches')  # the code patches the code was compiled with, as the game checks them
+CODEMODS = GAME / (NAME + '.codemods')  # the same, as the launcher checks them (code_mods_print)
 WORK = GAME / '_build'
 LOGS = ROOT / 'logs'
 SEED_HINTS = Path(__file__).resolve().parent / 'code-hints.txt'  # addresses only: code past runs found that the compiler can't
@@ -147,8 +149,9 @@ def copy_game(source, report):
 
 
 def module_ready():
-    """The game code is built. The stamp goes in last, so a build that stopped never counts"""
-    return CODE.is_file() and STAMP.is_file()
+    """The game code is built, with the code mods on now. The stamp goes in last, so a build that stopped never
+    counts"""
+    return CODE.is_file() and STAMP.is_file() and not code_mods_changed()
 
 
 def build_jobs(cpus):
@@ -202,6 +205,15 @@ def build_code(report, started=lambda process: None):
             except OSError:
                 shutil.copy2(path, target)
         shutil.copytree(DATA / 'exefs', source / 'exefs', copy_function=shutil.copyfile)
+        # the code mods on, laid out as in the game's data folder: the compiler applies them as the game does
+        patches = code_mods()
+        built_print = code_mods_print(patches)
+        for name, f, data in patches:
+            (source / 'mods' / name / 'exefs').mkdir(parents=True, exist_ok=True)
+            (source / 'mods' / name / 'exefs' / f).write_bytes(data)
+        if patches:
+            names = list(dict.fromkeys(n for n, _, _ in patches))
+            (source / 'mods' / 'mods.txt').write_text(''.join(n + '\n' for n in names), encoding='utf8')
         (out / NAME).mkdir(parents=True)
         repo.mkdir()
         hints = merged_hints(SEED_HINTS, GAME / (NAME + '.hints'))
@@ -224,12 +236,19 @@ def build_code(report, started=lambda process: None):
                 if got:
                     report(got)
             code = process.wait()
-        built, stamp = out / NAME / CODE.name, out / NAME / STAMP.name
+        built, stamp, patched = out / NAME / CODE.name, out / NAME / STAMP.name, out / NAME / PATCHES.name
         if code or not built.is_file() or not stamp.is_file():
             return f'The compiler stopped (code {code}).\n' + '\n'.join(tail)
+        if patches and not patched.is_file():
+            return 'This version of the game program can\'t apply code mods. Turn them off, or update B3-Express.'
         if STAMP.exists():
             STAMP.unlink()
         os.replace(built, CODE)
+        if patched.is_file():
+            os.replace(patched, PATCHES)
+        elif PATCHES.exists():
+            PATCHES.unlink()
+        CODEMODS.write_text(built_print + '\n', encoding='ascii')
         os.replace(stamp, STAMP)
     except OSError as e:
         if process and process.poll() is None:
@@ -520,11 +539,294 @@ def restore_save(name):
     return None
 
 
+MOD_NAME = re.compile(r'[^/\\:#\r\n]+')  # one folder of mods/, as the game reads mods.txt (fs.c mod_name_valid)
+
+
+def mods_dir():
+    """mods/ of the game's data folder: each mod a folder holding romfs/ (yuzu's and Ryujinx's layout)"""
+    return DATA / 'mods'
+
+
+def mod_folders():
+    root = mods_dir()
+    return sorted(p.name for p in root.iterdir() if p.is_dir() and not p.name.endswith('.part')) if root.is_dir() else []
+
+
+def mods_on():
+    """The mods turned on, in mods.txt's order, read as the game reads it: '#' starts a comment, a name that isn't a
+    folder is skipped, a name given twice counts once"""
+    folders, on = set(mod_folders()), []
+    path = mods_dir() / 'mods.txt'
+    for line in path.read_text(encoding='utf8', errors='replace').splitlines() if path.is_file() else []:
+        name = line.split('#', 1)[0].strip()
+        if name in folders and name not in on:
+            on.append(name)
+    return on
+
+
+def _mod_files(name):
+    """The files of a mod's romfs/, as paths relative to it with '/'"""
+    romfs = mods_dir() / name / 'romfs'
+    return {p.relative_to(romfs).as_posix(): p.stat().st_size for p in romfs.rglob('*') if p.is_file()} \
+        if romfs.is_dir() else {}
+
+
+class _GameNames:
+    """Which paths the game's romfs/ has, with their capitals exactly: the game's names are case-sensitive, Windows'
+    aren't, so a mod's Ui/x.dat would be added beside ui/x.dat and never read. One listing per folder, kept"""
+    def __init__(self):
+        self.listed = {}
+
+    def _names(self, rel):
+        if rel not in self.listed:
+            try:
+                self.listed[rel] = set(os.listdir(DATA / 'romfs' / rel))
+            except OSError:
+                self.listed[rel] = set()
+        return self.listed[rel]
+
+    def find(self, path):
+        """'same' when the game has this file, 'case' when only with other capitals, None when it hasn't"""
+        parts, rel, exact = path.split('/'), '', True
+        for part in parts:
+            names = self._names(rel)
+            if part not in names:
+                lower = {n.lower(): n for n in names}
+                if part.lower() not in lower:
+                    return None
+                part, exact = lower[part.lower()], False
+            rel = f'{rel}/{part}' if rel else part
+        return 'same' if exact else 'case'
+
+
+PATCH_FILE = re.compile(r'.+\.(ips|pchtxt)', re.I)  # code patches the game reads (source/src/nx/loader/patch.h)
+
+
+def _mod_patches(name):
+    """A mod's code patches: the .ips and .pchtxt files of its exefs/, by name (the order the game applies them in)"""
+    exefs = mods_dir() / name / 'exefs'
+    return sorted(p.name for p in exefs.iterdir() if p.is_file() and PATCH_FILE.fullmatch(p.name)) \
+        if exefs.is_dir() else []
+
+
+def mod_list():
+    """The mods, the ones on first in mods.txt's order (a later one wins where two have the same file), then the rest
+    by name. Each a dict: name, on, files, bytes, usable (has romfs/ or code patches), replaces and adds (game files it
+    replaces and new ones), case (files the game has only with other capitals, which it won't read), hidden_by ({later
+    mod: files of this one it replaces}, for mods on), patches (its code patch files)"""
+    on = mods_on()
+    names = _GameNames()
+    files = {name: _mod_files(name) for name in mod_folders()}
+    out = []
+    for name in on + [n for n in files if n not in on]:
+        mine = files[name]
+        found = [names.find(p) for p in mine]
+        patches = _mod_patches(name)
+        hidden = {}
+        if name in on:
+            for later in on[on.index(name) + 1:]:
+                n = sum(1 for p in mine if p in files[later])
+                if n:
+                    hidden[later] = n
+        out.append({'name': name, 'on': name in on, 'files': len(mine), 'bytes': sum(mine.values()),
+                    'usable': bool(mine) or bool(patches), 'replaces': found.count('same'),
+                    'adds': found.count(None), 'case': found.count('case'), 'hidden_by': hidden, 'patches': patches})
+    return out
+
+
+def mods_set(names):
+    """Turns on the mods named, in that order, and every other one off: mods.txt rewritten whole. The game reads it
+    when it starts. A name that isn't a mod folder with romfs/ or code patches is refused (ValueError) and nothing
+    changes"""
+    names = list(names)
+    usable = {n for n in mod_folders() if (mods_dir() / n / 'romfs').is_dir() or _mod_patches(n)}
+    for name in names:
+        if not MOD_NAME.fullmatch(name) or name.strip() != name or name in ('.', '..') or name not in usable:
+            raise ValueError(f'{name!r} is not a mod in {mods_dir()}')
+    if len(set(names)) != len(names):
+        raise ValueError('a mod is named twice')
+    root = mods_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    temporary = root / 'mods.txt.tmp'
+    temporary.write_text('# Mods turned on, one folder name per line. Where two mods have the same file, the later '
+                         'line wins.\n# Written by the launcher: its Mods page changes this.\n'
+                         + ''.join(n + '\n' for n in names), encoding='utf8')
+    temporary.replace(root / 'mods.txt')
+
+
+def code_mods():
+    """The code patches of the mods on, as the game applies them: [(mod, file name, bytes)], in mods.txt's order"""
+    out = []
+    for name in mods_on():
+        for f in _mod_patches(name):
+            out.append((name, f, (mods_dir() / name / 'exefs' / f).read_bytes()))
+    return out
+
+
+def code_mods_print(mods=None):
+    """A fingerprint of the code patches on: the game code has to be compiled again when it changes"""
+    h = hashlib.sha256(b'code mods 1\n')
+    for name, f, data in code_mods() if mods is None else mods:
+        h.update(f'{name}\0{f}\0{len(data)}\0'.encode('utf8'))
+        h.update(data)
+    return h.hexdigest()
+
+
+def code_mods_changed():
+    """The game code was compiled with other code patches than the ones on now (none recorded means none)"""
+    try:
+        built = CODEMODS.read_text(encoding='ascii').strip()
+    except OSError:
+        built = code_mods_print([])
+    return built != code_mods_print()
+
+
+TITLE_ID = re.compile(r'[0-9a-fA-F]{16}')
+NOT_A_NAME = ('atmosphere', 'contents', 'titles', 'mods', 'romfs', 'exefs', 'exefs_patches', '')  # layout folders
+
+
+def _mod_name(prefix_parts, fallback):
+    """A mod's name from the folders above its romfs/ or exefs/: the nearest that isn't a title ID or a layout folder"""
+    for part in reversed(prefix_parts):
+        if not TITLE_ID.fullmatch(part) and part.lower() not in NOT_A_NAME:
+            fallback = part
+            break
+    name = re.sub(r'[/\\:#\r\n]+', '_', fallback).strip(' .')[:60].strip() or 'mod'
+    taken, n, base = set(mod_folders()), 1, name
+    while name in taken or (mods_dir() / (name + '.part')).exists():
+        n += 1
+        name = f'{base} ({n})'
+    return name
+
+
+def _mod_layout(paths):
+    """Where each file of a downloaded mod goes, from its '/' paths: (the mods found, as the folders above them, and
+    {path: 'romfs/...' or 'exefs/<patch>'} for the files to keep). A mod is a folder holding romfs/ or exefs/
+    (yuzu, Ryujinx, Atmosphère's contents/<title>/), or Atmosphère's exefs_patches/<name>/<build id>.ips. Everything
+    under one atmosphere/ folder counts as one mod, as Atmosphère loads it so"""
+    roots, keep = set(), {}
+    for path in paths:
+        parts = path.strip('/').split('/')
+        for i, part in enumerate(parts[:-1]):
+            low = part.lower()
+            if low in ('romfs', 'exefs'):
+                rest = parts[i + 1:]
+                dest = f'{low}/' + '/'.join(rest)
+            elif low == 'exefs_patches' and len(parts) == i + 3:
+                rest = parts[i + 2:]
+                dest = 'exefs/' + rest[0]
+            else:
+                continue
+            lowered = [p.lower() for p in parts[:i]]
+            root = tuple(parts[:lowered.index('atmosphere') + 1]) if 'atmosphere' in lowered else tuple(parts[:i])
+            if low == 'exefs_patches' and 'atmosphere' not in lowered:
+                root = tuple(parts[:i + 2])
+            if dest.startswith('exefs/') and not (len(rest) == 1 and PATCH_FILE.fullmatch(rest[0])):
+                break  # an exefs file that isn't a code patch (a replaced main, say) can't be used
+            roots.add(root)
+            keep[path] = (root, dest)
+            break
+    return roots, keep
+
+
+def mod_import(source):
+    """A mod from a folder or a .zip copied into mods/ and turned on, last (so it wins over the others). It may be
+    laid out as yuzu's and Ryujinx's (<name>/romfs/..., <name>/exefs/<build id>.ips), Atmosphère's
+    (atmosphere/contents/<title>/romfs/..., atmosphere/exefs_patches/<name>/<build id>.ips), or be a romfs or exefs
+    folder itself. The new mod's name; ValueError with what's wrong, and nothing left behind"""
+    import zipfile
+    source = Path(source)
+    data_romfs = (DATA / 'romfs').resolve()
+    if any(p in (mods_dir().resolve(), data_romfs) for p in (source.resolve(), *source.resolve().parents)):
+        raise ValueError('That is inside the game\'s own folder. Choose the mod you downloaded.')
+    z = None
+    if source.is_file() and source.suffix.lower() == '.zip':
+        try:
+            z = zipfile.ZipFile(source)
+        except (OSError, zipfile.BadZipFile) as e:
+            raise ValueError(f'That zip can\'t be opened ({e}).')
+        infos = {i.filename.replace('\\', '/'): i for i in z.infolist() if not i.is_dir()}
+        fallback = source.stem
+    elif source.is_dir():
+        base = source.parent if source.name.lower() in ('romfs', 'exefs') else source
+        infos = {p.relative_to(base).as_posix(): p for p in source.rglob('*') if p.is_file()}
+        fallback = base.name
+    else:
+        raise ValueError('Choose a mod\'s folder or its .zip.')
+    try:
+        roots, keep = _mod_layout(infos)
+        if not roots:
+            raise ValueError('That has no romfs folder and no code patches (.ips or .pchtxt in exefs). Only those '
+                             'kinds of mods work so far.')
+        if len(roots) > 1:
+            raise ValueError(f'That holds {len(roots)} mods (or versions of one). Add the folder of the one you want.')
+        root = next(iter(roots))
+        # a code-only mod from exefs_patches/<name>/ is best called by that name
+        named = {path.strip('/').split('/')[-2] for path, (_, dest) in keep.items()
+                 if dest.startswith('exefs/') and '/exefs_patches/' in '/' + path.lower()}
+        if len(named) == 1 and not any(dest.startswith('romfs/') for _, dest in keep.values()):
+            root, fallback = (), named.pop()
+        name = _mod_name(root, fallback)
+        part = mods_dir() / (name + '.part')
+        try:
+            for path, (_, dest) in keep.items():
+                target = (part / dest).resolve()
+                if part.resolve() not in target.parents:
+                    raise ValueError('That holds files outside its own folders: it was not added.')
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if z is not None:
+                    with z.open(infos[path]) as src, open(target, 'wb') as dst:
+                        shutil.copyfileobj(src, dst, 1 << 20)
+                else:
+                    shutil.copyfile(infos[path], target)
+        except BaseException:
+            shutil.rmtree(part, ignore_errors=True)
+            raise
+    finally:
+        if z is not None:
+            z.close()
+    if not keep:
+        raise ValueError('That mod is empty.')
+    os.replace(part, mods_dir() / name)
+    mods_set(mods_on() + [name])
+    return name
+
+
+def mod_remove(name):
+    """A mod's folder deleted and the mod taken off mods.txt. ValueError when it isn't a mod or the game runs (its
+    files are open while it plays)"""
+    if name not in mod_folders():
+        raise ValueError('That mod isn\'t there any more.')
+    if game_running():
+        raise ValueError('Close the game first: it has the mod\'s files open.')
+    mods_set([n for n in mods_on() if n != name])
+    shutil.rmtree(mods_dir() / name)
+
+
+_mods_supported = {}
+
+
+def mods_supported():
+    """Whether the installed game program reads mods/mods.txt (from build m1 on, 2026-11-07). Kept per file size and
+    time, so the 55 MB is read once"""
+    exe = GAME / (NAME + '.exe')
+    try:
+        st = exe.stat()
+    except OSError:
+        return False
+    key = (st.st_size, st.st_mtime_ns)
+    if key not in _mods_supported:
+        _mods_supported.clear()
+        _mods_supported[key] = b'mods/mods.txt' in exe.read_bytes()
+    return _mods_supported[key]
+
+
 def system_text():
     import platform
     return (f'B3-Express {launcher_version()}\nWindows {platform.version()} ({platform.machine()})\n'
             f'CPU threads {os.cpu_count()}\nGraphics {gpu_info()}\nGame folder {GAME}\n'
-            f'Installed {installed()}, game code {module_ready()}\n')
+            f'Installed {installed()}, game code {module_ready()}\n'
+            f'Mods on {", ".join(mods_on()) or "none"} (of {len(mod_folders())})\n')
 
 
 def make_report():
