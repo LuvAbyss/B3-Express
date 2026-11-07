@@ -988,6 +988,55 @@ static void test_save_data(SvcObj* proxy) {
     puts("PASS SaveDataType folders, the save/system migration, IsSdCardAccessible and the access log's program index");
 }
 
+/* the data of the file named name in the folder at table offset dir, NULL when the image has none */
+static const u8* romfs_data(const u8* image, const u64* header, u32 dir, const char* name, u64* size) {
+    u32 file = romfs_find(image, header, 0, dir, name);
+    u64 offset;
+    if (file == UINT32_MAX) return NULL;
+    memcpy(&offset, image + header[7] + file + 8, 8);
+    memcpy(size, image + header[7] + file + 16, 8);
+    return image + header[9] + offset;
+}
+/* mods-data: mods "one" then "two" are on (mods.txt also names a missing mod, a path and "one" again), "off" isn't */
+static void test_modded_romfs(SvcObj* proxy) {
+    Request r;
+    request(&r, 200);
+    dispatch(proxy, &r, 0);
+    CHECK(r.c.nout_objs == 1);
+    SvcObj* storage = r.c.out_objs[0];
+    u64 image_size = get_size(storage), header[10], size;
+    CHECK(image_size < 0x8000 && image_size > 0x200);
+    request(&r, 0);
+    argument64(&r, 8, image_size);
+    output_buffer(&r, image_size);
+    dispatch(storage, &r, 0);
+    const u8 *image = GP(0x5000), *data;
+    memcpy(header, image, sizeof header);
+    u32 sub = romfs_find(image, header, 1, 0, "sub");
+    CHECK(sub != UINT32_MAX);
+    /* two's a.bin wins over one's, which won over the game's */
+    data = romfs_data(image, header, 0, "a.bin", &size);
+    CHECK(data && size == 6 && !memcmp(data, "two a!", 6));
+    /* "off" isn't listed: the game's keep.bin stays */
+    data = romfs_data(image, header, 0, "keep.bin", &size);
+    CHECK(data && size == 4 && !memcmp(data, "keep", 4));
+    /* one adds sub/new.bin beside the game's sub/x.bin, and two's file named sub is left out for the folder */
+    data = romfs_data(image, header, sub, "new.bin", &size);
+    CHECK(data && size == 3 && !memcmp(data, "new", 3));
+    data = romfs_data(image, header, sub, "x.bin", &size);
+    CHECK(data && size == 6 && !memcmp(data, "base x", 6));
+    CHECK(romfs_find(image, header, 0, 0, "sub") == UINT32_MAX);
+    CHECK(romfs_find(image, header, 0, 0, "mods.txt") == UINT32_MAX);
+    /* four files in all (a.bin, keep.bin, new.bin, x.bin), each name padded to 8 bytes */
+    CHECK(header[8] == 4 * (0x20 + 8));
+    svcobj_unref(storage);
+    /* mods on are mapped and readonly like romfs/; one turned off is left alone */
+    FsNode *on, *off;
+    CHECK(!fs_tree_lookup(&fsp.tree, NULL, "mods/two/romfs/a.bin", &on) && on->fd >= 0 && on->readonly);
+    CHECK(!fs_tree_lookup(&fsp.tree, NULL, "mods/off/romfs/keep.bin", &off) && off->fd < 0 && !off->readonly);
+    puts("PASS mods replace and add RomFS files in mods.txt order, and leave out what they can't");
+}
+
 static void cleanup_service(void) {
     pm_lock(&fsp.tree.lock);
     for (unsigned i = 0; i < NOPEN; i++)
@@ -1011,15 +1060,25 @@ int main(int argc, char** argv) {
     CHECK(!fclose(marker) && !strcmp(token, argv[2]));
     g_mem = calloc(1, 0x10000);
     CHECK(g_mem != NULL);
-    int raw = argc == 4 && !strcmp(argv[3], "raw");
-    strcpy(g_datadir, raw ? "raw-data/" : "service-data/");
+    int raw = argc == 4 && !strcmp(argv[3], "raw"), mods = argc == 4 && !strcmp(argv[3], "mods");
+    strcpy(g_datadir, raw ? "raw-data/" : mods ? "mods-data/" : "service-data/");
     fs_init();
     CHECK(test_scans > 0);
     test_scans_allowed = 0;
     svc_fs_init();
     romfs_init();
-    CHECK(!test_chdir(raw ? "raw-data" : "service-data/romfs"));
+    CHECK(!test_chdir(raw ? "raw-data" : mods ? "mods-data" : "service-data/romfs"));
     SvcObj* proxy = new_fsp();
+    if (mods) {
+        test_modded_romfs(proxy);
+        svcobj_unref(proxy);
+        CHECK(test_objects == 0);
+        cleanup_service();
+        free(g_mem);
+        CHECK(!test_chdir(argv[1]));
+        printf("PASS %u modded RomFS checks; %u startup scans\n", test_checks, test_scans);
+        return 0;
+    }
     if (raw) {
         test_raw_romfs(proxy);
         svcobj_unref(proxy);

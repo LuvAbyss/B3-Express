@@ -330,6 +330,9 @@ int snx_recompile(int argc, char** argv, const SnxPaths* paths) {
     if (compile.target_win != host_win) return snx_error("--target: modules are built for this host only");
     gen.abi = snx_game_abi();
     if (snx_load_program(input, &program, error, sizeof(error))) return snx_error("%s", error);
+    if (program.patch_files)
+        printf("Code mods: %u patch files, %lu bytes patched (%lu in code)\n", program.patch_files,
+               program.patches.bytes, program.patches.text_bytes);
     if (!program.npdm.is64 && backend != SNX_BACKEND_LLVM) {
         snx_error("AArch32 programs are recompiled by the LLVM backend only (--backend=llvm)");
         goto done;
@@ -460,6 +463,20 @@ int snx_recompile(int argc, char** argv, const SnxPaths* paths) {
         snx_error("cannot deploy runtime to %s", exe);
         if (snx_is_file(tmp)) snx_remove_tree(tmp);
         goto done;
+    }
+    {
+        /* the code-patch mods this code was built with (patch.h): the runtime compares them with the ones on */
+        char *path = snx_format("%s.patches", base),
+             *text = snx_format(
+                 "digest %08lx%08lx\nfiles %u\nbytes %lu\n", (unsigned long)(program.patches.digest >> 32),
+                 (unsigned long)(program.patches.digest & 0xffffffffu), program.patch_files, program.patches.bytes);
+        i = snx_write_file(path, text, strlen(text));
+        free(path);
+        free(text);
+        if (i) {
+            snx_error("cannot record the compiled game's code patches");
+            goto done;
+        }
     }
     {
         char *stamp = snx_format("%s.abi", base), *version = snx_game_stamp();

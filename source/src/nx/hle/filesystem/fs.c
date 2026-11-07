@@ -62,8 +62,8 @@ static struct {
     u8* rmeta;
     u64 rmeta_size; /* header + tables sit at the start of the image */
     u64 rdata_off, rtotal;
-    FILE* rraw;     /* plain romfs.bin, when it couldn't be mapped */
-    FsNode* rimage; /* plain romfs.bin, mapped */
+    FILE* rraw;         /* plain romfs.bin, when it couldn't be mapped */
+    FsNode* rimage;     /* plain romfs.bin, mapped */
     ROpen openf[NOPEN]; /* rf_open's files, under tree.lock */
     u64 openclk;
     u8 emptyrom[0x200]; /* the empty RomFS of the system archives (emptyrom_init) */
@@ -174,6 +174,36 @@ u8* fs_read_file(const char* path, u64* size) {
     return data;
 }
 
+char** fs_list_files(const char* dir, u32* count) {
+    FsNode *node, *c;
+    char **names = NULL, *text;
+    size_t bytes = 0;
+    u32 n = 0;
+    *count = 0;
+    pm_lock(&fsp.tree.lock);
+    if (!fs_tree_lookup(&fsp.tree, NULL, dir, &node) && node->is_dir) {
+        for (c = node->children; c; c = c->next)
+            if (!c->is_dir) {
+                n++;
+                bytes += strlen(c->name) + 1;
+            }
+        names = n ? malloc(n * sizeof *names + bytes) : NULL; /* the pointers, then the names, one allocation */
+        if (names) {
+            text = (char*)(names + n);
+            n = 0;
+            for (c = node->children; c; c = c->next)
+                if (!c->is_dir) {
+                    size_t len = strlen(c->name) + 1;
+                    names[n++] = memcpy(text, c->name, len);
+                    text += len;
+                }
+            *count = n;
+        }
+    }
+    pm_unlock(&fsp.tree.lock);
+    return names;
+}
+
 int fs_add_virtual_file(const char* path, const void* data, u64 size) {
     pm_lock(&fsp.tree.lock);
     FsTreeResult r = fs_tree_add_virtual(&fsp.tree, path, data, size, NULL);
@@ -184,10 +214,9 @@ int fs_add_virtual_file(const char* path, const void* data, u64 size) {
 /* The RomFS image's layout (Switchbrew's "RomFS"; the hash and bucket count as Eden's fsmitm_romfsbuild): a header of
    ten u64s, then the directory hash table, the directory table, the file hash table and the file table, padded to
    0x200, then the file data. Table entries refer to each other by their offset in their table */
-#define ROM_NONE      0xFFFFFFFFu
-#define ROM_DIR_ENTRY 0x18 /* parent, sibling, first child, first file, next in bucket, name length; the name */
-#define ROM_FILE_ENTRY                                                                                                 \
-    0x20 /* parent, sibling, u64 data offset, u64 size, next in bucket, name length; the name */
+#define ROM_NONE       0xFFFFFFFFu
+#define ROM_DIR_ENTRY  0x18 /* parent, sibling, first child, first file, next in bucket, name length; the name */
+#define ROM_FILE_ENTRY 0x20 /* parent, sibling, u64 data offset, u64 size, next in bucket, name length; the name */
 static void put32(u8* p, u32 v) { memcpy(p, &v, 4); }
 static void put64(u8* p, u64 v) { memcpy(p, &v, 8); }
 /* the bucket of an entry named name in the directory at table offset parent. The name's bytes count unsigned */
@@ -209,9 +238,129 @@ static u32 hcount(u32 n) {
     return c;
 }
 static u64 entry_size(u32 fixed, const char* name) { return fixed + ((strlen(name) + 3) & ~(size_t)3); }
-/* adds the folders and files under dir to the counts and table sizes */
-static void scan(const FsNode* dir, u32* ndirs, u32* nfiles, u64* dir_bytes, u64* file_bytes) {
+/* Mods. A mod is a folder in mods/ of the data folder laid out as yuzu's and Ryujinx's are (mods/<name>/romfs/...),
+   turned on by naming it on a line of mods/mods.txt ('#' starts a comment). Its files replace the RomFS files at the
+   same paths, or are added beside them, in the image romfs_build makes: romfs/ itself is never changed, and a mod
+   taken off the list is gone at the next start. Where two mods have the same file, the later line wins. The image is
+   made from an overlay of romfs/ and the mods, in the index's strcmp order */
+typedef struct MNode {
+    const char* name;
+    struct MNode *children, *next;
+    FsNode* node; /* a file's data, from romfs/ or a mod */
+    int is_dir;
+} MNode;
+typedef struct {
+    MNode* pool; /* one allocation for the whole overlay, sized by mnodes_count */
+    u32 used, cap;
+    u32 replaced, added, clashed; /* the counts of the mod being merged */
+} Overlay;
+static u32 mnodes_count(const FsNode* dir) {
     const FsNode* c;
+    u32 n = 1;
+    for (c = dir->children; c; c = c->next) n += c->is_dir ? mnodes_count(c) : 1;
+    return n;
+}
+static u32 mfiles_count(const FsNode* dir) {
+    const FsNode* c;
+    u32 n = 0;
+    for (c = dir->children; c; c = c->next) n += c->is_dir ? mfiles_count(c) : 1;
+    return n;
+}
+/* src and everything under it as overlay nodes */
+static MNode* mnode_copy(Overlay* o, FsNode* src) {
+    MNode* m = &o->pool[o->used++];
+    MNode** link = &m->children;
+    FsNode* c;
+    m->name = src->name;
+    m->children = m->next = NULL;
+    m->is_dir = src->is_dir;
+    m->node = src->is_dir ? NULL : src;
+    for (c = src->children; c; c = c->next) {
+        *link = mnode_copy(o, c);
+        link = &(*link)->next;
+    }
+    return m;
+}
+/* a mod's folder src laid over the overlay's folder dir. Both are in strcmp order, so one pass merges them */
+static void mnode_merge(Overlay* o, MNode* dir, FsNode* src, const char* mod) {
+    MNode** link = &dir->children;
+    FsNode* c;
+    for (c = src->children; c; c = c->next) {
+        int d = 1;
+        while (*link && (d = strcmp((*link)->name, c->name)) < 0) link = &(*link)->next;
+        if (*link && !d) {
+            MNode* m = *link;
+            if (m->is_dir && c->is_dir)
+                mnode_merge(o, m, c, mod);
+            else if (!m->is_dir && !c->is_dir) {
+                m->node = c;
+                o->replaced++;
+            } else {
+                o->clashed++;
+                WARN("mods: %s: %s is a %s in the game's files, the mod's %s is left out\n", mod, c->name,
+                     m->is_dir ? "folder" : "file", c->is_dir ? "folder" : "file");
+            }
+        } else {
+            MNode* m = mnode_copy(o, c);
+            m->next = *link;
+            *link = m;
+            o->added += c->is_dir ? mfiles_count(c) : 1;
+        }
+        link = &(*link)->next;
+    }
+}
+/* a mod's name as mods.txt gives it: one folder of mods/, not a path */
+static int mod_name_valid(const char* s) {
+    if (!*s || !strcmp(s, ".") || !strcmp(s, "..")) return 0;
+    for (; *s; s++)
+        if (*s == '/' || *s == '\\' || *s == ':') return 0;
+    return 1;
+}
+/* the romfs folders of the mods turned on in list (mods.txt, changed in place), in its order, mapped for the run and
+   readonly like romfs/ (tree.lock held). The count; *out is malloc'd */
+static u32 mods_find(char* list, FsNode*** out) {
+    u32 n = 0, cap = 1, i;
+    char* p;
+    FsNode** mods;
+    for (p = list; *p; p++) cap += *p == '\n';
+    mods = malloc(cap * sizeof *mods);
+    if (!mods) fatal("mods: out of memory\n");
+    for (p = list; p && *p;) {
+        char *line = p, *end = strchr(p, '\n'), *hash, path[FS_TREE_PATH_MAX];
+        FsNode* node;
+        unsigned shared = 0, failed = 0;
+        p = end ? end + 1 : NULL;
+        if (end) *end = 0;
+        if ((hash = strchr(line, '#'))) *hash = 0;
+        while (*line == ' ' || *line == '\t') line++;
+        end = line + strlen(line);
+        while (end > line && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r')) *--end = 0;
+        if (!*line) continue;
+        if (!mod_name_valid(line)) {
+            WARN("mods: \"%s\" in mods.txt isn't the name of a folder in mods/\n", line);
+            continue;
+        }
+        if ((size_t)snprintf(path, sizeof path, "mods/%s/romfs", line) >= sizeof path) continue;
+        if (fs_tree_lookup(&fsp.tree, NULL, path, &node) || !node->is_dir) {
+            FsNode* exefs;
+            snprintf(path, sizeof path, "mods/%s/exefs", line);
+            if (fs_tree_lookup(&fsp.tree, NULL, path, &exefs) || !exefs->is_dir) /* a code-only mod has none */
+                WARN("mods: %s has no romfs or exefs folder in %smods/, it is left out\n", line, g_datadir);
+            continue;
+        }
+        for (i = 0; i < n && mods[i] != node; i++) {}
+        if (i < n) continue; /* named twice */
+        if (fs_tree_share(&fsp.tree, node, &shared, &failed)) fatal("Could not map %s%s\n", g_datadir, path);
+        if (failed) WARN("mods: %s: %u files could not be mapped, they are read on demand\n", line, failed);
+        mods[n++] = node;
+    }
+    *out = mods;
+    return n;
+}
+
+/* adds the folders and files under dir to the counts and table sizes */
+static void scan(const MNode* dir, u32* ndirs, u32* nfiles, u64* dir_bytes, u64* file_bytes) {
+    const MNode* c;
     for (c = dir->children; c; c = c->next) {
         if (*ndirs >= INT32_MAX || *nfiles >= INT32_MAX) fatal("RomFS: too many entries in romfs/\n");
         if (c->is_dir) {
@@ -226,7 +375,7 @@ static void scan(const FsNode* dir, u32* ndirs, u32* nfiles, u64* dir_bytes, u64
 }
 /* a folder while the image is made: its table offset and its entry's links */
 typedef struct {
-    const FsNode* node;
+    const MNode* node;
     u32 parent; /* index in the folder list */
     u32 off, child, file;
 } RDir;
@@ -235,7 +384,7 @@ typedef struct {
    subfolders are consecutive and chain as siblings, then each folder's files, folder by folder, in the index's strcmp
    order. File data follows the file table's order, each file at a multiple of 16: the file list is in offset order as
    it is made, and must not be sorted (a zero-size file shares its offset with the next file) */
-static void romfs_build(FsNode* dir) {
+static void romfs_build(const MNode* dir) {
     u32 ndirs = 1, nfiles = 0, i, nd, nf, dbuckets, fbuckets;
     u64 dir_bytes = ROM_DIR_ENTRY, file_bytes = 0, dhash, dtab, fhash, ftab, end, data = 0;
     RDir* dirs;
@@ -267,7 +416,7 @@ static void romfs_build(FsNode* dir) {
     {
         u32 off = ROM_DIR_ENTRY;
         for (i = 0; i < nd; i++) {
-            const FsNode* c;
+            const MNode* c;
             dirs[i].child = dirs[i].file = ROM_NONE;
             for (c = dirs[i].node->children; c; c = c->next) {
                 if (!c->is_dir) continue;
@@ -285,7 +434,7 @@ static void romfs_build(FsNode* dir) {
     {
         u32 off = 0;
         for (i = 0; i < nd; i++) {
-            FsNode* c;
+            const MNode* c;
             u8* e = NULL;
             for (c = dirs[i].node->children; c; c = c->next) {
                 u32 len = (u32)strlen(c->name), b;
@@ -293,23 +442,23 @@ static void romfs_build(FsNode* dir) {
                 if (e) put32(e + 4, off); /* the previous file's sibling */
                 if (dirs[i].file == ROM_NONE) dirs[i].file = off;
                 data = (data + 15) & ~(u64)15;
-                if (data > (u64)INT64_MAX - c->size) fatal("RomFS: romfs/ is too large\n");
+                if (data > (u64)INT64_MAX - c->node->size) fatal("RomFS: romfs/ is too large\n");
                 e = m + ftab + off;
                 put32(e, dirs[i].off);
                 put32(e + 4, ROM_NONE);
                 put64(e + 8, data);
-                put64(e + 16, c->size);
+                put64(e + 16, c->node->size);
                 b = rhash(dirs[i].off, c->name) % fbuckets;
                 memcpy(e + 24, m + fhash + (u64)b * 4, 4);
                 put32(m + fhash + (u64)b * 4, off);
                 put32(e + 28, len);
                 memcpy(e + ROM_FILE_ENTRY, c->name, len);
-                fsp.rfiles[nf].node = c;
+                fsp.rfiles[nf].node = c->node;
                 fsp.rfiles[nf].off = data; /* relative for now */
                 fsp.rfiles[nf].logged = fsp.rfiles[nf].warned = 0;
-                fs_tree_retain(c);
+                fs_tree_retain(c->node);
                 nf++;
-                data += c->size;
+                data += c->node->size;
                 off += (u32)entry_size(ROM_FILE_ENTRY, c->name);
             }
         }
@@ -352,10 +501,51 @@ static void romfs_build(FsNode* dir) {
     LOG("RomFS: built from romfs/ (%u folders, %u files, %.1f MB)\n", nd, nf, (double)fsp.rtotal / 1048576.0);
 }
 
+/* the image of romfs/ (dir) with the mods named in list laid over it (tree.lock held) */
+static void romfs_build_modded(FsNode* dir, char* list) {
+    FsNode** mods = NULL;
+    u32 nmods = list ? mods_find(list, &mods) : 0, i;
+    u64 cap = mnodes_count(dir);
+    Overlay o;
+    MNode* root;
+    for (i = 0; i < nmods; i++) cap += mnodes_count(mods[i]);
+    if (cap > UINT32_MAX || cap > SIZE_MAX / sizeof(MNode)) fatal("RomFS: too many entries in romfs/ and mods/\n");
+    memset(&o, 0, sizeof o);
+    o.cap = (u32)cap;
+    o.pool = malloc((size_t)cap * sizeof(MNode));
+    if (!o.pool) fatal("RomFS: out of memory for the image of romfs/\n");
+    root = mnode_copy(&o, dir);
+    for (i = 0; i < nmods; i++) {
+        const char* name = mods[i]->parent->name; /* mods/<name>/romfs */
+        o.replaced = o.added = o.clashed = 0;
+        mnode_merge(&o, root, mods[i], name);
+        LOG("mods: %s: %u files replaced, %u added%s\n", name, o.replaced, o.added,
+            o.clashed ? ", some left out (see above)" : "");
+    }
+    if (nmods) LOG("mods: %u on\n", nmods);
+    romfs_build(root);
+    free(o.pool);
+    free(mods);
+}
+
 void romfs_init(void) {
+    u64 list_size;
+    char* list = (char*)fs_read_file("mods/mods.txt", &list_size); /* takes tree.lock itself */
+    if (list) {
+        char* text = realloc(list, (size_t)list_size + 1);
+        if (!text) fatal("mods: out of memory\n");
+        list = text;
+        list[list_size] = 0;
+        if (strlen(list) != list_size) {
+            WARN("mods: mods.txt isn't text, no mods are on\n");
+            free(list);
+            list = NULL;
+        }
+    }
     pm_lock(&fsp.tree.lock);
     FsNode* node;
     if (!fs_tree_lookup(&fsp.tree, NULL, "romfs.bin", &node) && !node->is_dir) {
+        if (list) WARN("mods: the game's RomFS is one romfs.bin, mods need it extracted into romfs/\n");
         if (node->fd >= 0)
             fsp.rimage = node;
         else if (!(fsp.rraw = node_open(node, "rb")))
@@ -363,13 +553,14 @@ void romfs_init(void) {
         fsp.rtotal = node->size;
         LOG("RomFS: image (%.1f MB)\n", (double)fsp.rtotal / 1048576.0);
     } else if (!fs_tree_lookup(&fsp.tree, NULL, "romfs:/", &node) && node->is_dir) {
-        romfs_build(node);
+        romfs_build_modded(node, list);
     } else {
         LOG("RomFS: none in %s\n", g_datadir);
         if (fs_tree_lookup(&fsp.tree, NULL, "exefs/main.nro", &node))
             WARN("Extract the game's RomFS into %sromfs/ before running it\n", g_datadir);
     }
     pm_unlock(&fsp.tree.lock);
+    free(list);
 }
 
 /* an unmapped RomFS file open for reading (tree.lock held), NULL when it can't be: a node deleted from the index
@@ -460,7 +651,7 @@ static int romfs_read(u64 off, void* dst, u64 size) {
     k = lo - 1;
     while (size) {
         u64 n;
-        while (k + 1 < fsp.nrfiles && fsp.rfiles[k + 1].off <= off) k++; /* past the end of file k */
+        while (k + 1 < fsp.nrfiles && fsp.rfiles[k + 1].off <= off) k++;    /* past the end of file k */
         if (k >= 0 && off - fsp.rfiles[k].off < fsp.rfiles[k].node->size) { /* inside file k */
             RFile* rf = &fsp.rfiles[k];
             n = rf->off + rf->node->size - off;
@@ -870,7 +1061,7 @@ static void emptyrom_init(void) {
     memset(m + 0x50, 0xFF, (size_t)(dtab - 0x50));
     memset(m + fhash, 0xFF, (size_t)(ftab - fhash));
     put32(m + 0x50 + (u64)(rhash(0, "") % dbuckets) * 4, 0); /* the root, at offset 0 */
-    put32(m + dtab, 0);                                       /* its own parent */
+    put32(m + dtab, 0);                                      /* its own parent */
     put32(m + dtab + 4, ROM_NONE);
     put32(m + dtab + 8, ROM_NONE);
     put32(m + dtab + 12, ROM_NONE);
@@ -1030,8 +1221,7 @@ static int nn_fssrv_sf_IFileSystemProxy_OpenSaveDataInfoReaderOnlyCacheStorage(S
     return info_reader(reader);
 }
 static int nn_fssrv_sf_IFileSystemProxy_OpenDataStorageByCurrentProcess(SvcObj* self, SvcObj** storage) {
-    if (!fsp.rtotal)
-        WARN("fs: the game opens its RomFS, and %s has none (extract it into romfs/ there)\n", g_datadir);
+    if (!fsp.rtotal) WARN("fs: the game opens its RomFS, and %s has none (extract it into romfs/ there)\n", g_datadir);
     *storage = nn_fssrv_sf_IStorage_new(0);
     R_SUCCEED();
 }

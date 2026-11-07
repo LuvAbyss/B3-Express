@@ -8,6 +8,7 @@
 
 #include "common/utilities/common.h"
 #include "common/cpu/recompiler/image.h"
+#include "nx/loader/patch.h"
 #include <stddef.h>
 
 /* Where the first module goes: a 64-bit process's code region, and a 32-bit one's (mem.h's AS32_CODE_BASE). Each
@@ -75,6 +76,9 @@ typedef struct {
        (<root>/control.nacp, written there by the extraction) */
     unsigned char* nacp;
     size_t nacp_size;
+    /* the code-patch mods applied to the modules (patch.h): files applied, and what they wrote */
+    unsigned patch_files;
+    SnxPatchStats patches;
 } SnxProgram;
 
 /* The loaders return 0, or -1 with a message in error (cut to error_size, always terminated) and the output struct

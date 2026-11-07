@@ -9,6 +9,8 @@
 #include "nx/memory/mem.h"
 #include "nx/runtime/platform/log.h"
 #include "nx/runtime/platform/plat.h"
+#include "nx/loader/patch.h"
+#include <stdlib.h>
 #include <lz4.h>
 #include <stdio.h>
 #include <string.h>
@@ -121,8 +123,7 @@ static int protect(const SnxModInfo* mi) {
     if (text_end > page_down(mi->text_off) &&
         mem_set_state(mi->base + page_down(mi->text_off), text_end - page_down(mi->text_off), MS_CODE, PERM_RX))
         return -1;
-    if (data_start > text_end && mem_set_state(mi->base + text_end, data_start - text_end, MS_CODE, PERM_R))
-        return -1;
+    if (data_start > text_end && mem_set_state(mi->base + text_end, data_start - text_end, MS_CODE, PERM_R)) return -1;
     if (mi->size > data_start && mem_set_state(mi->base + data_start, mi->size - data_start, MS_CODEDATA, PERM_RW))
         return -1;
     return 0;
@@ -149,19 +150,109 @@ static int load_module(const SnxModInfo* mi) {
             rc = copy_nso(mi, &map);
     }
     plat_file_unmap(&map);
-    if (rc) return rc;
-    if (protect(mi)) {
-        WARN("Cannot set the permissions of %s\n", mi->name);
+    return rc;
+}
+
+/* The digest of the code patches the game module was built with (<game>.patches beside it, written by the
+   recompiler), SNX_PATCH_DIGEST0 when there is none (code built before code-patch mods, so with none) */
+static u64 built_digest(void) {
+    char path[1400], text[200];
+    unsigned long hi, lo;
+    FILE* f;
+    size_t n;
+    snprintf(path, sizeof path, "%s%s%s.patches", g_exedir,
+             g_exedir[0] && g_exedir[strlen(g_exedir) - 1] != '/' && g_exedir[strlen(g_exedir) - 1] != '\\' ? "/" : "",
+             g_exename);
+    f = fopen(path, "rb");
+    if (!f) return SNX_PATCH_DIGEST0;
+    n = fread(text, 1, sizeof text - 1, f);
+    fclose(f);
+    text[n] = 0;
+    if (sscanf(text, "digest %8lx%8lx", &hi, &lo) != 2) return 0; /* unreadable: matches nothing */
+    return (u64)hi << 32 | lo;
+}
+
+/* The code-patch mods on (patch.h) applied to the loaded modules, in the recompiler's order: mods.txt's mods, each
+   mod's exefs/ files by name, each file to every module it names. -1 when a patch is malformed, or when the game code
+   was built with other patches, which would run code that doesn't match its data */
+static int apply_patches(void) {
+    u64 size = 0;
+    char *text = (char*)fs_read_file("mods/mods.txt", &size), *names[256];
+    size_t count = 0;
+    SnxPatchStats stats;
+    unsigned files = 0;
+    char error[300];
+    memset(&stats, 0, sizeof stats);
+    stats.digest = SNX_PATCH_DIGEST0;
+    if (text) {
+        char* t = realloc(text, (size_t)size + 1);
+        if (!t) fatal("Out of memory reading mods.txt\n");
+        text = t;
+        text[size] = 0;
+        if (strlen(text) == size) count = snx_patch_mod_names(text, names, sizeof names / sizeof names[0]);
+    }
+    for (size_t i = 0; i < count; i++) {
+        char dir[600];
+        u32 nfiles;
+        char** list;
+        snprintf(dir, sizeof dir, "mods/%s/exefs", names[i]);
+        list = fs_list_files(dir, &nfiles);
+        for (u32 j = 0; j < nfiles; j++) {
+            char path[900];
+            u64 data_size;
+            u8* data;
+            int applied = 0;
+            if (!snx_patch_kind(list[j])) continue;
+            snprintf(path, sizeof path, "%s/%s", dir, list[j]);
+            if (!(data = fs_read_file(path, &data_size))) continue;
+            for (u32 k = 0; k < g_mod->nmods; k++) {
+                const SnxModInfo* mi = &g_mod->mods[k];
+                SnxPatchTarget target = {GP(mi->base), (size_t)mi->size, mi->build_id, mi->text_off, mi->text_size};
+                int got = mi->is_nro
+                              ? 0
+                              : snx_patch_apply(list[j], data, (size_t)data_size, &target, &stats, error, sizeof error);
+                if (got < 0) {
+                    WARN("mods: %s: %s\n", names[i], error);
+                    free(data);
+                    free(list);
+                    free(text);
+                    return -1;
+                }
+                if (got > 0) {
+                    applied = 1;
+                    LOG("mods: %s: %s patches %s\n", names[i], list[j], mi->name);
+                }
+            }
+            files += (unsigned)applied;
+            free(data);
+        }
+        free(list);
+    }
+    free(text);
+    if (files)
+        LOG("mods: %u code patch files, %lu bytes patched (%lu in code)\n", files, stats.bytes, stats.text_bytes);
+    if (stats.digest != built_digest()) {
+        WARN("mods: the game code was built with other code mods than the ones on now: build it again (the "
+             "launcher does when you press Play)\n");
         return -1;
     }
-    /* the whole mapping counts as the process's code memory (the guard pages between modules don't) */
-    g_code_memory += mi->size;
-    LOG("Loaded %s at 0x%llx\n", mi->name, (unsigned long long)mi->base);
     return 0;
 }
 
 int loader_load(void) {
     for (u32 i = 0; i < g_mod->nmods; i++)
         if (load_module(&g_mod->mods[i])) return -1;
+    /* patched while the pages are still writable, before their permissions are set */
+    if (apply_patches()) return -1;
+    for (u32 i = 0; i < g_mod->nmods; i++) {
+        const SnxModInfo* mi = &g_mod->mods[i];
+        if (protect(mi)) {
+            WARN("Cannot set the permissions of %s\n", mi->name);
+            return -1;
+        }
+        /* the whole mapping counts as the process's code memory (the guard pages between modules don't) */
+        g_code_memory += mi->size;
+        LOG("Loaded %s at 0x%llx\n", mi->name, (unsigned long long)mi->base);
+    }
     return 0;
 }

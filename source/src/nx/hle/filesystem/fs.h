@@ -13,6 +13,9 @@ void fs_init(void);
 FILE* fs_open_read(const char* path, u64* size);
 int fs_map_file(const char* path, PFileMap* map); /* 0, or -1 */
 u8* fs_read_file(const char* path, u64* size);    /* malloc'd, or NULL */
+/* the names of the files (not folders) in the folder dir, in the index's strcmp order: one malloc'd block to free,
+   NULL with *count 0 when there are none */
+char** fs_list_files(const char* dir, u32* count);
 /* a file that exists only in memory, which the lookups find like any other. 0, or -1 */
 int fs_add_virtual_file(const char* path, const void* data, u64 size);
 /* the RomFS the game opens: romfs.bin as it is, or an image built from the romfs folder */

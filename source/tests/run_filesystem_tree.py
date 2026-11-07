@@ -57,6 +57,20 @@ def main():
             path.write_bytes(content)
         (scratch / 'raw-data').mkdir()
         (scratch / 'raw-data/romfs.bin').write_bytes(b'RAW\x00ROMFS\xff bytes')
+        for name, content in {
+            'romfs/a.bin': b'base a',
+            'romfs/keep.bin': b'keep',
+            'romfs/sub/x.bin': b'base x',
+            'mods/one/romfs/a.bin': b'one a',
+            'mods/one/romfs/sub/new.bin': b'new',
+            'mods/two/romfs/a.bin': b'two a!',
+            'mods/two/romfs/sub': b'clash',
+            'mods/off/romfs/keep.bin': b'off',
+            'mods/mods.txt': b'# order\r\none\r\n  two  # last wins\r\nmissing\r\n../x\r\none\r\n',
+        }.items():
+            path = scratch / 'mods-data' / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
 
         # Intercept native enumeration only in the production translation unit. The
         # harness aborts if initialization has finished and another scan is attempted.
@@ -135,7 +149,8 @@ def main():
             )
             subprocess.run([str(exe), str(scratch), token], check=True, cwd=scratch, env=run_env)
             if suite == 'service':
-                subprocess.run([str(exe), str(scratch), token, 'raw'], check=True, cwd=scratch, env=run_env)
+                for mode in ('raw', 'mods'):
+                    subprocess.run([str(exe), str(scratch), token, mode], check=True, cwd=scratch, env=run_env)
     finally:
         # Resolve and verify the unique scratch directory before recursive cleanup.
         resolved = scratch.resolve()

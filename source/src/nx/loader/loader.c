@@ -27,8 +27,8 @@
 #define MOD0_SIZE        0x18
 #define GUARD_SIZE       SNX_PAGE_SIZE
 /* where each kind of program's code region ends */
-#define CODE_END64 ((SnxU64)0x20 << 32)
-#define CODE_END32 ((SnxU64)0x40000000UL)
+#define CODE_END64       ((SnxU64)0x20 << 32)
+#define CODE_END32       ((SnxU64)0x40000000UL)
 
 /* ELF dynamic tags read (the ones below DT_COUNT by number) */
 #define DT_HASH     4
@@ -52,9 +52,8 @@
 #define R_ARM_RELATIVE     23
 #define STT_FUNC           2
 
-static const char* const module_names[] = {"rtld",    "main",    "subsdk0", "subsdk1", "subsdk2",
-                                           "subsdk3", "subsdk4", "subsdk5", "subsdk6", "subsdk7",
-                                           "subsdk8", "subsdk9", "sdk"};
+static const char* const module_names[] = {"rtld",    "main",    "subsdk0", "subsdk1", "subsdk2", "subsdk3", "subsdk4",
+                                           "subsdk5", "subsdk6", "subsdk7", "subsdk8", "subsdk9", "sdk"};
 #define MODULE_NAMES (sizeof(module_names) / sizeof(module_names[0]))
 
 /* ------------------------------------------------------------------ small helpers */
@@ -263,8 +262,7 @@ static int symbol_count(Parse* p, const Dynamic* d, SnxU64 entry, SnxU64* count)
             *count = first;
             return 0;
         }
-        if (last < first)
-            return fail(p->error, p->error_size, snx_format("%s: DT_GNU_HASH is inconsistent", m->path));
+        if (last < first) return fail(p->error, p->error_size, snx_format("%s: DT_GNU_HASH is inconsistent", m->path));
         chains = at + buckets * 4;
         for (;; ++last) {
             SnxU64 link = chains + (last - first) * 4;
@@ -482,11 +480,15 @@ static int encoded(const unsigned char* image, SnxU64 end, SnxU64* at, unsigned 
     if (encoding == 0xff || (encoding & 0x80)) return -1;
     switch (encoding & 0x0f) {
         case 0x00: size = 8; break;
-        case 0x01: if (leb128(image, end, at, 0, &value)) return -1; break;
+        case 0x01:
+            if (leb128(image, end, at, 0, &value)) return -1;
+            break;
         case 0x02: size = 2; break;
         case 0x03: size = 4; break;
         case 0x04: size = 8; break;
-        case 0x09: if (leb128(image, end, at, 1, &value)) return -1; break;
+        case 0x09:
+            if (leb128(image, end, at, 1, &value)) return -1;
+            break;
         case 0x0a: size = 2; break;
         case 0x0b: size = 4; break;
         case 0x0c: size = 8; break;
@@ -618,8 +620,8 @@ static void read_unwind(Parse* p) {
         }
     }
     if (why)
-        m->eh_error = snx_format("stopped after %lu functions (%s)", (unsigned long)(p->fdes.n / 2),
-                                 detail ? detail : why);
+        m->eh_error =
+            snx_format("stopped after %lu functions (%s)", (unsigned long)(p->fdes.n / 2), detail ? detail : why);
     free(detail);
 }
 
@@ -973,8 +975,7 @@ int snx_load_npdm(const char* entry, SnxNpdm* npdm, char* error, size_t error_si
 }
 
 /* The program's four paths in one allocation, entry_path first; missing ones NULL */
-static void set_paths(SnxProgram* program, const char* entry, const char* exefs, const char* root,
-                      const char* romfs) {
+static void set_paths(SnxProgram* program, const char* entry, const char* exefs, const char* root, const char* romfs) {
     const char* parts[4];
     char** fields[4];
     size_t bytes = 0, n;
@@ -1020,6 +1021,63 @@ static int load_nro_program(const char* entry, SnxProgram* program, char* error,
         program->nacp_size = m->nacp_size;
     }
     return 0;
+}
+
+/* The code-patch mods turned on in <root>/mods/mods.txt (patch.h), applied to the modules in its order, each mod's
+   exefs/ files in name order: the same order the runtime applies them in (runtime/loader.c) */
+static int apply_patches(SnxProgram* program, const char* root, char* error, size_t error_size) {
+    char *mods = snx_path_join(root, "mods"), *list_path = snx_path_join(mods, "mods.txt"), *text, *names[256];
+    size_t size = 0, count, i, j, k, nfiles;
+    int rc = 0;
+    text = snx_is_file(list_path) ? (char*)snx_read_file(list_path, &size) : NULL;
+    free(list_path);
+    program->patches.digest = SNX_PATCH_DIGEST0;
+    if (!text) {
+        free(mods);
+        return 0;
+    }
+    text = (char*)snx_realloc(text, size + 1);
+    text[size] = 0;
+    count = strlen(text) == size ? snx_patch_mod_names(text, names, sizeof names / sizeof names[0]) : 0;
+    for (i = 0; i < count && !rc; ++i) {
+        char *mod = snx_path_join(mods, names[i]), *exefs = snx_path_join(mod, "exefs"), **files = NULL;
+        free(mod);
+        if (!snx_is_dir(exefs) || snx_list_dir(exefs, &files, &nfiles)) {
+            free(exefs);
+            continue;
+        }
+        for (j = 0; j < nfiles && !rc; ++j) {
+            char* path;
+            unsigned char* data;
+            size_t data_size = 0;
+            int applied = 0;
+            if (!snx_patch_kind(files[j])) continue;
+            path = snx_path_join(exefs, files[j]);
+            data = snx_is_file(path) ? snx_read_file(path, &data_size) : NULL;
+            free(path);
+            if (!data) continue;
+            for (k = 0; k < program->module_count && !rc; ++k) {
+                SnxModuleImage* m = &program->modules[k];
+                SnxPatchTarget t;
+                int got;
+                t.image = m->image;
+                t.image_size = m->image_size;
+                t.build_id = m->build_id;
+                t.text_off = m->text_off;
+                t.text_size = m->text_size;
+                got = snx_patch_apply(files[j], data, data_size, &t, &program->patches, error, error_size);
+                if (got < 0) rc = -1;
+                if (got > 0) applied = 1;
+            }
+            program->patch_files += (unsigned)applied;
+            free(data);
+        }
+        snx_free_strings(files, nfiles);
+        free(exefs);
+    }
+    free(text);
+    free(mods);
+    return rc;
 }
 
 static int load_exefs_program(const char* entry, SnxProgram* program, char* error, size_t error_size) {
@@ -1084,6 +1142,7 @@ static int load_exefs_program(const char* entry, SnxProgram* program, char* erro
         }
     }
     free(nacp_path);
+    if (apply_patches(program, root, error, error_size)) goto done;
     rc = 0;
 done:
     free(exefs);

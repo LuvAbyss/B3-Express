@@ -5,6 +5,11 @@ add_library(snx_nx_module STATIC ../../loader/module.c ../../loader/codegen_view
 set_target_properties(snx_nx_module PROPERTIES C_STANDARD ${SNX_C90_STANDARD} C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 target_compile_options(snx_nx_module PRIVATE -pedantic-errors -Wall -Wextra -Werror=missing-prototypes)
 target_link_libraries(snx_nx_module PUBLIC scarletnx-common)
+# code-patch mods (IPS, IPSwitch): applied by the recompiler (loader.c) and again by the runtime (runtime/loader.c)
+add_library(snx_patch STATIC ../../loader/patch.c)
+set_target_properties(snx_patch PROPERTIES C_STANDARD ${SNX_C90_STANDARD} C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+target_compile_options(snx_patch PRIVATE -pedantic-errors -Wall -Wextra -Werror=missing-prototypes)
+target_include_directories(snx_patch PUBLIC "${CMAKE_SOURCE_DIR}/src")
 add_library(snx_driver STATIC driver.c extract.c game_name.c recompile.c toolchain.c ../../loader/loader.c)
 set_target_properties(snx_driver PROPERTIES C_STANDARD ${SNX_C90_STANDARD} C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 target_compile_definitions(snx_driver PRIVATE
@@ -13,7 +18,7 @@ target_compile_definitions(snx_driver PRIVATE
     SNX_COMMON_INCLUDE="${CMAKE_SOURCE_DIR}/src/common")
 target_compile_options(snx_driver PRIVATE -pedantic-errors -Wall -Wextra -Werror=missing-prototypes)
 # snx_build_info (the top CMakeLists, after CTest): the commit the games' stamps carry
-target_link_libraries(snx_driver PUBLIC scarletnx-common snx_nx_module snx_lz4 OpenSSL::Crypto Threads::Threads
+target_link_libraries(snx_driver PUBLIC scarletnx-common snx_nx_module snx_patch snx_lz4 OpenSSL::Crypto Threads::Threads
                                         snx_build_info)
 if(WIN32)
     target_link_libraries(snx_driver PUBLIC advapi32)

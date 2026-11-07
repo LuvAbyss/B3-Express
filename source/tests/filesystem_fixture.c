@@ -16,25 +16,36 @@ typedef struct {
     size_t size;
 } Fixture;
 
-static const Fixture files[] = {{"data/drive/seed.bin", "initial", 7},
-                                {"data/drive/folder/nested.bin", "nested", 6},
-                                {"data/drive/folder/sub/deep.bin", "deep", 4},
-                                {"data/drive/partial/a.bin", "first", 5},
-                                {"data/drive/partial/blocked/known.bin", "known", 5},
-                                {"data/root/root.txt", "root", 4},
-                                {"data/romfs/asset.bin", "asset", 5},
-                                {"data/romfs.bin", "raw", 3},
-                                {"hardlinks/original.bin", "shared", 6},
-                                {"service-data/sdmc/seed.bin", "seed", 4},
-                                {"service-data/romfs/asset.bin", "romfs test", 10},
-                                {"service-data/romfs/empty.bin", "", 0},
-                                {"service-data/romfs/zulu.bin", "tail", 4},
+static const Fixture files[] = {
+    {"data/drive/seed.bin", "initial", 7},
+    {"data/drive/folder/nested.bin", "nested", 6},
+    {"data/drive/folder/sub/deep.bin", "deep", 4},
+    {"data/drive/partial/a.bin", "first", 5},
+    {"data/drive/partial/blocked/known.bin", "known", 5},
+    {"data/root/root.txt", "root", 4},
+    {"data/romfs/asset.bin", "asset", 5},
+    {"data/romfs.bin", "raw", 3},
+    {"hardlinks/original.bin", "shared", 6},
+    {"service-data/sdmc/seed.bin", "seed", 4},
+    {"service-data/romfs/asset.bin", "romfs test", 10},
+    {"service-data/romfs/empty.bin", "", 0},
+    {"service-data/romfs/zulu.bin", "tail", 4},
 #if !defined(_WIN32) /* names past ASCII: the RomFS name hash takes their bytes unsigned */
-                                {"service-data/romfs/dir/\xc3\xa9t\xc3\xa9.bin", "summer", 6},
-                                {"service-data/romfs/mu/\xce\xbc.bin", "mu", 2},
+    {"service-data/romfs/dir/\xc3\xa9t\xc3\xa9.bin", "summer", 6},
+    {"service-data/romfs/mu/\xce\xbc.bin", "mu", 2},
 #endif
-                                {"service-data/root/root.txt", "root", 4},
-                                {"raw-data/romfs.bin", "RAW\0ROMFS\xff bytes", 16}};
+    {"service-data/root/root.txt", "root", 4},
+    {"raw-data/romfs.bin", "RAW\0ROMFS\xff bytes", 16},
+    /* two mods on, in order, one off, and lines that name nothing */
+    {"mods-data/romfs/a.bin", "base a", 6},
+    {"mods-data/romfs/keep.bin", "keep", 4},
+    {"mods-data/romfs/sub/x.bin", "base x", 6},
+    {"mods-data/mods/one/romfs/a.bin", "one a", 5},
+    {"mods-data/mods/one/romfs/sub/new.bin", "new", 3},
+    {"mods-data/mods/two/romfs/a.bin", "two a!", 6},
+    {"mods-data/mods/two/romfs/sub", "clash", 5},
+    {"mods-data/mods/off/romfs/keep.bin", "off", 3},
+    {"mods-data/mods/mods.txt", "# order\r\none\r\n  two  # last wins\r\nmissing\r\n../x\r\none\r\n", 54}};
 
 static int fixtures(const char* scratch) {
     static const char* directories[] = {"data/drive/empty", "without-root"};

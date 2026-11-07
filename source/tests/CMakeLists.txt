@@ -239,6 +239,7 @@ endforeach()
 target_compile_options(snx-test-fs-service PRIVATE -Wno-unused-parameter)
 snx_swipc(snx-test-fs-service ROOT "${PROJECT_SOURCE_DIR}/src/nx" FILES hle/services/types.swipc hle/filesystem/fs.swipc)
 add_test(NAME filesystem_raw COMMAND snx-test-fs-fixture $<TARGET_FILE:snx-test-fs-service> raw)
+add_test(NAME filesystem_mods COMMAND snx-test-fs-fixture $<TARGET_FILE:snx-test-fs-service> mods)
 
 if(UNIX)
     # host.c by itself: shared files, folders and the mutex
@@ -627,7 +628,7 @@ add_executable(snx-test-driver driver_workflow.c
     "${PROJECT_SOURCE_DIR}/src/nx/runtime/driver/driver.c" "${PROJECT_SOURCE_DIR}/src/nx/runtime/driver/game_name.c"
     "${PROJECT_SOURCE_DIR}/src/nx/loader/loader.c" "${PROJECT_SOURCE_DIR}/src/common/utilities/process.c")
 snx_test_target(snx-test-driver 90)
-target_link_libraries(snx-test-driver PRIVATE snx_test_common snx_lz4 OpenSSL::Crypto)
+target_link_libraries(snx-test-driver PRIVATE snx_test_common snx_patch snx_lz4 OpenSSL::Crypto)
 add_test(NAME driver_workflow COMMAND snx-test-driver)
 set_tests_properties(driver_workflow PROPERTIES TIMEOUT 60)
 add_executable(snx-test-link-file link_file.c)
@@ -676,12 +677,17 @@ add_test(NAME extraction_native COMMAND snx-test-extract)
 add_executable(snx-test-loader loader_test.c "${PROJECT_SOURCE_DIR}/src/nx/loader/loader.c"
     "${PROJECT_SOURCE_DIR}/src/nx/runtime/driver/game_name.c")
 snx_test_target(snx-test-loader 90)
-target_link_libraries(snx-test-loader PRIVATE snx_test_common snx_lz4 OpenSSL::Crypto)
+target_link_libraries(snx-test-loader PRIVATE snx_test_common snx_patch snx_lz4 OpenSSL::Crypto)
 add_test(NAME loader_native COMMAND snx-test-loader)
+
+add_executable(snx-test-patch patch_test.c)
+snx_test_target(snx-test-patch 90)
+target_link_libraries(snx-test-patch PRIVATE snx_patch)
+add_test(NAME code_patches COMMAND snx-test-patch)
 
 add_executable(snx-test-runtime-nro runtime_nro.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/loader.c")
 snx_test_target(snx-test-runtime-nro 11)
-target_link_libraries(snx-test-runtime-nro PRIVATE snx_lz4)
+target_link_libraries(snx-test-runtime-nro PRIVATE snx_lz4 snx_patch)
 add_test(NAME runtime_nro COMMAND snx-test-runtime-nro)
 
 if(NOT WIN32)

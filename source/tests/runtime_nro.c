@@ -6,6 +6,8 @@
 #include "nx/hle/filesystem/fs.h"
 #include "nx/memory/mem.h"
 #include "nx/runtime/platform/log.h"
+#include "nx/loader/patch.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,9 +31,39 @@ char g_datadir[1024];
         }                                                                                                              \
     } while (0)
 
+char g_exedir[1024], g_exename[256] = "snx-test-runtime-patches";
 void logf_(int level, const char* fmt, ...) {
     (void)level;
     (void)fmt;
+}
+void fatal(const char* fmt, ...) {
+    fprintf(stderr, "fatal: %s\n", fmt);
+    exit(1);
+}
+/* the code-patch mods (patch.h): mods.txt naming mod "m", whose exefs/ holds one IPS patch for build 4242... */
+static const char* mods_txt;
+static const u8* ips;
+static size_t ips_size;
+u8* fs_read_file(const char* path, u64* size) {
+    const void* src = !strcmp(path, "mods/mods.txt")                       ? (const void*)mods_txt
+                      : !strcmp(path, "mods/m/exefs/4242424242424242.ips") ? (const void*)ips
+                                                                           : NULL;
+    size_t n = src == (const void*)mods_txt && src ? strlen(mods_txt) : ips_size;
+    if (!src) return NULL;
+    u8* out = malloc(n + 1);
+    CHECK(out != NULL);
+    memcpy(out, src, n);
+    *size = n;
+    return out;
+}
+char** fs_list_files(const char* dir, u32* count) {
+    *count = 0;
+    if (!ips || strcmp(dir, "mods/m/exefs")) return NULL;
+    char** names = malloc(sizeof(char*) + 32);
+    CHECK(names != NULL);
+    names[0] = strcpy((char*)(names + 1), "4242424242424242.ips");
+    *count = 1;
+    return names;
 }
 int fs_map_file(const char* path, PFileMap* map) {
     if (nso) {
@@ -191,6 +223,45 @@ int main(void) {
     nso_fixture();
     put32(0x60, 0x100); /* a block cut short */
     CHECK(loader_load() == -1 && unmaps == 1 && !permissions && !g_code_memory);
+
+    /* a code patch: two text bytes and one rodata byte, offsets counted with the NSO's 0x100-byte header */
+    static const u8 patch[] = {'P',  'A', 'T',  'C',  'H', 0, 0x01, 0x10, 0,   2,  0xab,
+                               0xcd, 0,   0x11, 0x05, 0,   1, 0x99, 'E',  'O', 'F'};
+    char patches_file[300];
+    snprintf(patches_file, sizeof patches_file, "%s.patches", g_exename);
+    remove(patches_file);
+    mods_txt = "# on\nm\n";
+    ips = patch;
+    ips_size = sizeof patch;
+    nso_fixture();
+    /* code built without the patch: refused before any page gets its permissions */
+    CHECK(loader_load() == -1 && !permissions && !g_code_memory);
+    {
+        /* the digest the recompiler would record, from the same patch on the same module */
+        static u8 image[0x4000];
+        SnxPatchTarget t = {image, sizeof image, info.build_id, 0, 0x1000};
+        SnxPatchStats s = {0, 0, 0, SNX_PATCH_DIGEST0};
+        char error[200];
+        CHECK(snx_patch_apply("4242424242424242.ips", patch, sizeof patch, &t, &s, error, sizeof error) == 1);
+        CHECK(s.records == 2 && s.bytes == 3 && s.text_bytes == 2);
+        FILE* f = fopen(patches_file, "wb");
+        CHECK(f != NULL);
+        fprintf(f, "digest %08lx%08lx\nfiles 1\nbytes 3\n", (unsigned long)(s.digest >> 32),
+                (unsigned long)(s.digest & 0xffffffffu));
+        CHECK(!fclose(f));
+    }
+    nso_fixture();
+    CHECK(!loader_load() && permissions == 3);
+    CHECK(guest[info.base + 0x10] == 0xab && guest[info.base + 0x11] == 0xcd &&
+          guest[info.base + 0x12] == (u8)(0x12 * 7));
+    CHECK(guest[info.base + 0x1005] == 0x99 && guest[info.base + 0x1004] == 0x71);
+    /* the patch turned off again: the code built with it no longer matches */
+    mods_txt = "# none\n";
+    nso_fixture();
+    CHECK(loader_load() == -1 && !permissions);
+    remove(patches_file);
+    mods_txt = NULL;
+    ips = NULL;
     printf("Runtime NRO and NSO: %u checks passed\n", checks);
     return 0;
 }
