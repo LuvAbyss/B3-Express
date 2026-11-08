@@ -53,6 +53,7 @@ WORK = GAME / '_build'
 LOGS = ROOT / 'logs'
 SEED_HINTS = Path(__file__).resolve().parent / 'code-hints.txt'  # addresses only: code past runs found that the compiler can't
 TABLE_CALLS = Path(__file__).resolve().parent / 'code-tablecalls.txt'  # addresses of the functions the runtime replaces, for cutscene_fps=60
+HOOK_POINTS = Path(__file__).resolve().parent / 'code-insnhooks.txt'  # instructions the runtime runs a hook before (widescreen)
 
 
 def ini_get(text, key, default=''):
@@ -220,6 +221,8 @@ def build_code(report, started=lambda process: None):
         (out / NAME / (NAME + '.hints')).write_text(''.join(x + '\n' for x in hints), encoding='ascii')
         if TABLE_CALLS.is_file():
             shutil.copyfile(TABLE_CALLS, out / NAME / (NAME + '.tablecalls'))
+        if HOOK_POINTS.is_file():
+            shutil.copyfile(HOOK_POINTS, out / NAME / (NAME + '.insnhooks'))
         env = {k: v for k, v in os.environ.items() if k != 'SNX_RECOMPILE_PORTABLE'}  # built for this PC's CPU
         LOGS.mkdir(exist_ok=True)
         tail = []
