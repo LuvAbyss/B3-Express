@@ -101,6 +101,43 @@ Not right yet (stages 2-3): the chapter select's bottom bar and panels end insid
 3D points, clipped gauges and the aim aren't moved; movies aren't pillarboxed. Not tried: a real ultrawide monitor,
 cutscenes, the pause menu.
 
+## Stage 2 (2026-11-08): the interface's details
+
+**2a, ten more function hooks** in `source/src/nx/hle/aspect.c`, Witch Time's `h_screen_w` to `h_aim_pos`: the UI
+width for the calls working in the camera's viewport (aim, off-screen arrow, on-screen tests, picks, the ray, the
+stick-aim cursor), the clip rectangles of gauges (`0xd02d90`, `0xd02db0`, `0xd04414`), the capture effects' UVs
+(`0xc025a4`, `0xc00b98`), HUD elements placed over 3D points (`0xc1656c`), the edge tests (`0xbfcf70`, `0xbfcf80`) and
+the aim's ring (`0xa6f5a0`). Witch Time tells callers apart by return address; our generated code sets x30 the same
+way, so its lists carry over as main's offsets. Its hooks hand the callee a copy on the host stack. Guest memory isn't
+host memory here, so the caller's data is corrected in place and put back after the call.
+
+**2b, hook points: a new recompiler feature.** Witch Time's lifter changes single instructions (`eh.rs`
+`UI_SIZE_SITES`, `UI_MARK_SITES`), which function hooks can't reach. The recompiler now reads `<game>.insnhooks`
+(`launcher/code-insnhooks.txt`, copied in like `.tablecalls`): before each listed instruction the generated code calls
+`rt->brk` with `SNX_RT_HOOK` (0x10000, above BRK's 16 bits, so no game instruction makes it), and the runtime runs what
+`rt_hook_set` registered for that address. No new RtAPI field, so `SNX_ABI` stays 8 and older modules load as before.
+LLVM backend only, like table calls. `aspect.c` sets 34: the 32 `mov w8-w10, #1280.0 / #720.0` of sprites in the UI's
+screen mode (hooked on the next instruction, the constant checked before it becomes the UI's real size) and the two
+stores of markers kept on screen (`0x9a83e8` `stp s1, s0`, `0x9b05fc` `str s8`). Every site's word is checked first.
+
+Builds: 2a runtime `371e73fd`, game code `241a5344`. 2b runtime and game code `bed04899` (scratch folder `cm-game`).
+Runs in the isolated copy, restored after each, all exit 0 with saves unchanged:
+
+| Run | Build | Seen |
+|---|---|---|
+| `ws2-21x9-fight` | 2a | the chapter select's dialog: its blurred band now covers the whole width; the aim ring sits on its node |
+| `ws2-16x10-fight` | 2a | menus, dialog and chapter select right |
+| `ws1-16x10-fight` | stage 1 | the same frames: the chapter nodes black at frame 5 here too (their fade-in), not a stage 2 fault |
+| `ws1/ws2-21x9-fightlong` (520 s, whole route) | stage 1 / 2a | **health and magic gauges: stage 1 stops their fill at about 80 % of the bar, 2a fills them to the end cap** |
+| `ws1/ws2-21x9-replay`, `ws1-16x9-replay` | | the recording `20261105-201500`: same frame times on both builds and at 16:9 (35-50 ms median in this harness, so these runs say nothing about speed) |
+| `ws3-21x9-fight` | 2b | 34 hook points set; the character select's black strips at both edges gone, its backdrop to the screen's edges |
+| `ws3-16x10-fight`, `ws3-32x9-fight` | 2b | 16:10 right; 32:9 character select backdrop full width |
+| `ws3-21x9-fightlong` (520 s, whole route) | 2b | the fight's HUD as on 2a, gauges filled to the end cap |
+
+Open: at 32:9 the chapter select dialog's dark band stays the 16:9 block in the middle (full width at 21:9), and the
+chapter select's bottom bar and left panel end inside the screen (stage 3, the layout). Not tried: movies, cutscenes,
+the pause menu, enemy markers off screen, a real ultrawide monitor.
+
 ## Next (before the decision)
 
 1. With the GDB stub (`runtime/gdbstub.c`) instead of a 3-minute compile per guess: break on the returns of the
