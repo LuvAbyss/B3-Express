@@ -172,33 +172,30 @@ char* snx_absolute(const char* path) {
     free(p);
     handle = CreateFileW(result, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
                          FILE_FLAG_BACKUP_SEMANTICS, NULL);
-    error = GetLastError();
     if (handle != INVALID_HANDLE_VALUE) {
         n = GetFinalPathNameByHandleW(handle, NULL, 0, FILE_NAME_NORMALIZED);
         final_path = (wchar_t*)snx_alloc(((size_t)n + 1) * sizeof(*final_path));
-        if (!n || !GetFinalPathNameByHandleW(handle, final_path, n + 1, FILE_NAME_NORMALIZED)) {
-            free(final_path);
-            free(result);
-            CloseHandle(handle);
-            return NULL;
-        }
+        error = n && GetFinalPathNameByHandleW(handle, final_path, n + 1, FILE_NAME_NORMALIZED);
         CloseHandle(handle);
-        free(result);
-        out = utf8(final_path);
-        free(final_path);
-        if (!out) return NULL;
-        if (!strncmp(out, "\\\\?\\UNC\\", 8)) {
-            joined = snx_format("\\\\%s", out + 8);
-            free(out);
-            return joined;
+        if (error) {
+            free(result);
+            out = utf8(final_path);
+            free(final_path);
+            if (!out) return NULL;
+            if (!strncmp(out, "\\\\?\\UNC\\", 8)) {
+                joined = snx_format("\\\\%s", out + 8);
+                free(out);
+                return joined;
+            }
+            if (!strncmp(out, "\\\\?\\", 4)) memmove(out, out + 4, strlen(out + 4) + 1);
+            return out;
         }
-        if (!strncmp(out, "\\\\?\\", 4)) memmove(out, out + 4, strlen(out + 4) + 1);
-        return out;
+        free(final_path); /* a volume that gives no final path (some virtual drives): the path as written */
     }
-    if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
-        free(result);
-        return NULL;
-    }
+    /* Not there, or Windows won't open it: a drive that isn't ready (an empty card reader or DVD drive), a locked
+       BitLocker volume, a folder this user can't read. The parent resolved and this name joined to it, and a root
+       that can't be opened as it is: the path is still a path (issue 10, the build folder compiled in on a D: that
+       couldn't be read stopped every compile) */
     out = utf8(result);
     free(result);
     if (!out) return NULL;
@@ -206,9 +203,8 @@ char* snx_absolute(const char* path) {
     while (n > 3 && separator(out[n - 1])) out[--n] = 0;
     parent = snx_dirname(out);
     if (!strcmp(parent, out)) {
-        free(out);
         free(parent);
-        return NULL;
+        return out;
     }
     resolved = snx_absolute(parent);
     free(parent);
