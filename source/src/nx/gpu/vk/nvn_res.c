@@ -3296,6 +3296,24 @@ static int rp_ssbo(u64 gpu, u64 size, int written, VkDescriptorBufferInfo* bi) {
     g_rpw[g_nrpw++].off = bi->offset;
     return 1;
 }
+/* Without real writes the frame's buffer writes (copies, clears, storage stores) go to the replay's copies (rp_ssbo),
+   and guest memory has them only once the stream runs. A constant buffer is copied from guest memory when it is bound,
+   so the parts of it written earlier in the frame are taken from those copies, in command order: the chapter menu's
+   constants get 32 bytes from a CopyBufferToBuffer before its draws, which came out as zeros every other frame */
+static void rp_cb_written(const VkDescriptorBufferInfo* bi, u64 gpu, u64 size) {
+    u32 k;
+    for (k = 0; k < g_nrpw; k++) {
+        u64 lo = gpu > g_rpw[k].gpu ? gpu : g_rpw[k].gpu, hi = gpu + size, end = g_rpw[k].gpu + g_rpw[k].size;
+        VkBufferCopy r;
+        if (end < hi) hi = end;
+        if (lo >= hi) continue;
+        rp_end_rendering();
+        rp_barrier();
+        r = (VkBufferCopy){g_rpw[k].off + (lo - g_rpw[k].gpu), bi->offset + (lo - gpu), hi - lo};
+        vkCmdCopyBuffer(g_rp.cb, g_rpw[k].buf, bi->buffer, 1, &r);
+        rp_barrier();
+    }
+}
 static int rp_debug(void);
 /* the image in place of the texture a TIC describes, -1 for none: one the replay drew at its address, of its size.
    Live images stay from frame to frame, so another texture can come to that address: the same memory holding an
@@ -3421,6 +3439,8 @@ static int rp_stage_set(int mod, const NvnStageBind* b, int stage, VkDescriptorS
                 bi[SNX_VKB_CB + i] = (VkDescriptorBufferInfo){rp_read_buf(pool, off, bind), off, bind};
             else if (!rp_copy(&bi[SNX_VKB_CB + i], a, a ? have : 0, size))
                 return *why = "staging used up", 0;
+            else if (a && have)
+                rp_cb_written(&bi[SNX_VKB_CB + i], a, have < size ? have : size);
         }
         WB(SNX_VKB_CB + i, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
     }
