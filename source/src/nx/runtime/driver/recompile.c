@@ -382,6 +382,7 @@ int snx_recompile(int argc, char** argv, const SnxPaths* paths) {
     gen.title = title;
     gen.hints = read_hints(base, "hints", program.npdm.is64, &gen.hint_count);
     gen.table_calls = read_hints(base, "tablecalls", program.npdm.is64, &gen.table_call_count);
+    gen.hooks = read_hints(base, "insnhooks", program.npdm.is64, &gen.hook_count);
     if (!compile.quiet) printf("Recompiling %s (%lu modules)\n", title, (unsigned long)program.module_count);
     if (copy_data(&program, data, compile.quiet)) {
         snx_error("cannot stage game data in %s", data);
@@ -494,6 +495,7 @@ done:
     snx_free_program(&program);
     free((void*)gen.hints);
     free((void*)gen.table_calls);
+    free((void*)gen.hooks);
     free(title);
     free(game);
     free(out);

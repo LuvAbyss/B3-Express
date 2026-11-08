@@ -392,6 +392,8 @@ int snx_build_module_llvm(SnxProgram* loaded, const SnxCodegenOptions* options, 
         return -1;
     codegen.table_calls = options->table_calls;
     codegen.table_call_count = options->table_call_count;
+    codegen.hooks = options->hooks;
+    codegen.hook_count = options->hook_count;
     /* chunks of whole functions, as module.c splits the C */
     limit = options->chunk_instrs ? options->chunk_instrs : SNX_CHUNK_INSTRUCTIONS;
     q.units = (Unit*)snx_alloc((codegen.function_count + 1) * sizeof(*q.units));

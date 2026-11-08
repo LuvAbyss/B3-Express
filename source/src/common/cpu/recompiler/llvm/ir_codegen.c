@@ -2,6 +2,7 @@
    Copyright 2026 the ScarletNX contributors */
 /* Guest functions: the IR of what snx_codegen_emit (codegen.c) prints for a function, and of snx_a64_static_step */
 #include "common/cpu/recompiler/llvm/ir.h"
+#include "common/runtime/interface.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -157,6 +158,14 @@ static void brk(SnxIr* ir, SnxU64 pc, LLVMValueRef imm) {
     ir_rt_call(ir, ir_rt_brk(), ir->t_void, params, args, 3);
 }
 
+/* a hook point (SnxCodegen.hooks): the runtime runs its hook before the instruction, through rt->brk */
+static int hooked(const SnxCodegen* codegen, SnxU64 address) {
+    size_t i;
+    for (i = 0; i < codegen->hook_count; ++i)
+        if (codegen->hooks[i] == address) return 1;
+    return 0;
+}
+
 /* The body of a PLAIN instruction; without an emitter, the interpreter's step function runs it */
 static void plain(SnxIr* ir, SnxU32 word, SnxU64 pc, const SnxA64Case* instruction) {
     LLVMTypeRef params[3];
@@ -210,6 +219,7 @@ void snx_ir_emit(SnxIr* ir, SnxCodegen* codegen, const SnxFunction* function) {
             LLVMPositionBuilderAtEnd(B, labels[i]);
         }
         open_block(ir);
+        if (hooked(codegen, address)) brk(ir, address, ir_i32(ir, SNX_RT_HOOK));
         word = 0;
         if (!snx_codegen_word(codegen, address, &word))
             c = snx_a64_decode(0);

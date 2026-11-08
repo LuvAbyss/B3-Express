@@ -20,6 +20,10 @@ typedef struct RtAPI {
     void (*poll)(struct CPU* c);
 } RtAPI;
 
+/* brk's imm at a hook point (the game's .insnhooks file): above BRK's 16 bits, so no instruction of the game makes it, and
+   a module built without hook points never does. The runtime runs the hook registered for pc and the code goes on */
+#define SNX_RT_HOOK 0x10000u
+
 /* the layout modules were built with: nine function pointers in this order, nothing between them */
 #define SNX_RTAPI_SLOT sizeof(void (*)(void))
 typedef char snx_check_rtapi_size[sizeof(RtAPI) == 9 * SNX_RTAPI_SLOT ? 1 : -1];

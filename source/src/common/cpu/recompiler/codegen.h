@@ -23,6 +23,10 @@ typedef struct {
     SnxCodeImage* last_module;
     const SnxU64* table_calls; /* functions the runtime replaces: a direct call to one goes through the dispatch table */
     size_t table_call_count;
+    /* hook points: before each of these instructions the code calls rt->brk with SNX_RT_HOOK (common/runtime/interface.h)
+       and the runtime runs what it registered for that address */
+    const SnxU64* hooks;
+    size_t hook_count;
 } SnxCodegen;
 
 int snx_codegen_analyze(SnxCodegen* codegen, const SnxCodeImage* modules, size_t module_count, const SnxU64* hints,

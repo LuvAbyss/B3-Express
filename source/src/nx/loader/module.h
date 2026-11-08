@@ -16,6 +16,8 @@ typedef struct {
     size_t hint_count;
     const SnxU64* table_calls; /* functions the runtime replaces (the game's .tablecalls file) */
     size_t table_call_count;
+    const SnxU64* hooks; /* hook points (the game's .insnhooks file) */
+    size_t hook_count;
     unsigned abi;
 } SnxCodegenOptions;
 

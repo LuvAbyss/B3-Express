@@ -129,7 +129,32 @@ static void rt_undef(CPU* c, u64 pc, u32 w) {
     fatal("The game ran an instruction the recompiler cannot run (%08x at %llx). See the .log for details.", w,
           (unsigned long long)pc);
 }
+#define RT_HOOKS 64
+static struct {
+    u64 pc;
+    void (*fn)(CPU* RESTRICT c, u64 pc);
+} g_hooks[RT_HOOKS];
+static size_t g_hook_count;
+int rt_hook_set(u64 pc, void (*fn)(CPU* RESTRICT c, u64 pc)) {
+    if (g_hook_count == RT_HOOKS) return 0;
+    g_hooks[g_hook_count].pc = pc;
+    g_hooks[g_hook_count++].fn = fn;
+    return 1;
+}
+static void rt_hook(CPU* c, u64 pc) {
+    size_t i;
+    for (i = 0; i < g_hook_count; ++i)
+        if (g_hooks[i].pc == pc) {
+            g_hooks[i].fn(c, pc);
+            return;
+        }
+}
+
 static void rt_brk(CPU* c, u64 pc, u32 imm) {
+    if (imm == SNX_RT_HOOK) {
+        rt_hook(c, pc);
+        return;
+    }
     WARN("\n*** The game stopped at BRK #%x at %llx ***\n", imm, (unsigned long long)pc);
     kernel_dump_regs(c);
     save_hints();
