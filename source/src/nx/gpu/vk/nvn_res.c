@@ -1643,6 +1643,7 @@ static struct {
     float psx, psy; /* the pass's image / game pixels */
     int fsr_win;    /* 1 + the window target the final draw of FSR 1 stands in for */
     int fs_src;     /* the draw's first fragment texture that is a target, -1 for none */
+    int movie;      /* the draw's fragment stage samples a movie picture's Y plane (rp_movie_bars) */
     u64 fsr_frames;
     Surf* used[RP_USED]; /* the renderer's textures sampled: in SHADER_READ_ONLY_OPTIMAL when the replay runs */
     u32 nused;
@@ -3645,6 +3646,10 @@ static void rp_tex_ready(int mod, const NvnStageBind* b) {
         gva = ((u64)(g_tc[slot].tic[2] & 0xFFFF) << 32) | g_tc[slot].tic[1];
         target = rp_target_of(g_tc[slot].tic, gva);
         if (target >= 0 && g_rp.fs_src < 0 && si->stage == ST_FS) g_rp.fs_src = target;
+        if (target < 0 && si->stage == ST_FS && (g_tc[slot].tic[0] & 0x7F) == 0x1D) { /* R8 from guest memory */
+            u32 tw = (g_tc[slot].tic[4] & 0xFFFF) + 1, th = (g_tc[slot].tic[5] & 0xFFFF) + 1;
+            if (tw >= 1280 && tw * 9 == th * 16) g_rp.movie = 1;
+        }
         if (target >= 0 && rp_bound(target)) {
             g_rp.cb = vk_cmd();
             rp_feedback_copy(target);
@@ -3878,6 +3883,32 @@ static void rp_fsr_end(void) {
     g_rp.fsr_win = 0;
     g_rp.dirty = 1;
 }
+/* aspect_ratio other than 16:9 (hle/aspect.c): a movie is the 1280x720 Y and 640x360 UV planes VIC writes, drawn by
+   one quad into the interface's 16:9 block in the middle of the window. The window behind it holds the scene the game
+   composited first, which a 16:9 screen never shows around a movie: the strips beside (or above and below) the block
+   are cleared to black before the quad, as a TV shows it. One pixel into the block on each side, which the quad covers
+   (Witch Time's g_movie_draw, runtime/nvn_vk_draw.c, GPL-3.0-or-later) */
+static void rp_movie_bars(void) {
+    VkClearAttachment a = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .colorAttachment = 0};
+    VkClearRect r[2];
+    const RpTarget* w = g_rp.ncol && g_rp.col[0] >= 0 ? &g_rp.t[g_rp.col[0]] : NULL;
+    u32 rw = g_rp.rw, rh = g_rp.rh, bw, bh;
+    if (!w || w->w != g_rp_win_w || w->h != g_rp_win_h || !rw || !rh || (u64)rw * 9 == (u64)rh * 16) return;
+    memset(r, 0, sizeof r);
+    a.clearValue.color.float32[3] = 1.0f;
+    if ((u64)rw * 9 > (u64)rh * 16) { /* wider: pillarboxed */
+        bw = (u32)((u64)rh * 16 / 9);
+        r[0].rect = (VkRect2D){{0, 0}, {(rw - bw) / 2 + 1, rh}};
+        r[1].rect = (VkRect2D){{(i32)((rw - bw) / 2 + bw - 1), 0}, {rw - (rw - bw) / 2 - bw + 1, rh}};
+    } else { /* taller: letterboxed */
+        bh = (u32)((u64)rw * 9 / 16);
+        r[0].rect = (VkRect2D){{0, 0}, {rw, (rh - bh) / 2 + 1}};
+        r[1].rect = (VkRect2D){{0, (i32)((rh - bh) / 2 + bh - 1)}, {rw, rh - (rh - bh) / 2 - bh + 1}};
+    }
+    r[0].layerCount = r[1].layerCount = 1;
+    vkCmdClearAttachments(g_rp.cb, 1, &a, 2, r);
+    LOG_LIMIT(1, "nvn-live: a movie at %ux%u, black outside its 16:9 block\n", rw, rh);
+}
 void vk_nvn_replay_draw(const NvnPipeDesc* d, const NvnStageBind* bind, const NvnDrawDyn* y, const NvnDrawCall* call) {
     static const int st_of[5] = {ST_VS, ST_TCS, ST_TES, ST_GS, ST_FS};
     VkDescriptorSet set[5] = {0};
@@ -3928,6 +3959,7 @@ void vk_nvn_replay_draw(const NvnPipeDesc* d, const NvnStageBind* bind, const Nv
     if (call->kind >= 1 && call->index_type == 0) RSKIP("8-bit indices");
     if (call->kind == 3 && !g_vk.has_indirect_count) RSKIP("indirect count unavailable");
     g_rp.fs_src = -1;
+    g_rp.movie = 0;
     if (g_rp.live)
         for (s = 0; s < 5; s++)
             if (d->mod[s] >= 0) rp_tex_ready(d->mod[s], &bind[s]);
@@ -4003,6 +4035,7 @@ void vk_nvn_replay_draw(const NvnPipeDesc* d, const NvnStageBind* bind, const Nv
         g_rpd.it = call->index_type;
     }
     rp_dynamic(y, d, call->primitive);
+    if (g_rp.movie) rp_movie_bars();
     /* the translator's push constants: GL depth (near is minus w) for the vertex stages, the alpha test */
     /* pc[0]: the base instance's bits, which the translator takes off InstanceIndex for Maxwell's instance id (as the
        renderer passes register 0x50E). An indirect draw's comes from its arguments on the GPU: 0 here */
