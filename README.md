@@ -6,9 +6,9 @@ An undergraduate graduate project: Bayonetta 3 v1.2.0 running natively on Window
 
 Current state, measurements and what's left: [docs/STATUS.md](docs/STATUS.md).
 
-## Coming in 0.2.5
+## New in 0.2.5
 
-The next release is a big one, so it skips ahead to 0.2.5. It is in testing now and not released yet.
+A big release, so it skips ahead from 0.2.0 to 0.2.5. Download it from [Releases](https://github.com/LuvAbyss/B3-Express/releases).
 
 - **Mods.** A new Mods page in the launcher adds a mod from its folder or its zip, turns mods on and off, sets their order and removes them. Mods that replace game files (a `romfs` folder) and code patches (`.ips` and `.pchtxt` for v1.2.0) both work, in the layouts made for yuzu, Ryujinx and Atmosphère. Your installed game files are never changed, and turning a mod off brings the originals back. Turning code patches on or off compiles the game code again at the next Play, which takes about 3 minutes.
 - **More detail.** New options for sharper textures in the distance, every model at its finest level of detail, and the game's film grain off. In our tests fine detail went up by 11 to 49 percent at no measurable cost in frame rate.

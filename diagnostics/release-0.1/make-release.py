@@ -4,12 +4,12 @@ import shutil
 import zipfile
 from pathlib import Path
 
-VERSION = '0.2.0'
+VERSION = '0.2.5'
 root = Path.cwd()
 name = f'B3-Express-{VERSION}-windows-x64'
 out = root / 'release' / name
-exe = root / 'diagnostics/release-0.1/Bayo3_120-0.1.7-release.exe'  # the same runtime as 0.1.7 (built from fbf7bf6): 0.2.0 is the new launcher
-assert hashlib.sha256(exe.read_bytes()).hexdigest().startswith('30e053b5')
+exe = root / 'diagnostics/release-0.1/Bayo3_120-0.2.5-release.exe'  # built from 86b0e90 (mods, detail options, widescreen)
+assert hashlib.sha256(exe.read_bytes()).hexdigest().startswith('1ffcc581')
 assert not (root / 'release' / (name + '.zip')).exists(), 'this version is already packaged: raise VERSION'
 if out.exists():
     shutil.rmtree(out)
