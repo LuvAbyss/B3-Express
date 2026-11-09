@@ -335,6 +335,205 @@ static void ui_mark(CPU* RESTRICT c, u64 pc) {
     c->v[pc == g_main + MARK_A ? 1 : 8].f[0] += g_x0;
     c->v[0].f[0] += g_y0;
 }
+/* Stage 3, the layouts (game_shim_eh.c h_ui_element, ui_name, ui_rule). main+0xc0ef04 (layout x0, state out x1, element
+   w2, time s0) works out one element of a UI layout (a .uid of a ui .dat, elements of 0x1b4 bytes from layout +
+   [layout + 0xc]) for this frame: its position into out + 0x10, its scale into out + 0x50, and so on. The layouts are
+   in a 1280x720 space around the middle, which the projection keeps in the middle (ui_ortho). After it:
+   - what is 1280 across (not turned, in the middle: dims, strips, the cutscene bars) gets the screen's width, and the
+     vignettes turned a quarter their length; a few layouts by name (Game Over's paper, Play History's vignette, the
+     bands' end lines, the event shutter, the chapter select's banner, the credits' ring);
+   - the rule under a heading (a nine-grid picture past the 1280's left edge) reaches the screen's left edge;
+   - hud_area 0: a root (element 0) of a HUD layout (a .uid named hud*) placed 200 or more from the middle (health,
+     gauges, score) moves out by half the extra width, to the screen's edge as at 16:9. Centred ones stay. */
+#define FN_UI_ELEMENT 0xc0ef04
+#define UI_EL_SIZE    0x1b4u
+static GuestFn g_ui_element;
+static u32 rd32(u64 a) {
+    u32 v = 0;
+    memcpy(&v, GP(a), sizeof v);
+    return v;
+}
+static float rdf(u64 a) {
+    float v = 0;
+    memcpy(&v, GP(a), sizeof v);
+    return v;
+}
+static void wrf(u64 a, float v) { memcpy(GP(a), &v, sizeof v); }
+/* The name of the layout at lay, an entry of a DAT archive in memory, or "". The archive ("DAT\0", file count, offset
+   table at +8, name table at +0x10: u32 name size, then the names) starts before it, 4-aligned, within 16 MB; its
+   offset table holds lay - archive. Looked up once per layout (a table of 1024, checked by counts and sizes, as another
+   layout can be loaded at the same address later). The name is copied: up to 15 characters are all that's compared */
+static const char* ui_name(u64 lay) {
+    static struct {
+        u64 lay, sig;
+        char name[16];
+    } t[1024];
+    u32 h = (u32)((lay >> 2) * 0x9E3779B1u) >> 22, i, e = h;
+    u64 sig = rd32(lay) | (u64)rd32(lay + 4) << 16 ^ (u64)rd32(lay + 0x10) << 32, p;
+    const char* name = "";
+    MemBlock b;
+    for (i = 0; i < 8; i++)
+        if (t[(h + i) & 1023].lay == lay && t[(h + i) & 1023].sig == sig) return t[(h + i) & 1023].name;
+    mem_query(lay, &b); /* within lay's run of pages: guest memory below it may not be mapped on the host */
+    for (p = lay & ~3ull; p + (16u << 20) > lay && p >= b.addr && p >= 0x1000; p -= 4) {
+        u32 n, po, no, nl, k;
+        if (rd32(p) != 0x00544144u) continue; /* "DAT\0" */
+        n = rd32(p + 4);
+        po = rd32(p + 8);
+        no = rd32(p + 0x10);
+        if (n == 0 || n > 4096 || po > (16u << 20) || no > (16u << 20)) continue;
+        nl = rd32(p + no);
+        if (nl == 0 || nl > 256) continue;
+        for (k = 0; k < n; k++)
+            if (p + rd32(p + po + 4 * k) == lay) {
+                name = (const char*)GP(p + no + 4 + (u64)k * nl);
+                goto found;
+            }
+    }
+found:
+    for (i = 0; i < 8; i++) /* the first free or stale slot of the 8, else the first */
+        if (!t[(h + i) & 1023].lay || t[(h + i) & 1023].lay == lay) {
+            e = (h + i) & 1023;
+            break;
+        }
+    t[e].lay = lay;
+    t[e].sig = sig;
+    strncpy(t[e].name, name, sizeof t[e].name - 1);
+    t[e].name[sizeof t[e].name - 1] = 0;
+    return t[e].name;
+}
+/* The rule under a heading (Main Menu, Options, the Shop ...): one picture in a nine-grid (kind 2), anchored left,
+   starting past the 1280's left edge; scale lengthens only its straight middle. Half are wiped in by a clip (kind 6, the
+   element before them) whose rectangle cut them at the 1280's edge. 0 if el isn't one, else the scale that takes the
+   clip to the screen's left edge (1: no clip) */
+static float ui_rule(u64 lay, u32 el) {
+    u32 n = rd32(lay), f = rd32(lay + 0xc), kind, d, part, anchor;
+    i32 par;
+    float px, w;
+    u64 e, p;
+    if (el >= n) return 0.0f;
+    e = lay + f + el * (u64)UI_EL_SIZE;
+    par = (i32)rd32(e + 0x44);
+    kind = rd32(e + 0x198);
+    d = rd32(e + 0x1a4);
+    if (kind != 2 || !d || par < 0 || rdf(e + 0x14) != 0.0f) return 0.0f;
+    part = rd32(lay + d + 0x24);
+    anchor = rd32(lay + d + 0x10);
+    p = lay + f + (u32)par * (u64)UI_EL_SIZE;
+    px = rdf(p);
+    kind = rd32(p + 0x198);
+    d = rd32(p + 0x1a4);
+    if (part != 0x364a6e68u || anchor || px > -620.0f || rdf(p + 0x14) != 0.0f) return 0.0f;
+    if (kind != 6) return 1.0f;
+    w = rdf(lay + d + 0xc);
+    return (w - g_x0) / w;
+}
+static float ui_k(void) { return g_a > WIDE ? g_a * 9.0f / 16.0f : 16.0f / (g_a * 9.0f); }
+static void ui_element(CPU* RESTRICT c, u64 pc) {
+    u64 lay = c->x[0], out = c->x[1], e;
+    u32 el = (u32)c->x[2], f, kind, ty, d, mode = 0;
+    float ex0, sc[2], rot, sz[2] = {0, 0}, v[2], wd, ht, rule;
+    const char* nm;
+    g_ui_element(c, pc);
+    if (!(u32)lay) return; /* no such element */
+    f = rd32(lay + 0xc);
+    e = lay + f + el * (u64)UI_EL_SIZE;
+    ex0 = rdf(e);
+    rot = rdf(e + 0x14);
+    sc[0] = rdf(e + 0x18);
+    sc[1] = rdf(e + 0x1c);
+    kind = rd32(e + 0x198);
+    ty = rd32(e + 0x19c);
+    d = rd32(e + 0x1a4);
+    if ((kind == 1 || kind == 2) && d) { /* a picture's or a framed panel's size; mode 1: the screen's (ui_size) */
+        sz[0] = rdf(lay + d);
+        sz[1] = rdf(lay + d + 4);
+        mode = rd32(lay + d + 0x18);
+    }
+    v[0] = rdf(out + 0x50);
+    v[1] = rdf(out + 0x54);
+    wd = sz[0] * sc[0];
+    ht = sz[1] * sc[1];
+    if ((ty == 0 || ty == 2001 || ty == 1021 || ty == 1000) && mode != 1 &&
+        (wd >= 1270.0f || (wd >= 1260.0f && ht < 100.0f)) && sz[1] >= 1.0f && sz[0] != sz[1] && rot == 0.0f &&
+        ex0 >= -30.0f && ex0 <= 30.0f) {                        /* 1280 across; none has children */
+        if (el != 4 || strncmp(ui_name(lay), "event0015", 9)) { /* the credits' neighbours are 1280 away: below */
+            /* a whole screen keeps its shape and loses a little at the edges; the capture is the screen's already */
+            int full = ht >= 700.0f, shot = ty == 1021 || ty == 1000;
+            if (g_a > WIDE || (full && !shot)) v[0] *= ui_k();
+            if (g_a > WIDE ? full && !shot : full) v[1] *= ui_k();
+            wrf(out + 0x50, v[0]);
+            wrf(out + 0x54, v[1]);
+        }
+    } else if (g_a > WIDE && kind == 2 && ht >= 1240.0f && ex0 >= -30.0f && ex0 <= 30.0f &&
+               (fabsf(rot - 1.5708f) < 0.02f || fabsf(rot + 1.5708f) < 0.02f)) { /* the vignettes: length is y */
+        wrf(out + 0x54, v[1] * g_a * 9.0f / 16.0f);
+    } else if (el >= 11 && el <= 22 && !strncmp(ui_name(lay), "hud0100", 7)) { /* Game Over's paper */
+        if (el <= 12) { /* its speckles drift 200 from their place: as the rule, or their edge comes to the 1280's */
+            wrf(out + 0x50, v[0] * ui_k());
+            wrf(out + 0x54, v[1] * ui_k());
+        } else if (el >= 17) { /* the corner triangles and the bands along the top and bottom, to the screen's edges */
+            float x = rdf(out + 0x10), y = rdf(out + 0x14);
+            wrf(out + 0x10, x + (x < 0.0f ? g_x0 : -g_x0));
+            wrf(out + 0x14, y + (y < 0.0f ? g_y0 : -g_y0));
+            if (el >= 21) wrf(out + 0x54, v[1] - 2.0f * g_x0 / sz[1]);
+        }
+    } else if (el >= 20 && el <= 23) {
+        if (!strncmp(ui_name(lay), "menu006a", 8)) { /* Play History's vignette: strips at the 1280's or 720's edges */
+            float x = rdf(out + 0x10), y = rdf(out + 0x14);
+            if (g_a > WIDE) {
+                if (el >= 22) x += el == 22 ? g_x0 : -g_x0;
+            } else if (el < 22)
+                y += el == 20 ? g_y0 : -g_y0;
+            else
+                wrf(out + 0x54, v[1] * 16.0f / (g_a * 9.0f));
+            wrf(out + 0x10, x);
+            wrf(out + 0x14, y);
+        }
+    } else if ((el == 2 || el == 3) && g_a > WIDE && !strncmp(ui_name(lay), "hud04", 5) &&
+               (!strncmp(ui_name(lay) + 5, "30", 2) || !strncmp(ui_name(lay) + 5, "50", 2))) {
+        float k = g_a * 9.0f / 16.0f; /* the lines at the ends of the bands of hud0430 and hud0450 */
+        wrf(out + 0x50, v[0] * k);
+        wrf(out + 0x10, rdf(out + 0x10) * k);
+    } else if ((el == 7 || el == 8) && g_y0 != 0.0f && !strncmp(ui_name(lay), "event0020", 9)) { /* its shutter */
+        wrf(out + 0x14, rdf(out + 0x14) + (el == 7 ? g_y0 : -g_y0));
+    } else if (el == 1 || el == 2) {
+        nm = ui_name(lay);
+        if (!strncmp(nm, "menu000b", 8)) {
+            /* the chapter select's banner, the Shop's panels: a picture with a diagonal edge, scaled around a point of
+               that edge (149 right of its centre) so the diagonal stays */
+            float k = (380.0f - g_x0) / 410.0f, ky = (360.0f - g_y0) / 360.0f;
+            if (ky > k) k = ky;
+            if (k > 1.0f) {
+                wrf(out + 0x50, v[0] * k);
+                wrf(out + 0x54, v[1] * k);
+                wrf(out + 0x10, rdf(out + 0x10) + 149.0f * (1.0f - k));
+            }
+        } else if (el == 1 && !strncmp(nm, "event0015", 9)) { /* the credits' ring of 5 pictures, 1280 apart */
+            wrf(out + 0x50, v[0] * ui_k());
+            wrf(out + 0x54, v[1] * ui_k());
+        }
+    }
+    if (!(g_a > WIDE)) return;
+    v[0] = rdf(out + 0x50);
+    rule = kind == 2 ? ui_rule(lay, el) : kind == 6 ? ui_rule(lay, el + 1) : 0.0f;
+    if (kind == 2 ? rule > 0.0f : rule > 1.0f) { /* the left end moves to the screen's, the right end stays */
+        float rx = rdf(out + 0x10);
+        if (kind == 6) {
+            rx += g_x0;
+            v[0] *= rule;
+        } else {
+            if (rule == 1.0f) rx += g_x0;
+            v[0] -= g_x0 / sz[0];
+        }
+        wrf(out + 0x10, rx);
+        wrf(out + 0x50, v[0]);
+    }
+    if (el != 0 || __atomic_load_n(&g_opt_hud_area, __ATOMIC_RELAXED)) return;
+    if (!(ex0 >= 200.0f || ex0 <= -200.0f) || strncmp(ui_name(lay), "hud", 3)) return;
+    wrf(out + 0x10, rdf(out + 0x10) + (ex0 > 0.0f ? -g_x0 : g_x0)); /* -g_x0 is half the extra width */
+}
+
 static void hook_points(void) {
     size_t i, set = 0;
     for (i = 0; i < sizeof k_size_sites / sizeof *k_size_sites; ++i) {
@@ -393,6 +592,13 @@ void aspect_init(void) {
     g_ui_bottom = take(FN_UI_BOTTOM, ui_bottom);
     g_aim = take(FN_AIM_POS, aim_pos);
     hook_points();
+    /* the element's str d8, [sp, #-0x70]! and stp x29, x30, [sp, #0x10] */
+    if (word_at(FN_UI_ELEMENT) == 0xfc190fe8u && word_at(FN_UI_ELEMENT + 4) == 0xa9017bfdu) {
+        g_ui_element = take(FN_UI_ELEMENT, ui_element);
+        LOG("aspect: the layouts follow the screen, the HUD %s (hud_area=%d)\n",
+            g_opt_hud_area ? "in the middle" : "at its edges", g_opt_hud_area);
+    } else
+        LOG("aspect: the layouts' element isn't the one it knows, the HUD stays in the middle\n");
     LOG("aspect: the game's picture at %.3f (docked %dx900), the interface a 16:9 block in the middle\n", (double)a,
         even_width(900));
 }

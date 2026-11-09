@@ -25,6 +25,7 @@
 int g_opt_fullscreen, g_opt_docked = 1, g_opt_lang = 1, g_opt_fps = SNX_FPS_GAME, g_opt_diag, g_opt_shadows = 1;
 int g_opt_prof, g_opt_auto_stub_ipc = 1, g_opt_network, g_opt_vsync = 1, g_opt_aniso, g_opt_mute_unfocused = 1;
 int g_opt_cutscene_fps = 30, g_opt_film_grain = 1, g_opt_model_lod, g_opt_dither = 3, g_opt_fast_renderer = 1;
+int g_opt_hud_area;
 float g_opt_resf = 1, g_opt_lod_bias, g_opt_aspect, g_opt_fsr, g_opt_fsr_sharpness = 0.2f;
 
 /* ---- the runtime's own settings ---- */
@@ -99,6 +100,10 @@ static const IniOpt g_display[] = {
      "Wider shows more at the sides, narrower more above and below; the interface stays a 16:9 block in the middle.\n"
      "Experimental. Needs a game module compiled with the .tablecalls file. Bayonetta 3 v1.2.0 only (hle/aspect.c)",
      INI_FLOAT, INI_STARTUP, &g_opt_aspect, 0, 4, NULL, "Aspect ratio", NULL, 0, 0},
+    {"hud_area", "0",
+     "With aspect_ratio wider than 16:9: 0 = the health, gauges and score at the screen's edges, as at 16:9; 1 = they\n"
+     "stay in the 16:9 block in the middle. Changes at once (hle/aspect.c, as Witch Time)",
+     INI_INT, 0, &g_opt_hud_area, 0, 1, NULL, "HUD area", "Screen|16:9", 0, 0},
     {"fast_renderer", "1",
      "1 = the fast renderer (NVN level), also when the game is started without the launcher; 0 = the old one.\n"
      "SNX_NVN_FRONTEND in the environment overrides it",
