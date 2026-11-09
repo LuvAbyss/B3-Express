@@ -451,7 +451,7 @@ def options_read(text):
     return {'screen': screen_of(res), 'quality': quality_of(res, fsr),
             **{key: ini_get(text, key, default) == '1' for key, default in FLAGS},
             'anisotropy': ini_get(text, 'anisotropy', '0'), 'lod_bias': ini_get(text, 'texture_lod_bias', '0'),
-            'aspect': ini_get(text, 'aspect_ratio', '0'),
+            'aspect': ini_get(text, 'aspect_ratio', '0'), 'hud': ini_get(text, 'hud_area', '0'),
             'fade': dict((v, n) for n, v in FADES).get(ini_get(text, 'dither', '3'), FADES[3][0]),
             'prompts': dict((v, n) for n, v in PROMPTS).get(ini_get(text, 'button_prompts', '0'), PROMPTS[0][0]),
             'deadzone': ini_get(text, 'gamepad_deadzone', '20'), 'rumble': ini_get(text, 'gamepad_rumble', '100')}
@@ -470,11 +470,12 @@ def options_apply(text, o):
     if o['anisotropy'] not in ('0', '2', '4', '8', '16') or o['deadzone'] not in ('10', '15', '20', '25', '30') \
             or o['rumble'] not in ('0', '25', '50', '75', '100'):
         raise ValueError('an option has a value the launcher doesn\'t offer')
-    if o['lod_bias'] not in LOD_BIASES or o['aspect'] not in ASPECTS:
+    if o['lod_bias'] not in LOD_BIASES or o['aspect'] not in ASPECTS or o['hud'] not in ('0', '1'):
         raise ValueError('an option has a value the launcher doesn\'t offer')
     text = ini_set(text, 'anisotropy', o['anisotropy'], 'vsync')
     text = ini_set(text, 'texture_lod_bias', o['lod_bias'], 'anisotropy')
     text = ini_set(text, 'aspect_ratio', o['aspect'], 'resolution')
+    text = ini_set(text, 'hud_area', o['hud'], 'aspect_ratio')
     text = ini_set(text, 'dither', dict(FADES)[o['fade']], 'resolution')
     text = ini_set(text, 'gamepad_deadzone', o['deadzone'], 'gamepad_swap_ab')
     text = ini_set(text, 'gamepad_rumble', o['rumble'], 'gamepad_deadzone')

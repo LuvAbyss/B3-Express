@@ -292,7 +292,7 @@ assert L.ini_get(t, 'aspect_ratio') == '2.3333'
 assert L.scaled_mode('resolution=1\r\naspect_ratio=2.3333\r\n') and not L.scaled_mode('resolution=1\r\naspect_ratio=1.6\r\n')
 assert not L.scaled_mode('resolution=1\r\naspect_ratio=0\r\n')
 assert L.ini_get(t, 'texture_lod_bias') == '-1' and L.ini_get(t, 'model_lod') == '1' and L.ini_get(t, 'film_grain') == '0'
-for bad in ({'anisotropy': '3'}, {'deadzone': '99'}, {'rumble': '-1'}, {'lod_bias': '-3'}, {'aspect': '2.0'}):
+for bad in ({'anisotropy': '3'}, {'deadzone': '99'}, {'rumble': '-1'}, {'lod_bias': '-3'}, {'aspect': '2.0'}, {'hud': '2'}):
     try:
         L.options_apply(GAME_INI, dict(o, **bad))
         raise SystemExit(f'{bad} must be refused')

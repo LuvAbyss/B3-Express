@@ -260,7 +260,12 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
           <div class="field">
             <label for="o-aspect">Aspect ratio <span class="example">experimental</span></label>
             <select id="o-aspect" data-o="aspect"><option value="0">16:9, as made</option><option value="1.6">16:10</option><option value="2.3333">21:9 ultrawide</option><option value="3.5556">32:9 super ultrawide</option></select>
-            <p class="hint">The game's own picture in your screen's shape: wider shows more at the sides, 16:10 more above and below. The HUD stays a 16:9 block in the middle. Menus can still look off at the edges.</p>
+            <p class="hint">The game's own picture in your screen's shape: wider shows more at the sides, 16:10 more above and below. Menus can still look off at the edges.</p>
+          </div>
+          <div class="field">
+            <label for="o-hud">HUD position</label>
+            <select id="o-hud" data-o="hud"><option value="0">At the screen's edges</option><option value="1">In the middle 16:9</option></select>
+            <p class="hint">With a screen wider than 16:9: health, gauges and score at the edges as on a 16:9 screen, or kept close to the middle.</p>
           </div>
           <div class="switch"><label for="o-model_lod">Highest model detail<span class="hint" style="display:block;font-weight:400">Every model at its finest level, and distant ones stay drawn. Weaker graphics cards may lose some frame rate.</span></label><input type="checkbox" id="o-model_lod" data-o="model_lod"></div>
           <div class="switch"><label for="o-film_grain">Film grain<span class="hint" style="display:block;font-weight:400">The game's moving noise over the picture. Off gives a cleaner picture; the vignette stays.</span></label><input type="checkbox" id="o-film_grain" data-o="film_grain"></div>
