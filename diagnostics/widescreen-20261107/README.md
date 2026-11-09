@@ -152,3 +152,27 @@ the pause menu, enemy markers off screen, a real ultrawide monitor.
 
 Tools: `scarletnx --dump-modules <data dir> <out>` needs `libLLVM-23.dll` beside it (the game folder's exe works);
 `tools/disasm.py` with `SNX_SCARLETNX` set to it and `deps/llvm-sdk/clang64/bin` on PATH.
+
+## Stage 2c (2026-11-09): movies
+
+A full-screen movie (`ev2005.webm`, 1280x720 VP9, reached by the `range-port-cs30` script at about 77 s) is drawn
+by one quad in the interface's flat projection: its fragment stage samples the Y plane (R8, TIC format 0x1d,
+1280x720) and the UV plane (RG8, 640x360) that VIC wrote to guest memory. Stage 1's projection already puts that quad
+in the middle 16:9 block. But the game first composites its scene into the whole window (draw `1041572` in run
+`ws4-21x9-movielog3`), so at 21:9 the strips beside the movie showed that scene (`ws4-21x9-movie`: yellow).
+
+`rp_movie_bars` (`source/src/nx/gpu/vk/nvn_res.c`) clears the strips outside the window's centred 16:9 block to
+black right before such a draw (a 16:9 R8 texture from guest memory, at least 1280 wide, into the window, the window
+not 16:9), one pixel into the block, which the quad covers. Witch Time does the same (`g_movie_draw`), there with
+its FFmpeg movie decoder's planes. The skill tree's movies are 260x144 and the tutorials' 384x216, so they stay as drawn. Every other movie in `romfs/movie` is 1280x720 (14) or 1600x900 (31).
+
+| Run | Aspect | Seen |
+|---|---|---|
+| `ws4-21x9-movie` | 21:9, installed build | movie centred, the scene beside it (yellow) |
+| `ws5-21x9-movie` | 21:9 | black bars beside the movie, the movie unchanged |
+| `ws5-16x10-movie` | 16:10 | black bars above and below |
+| `ws5-16x9-movie` | 16:9 | no clear (none logged) |
+| `ws5-21x9-fight` | 21:9, 240 s fight route | no clear (none logged) |
+| `ws4-gallery` / `ws5-gallery` | 21:9, chapter menu, Gallery | the gallery's backdrop is a movie too (`gallery_directing.webm`, 1280x720): before, the purple scene behind it showed in the strips; now black. The menu drawn after it still reaches into the strips |
+
+All exit 0, saves unchanged, isolated copy restored. Runtime only: the game code is unchanged.
