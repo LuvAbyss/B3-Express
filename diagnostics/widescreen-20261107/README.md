@@ -176,3 +176,25 @@ its FFmpeg movie decoder's planes. The skill tree's movies are 260x144 and the t
 | `ws4-gallery` / `ws5-gallery` | 21:9, chapter menu, Gallery | the gallery's backdrop is a movie too (`gallery_directing.webm`, 1280x720): before, the purple scene behind it showed in the strips; now black. The menu drawn after it still reaches into the strips |
 
 All exit 0, saves unchanged, isolated copy restored. Runtime only: the game code is unchanged.
+
+## Stage 3 (2026-11-09): the layouts and the HUD at the screen's edges
+
+`ui_element` in `source/src/nx/hle/aspect.c` hooks `main+0xc0ef04` (layout x0, out x1, element w2), which works out
+one element of a UI layout each frame, and ports Witch Time's `h_ui_element`, `ui_name` and `ui_rule` with their rules:
+elements 1280 across get the screen's width (vignettes turned a quarter their length), heading rules reach the left
+edge, Game Over's paper, Play History's vignette, the bands' end lines, the event shutter, the chapter select's banner
+and the credits' ring by layout name, and with `hud_area=0` a HUD layout's root placed 200 or more from the middle
+moves out by half the extra width. `ui_name` finds the layout's DAT archive by scanning back from it, here bounded to
+the layout's run of guest pages (`mem_query`): guest memory below it may not be mapped on the host. The function's
+first two words are checked. `hud_area` is a new `.ini` key (0 edges, 1 middle, read every frame) and a launcher row
+(HUD position). `main+0xc0ef04` is in `launcher/code-tablecalls.txt` (`8c13f04`): game code `f323390c`.
+
+| Run | Aspect | Seen |
+|---|---|---|
+| `ws6-21x9-fight-h1` | 21:9, hud_area 1 | health and the weapon cluster in the middle 16:9 block, as stage 2 |
+| `ws6-21x9-fight-h0` | 21:9, hud_area 0 | the same about 250 px further out, at the screen's left edge, gauges filled to the end; character select's dark panel and bottom bar to the left edge (stage 2: a light strip, the bar from about 240 px) |
+| `ws6-16x10-fight` | 16:10 | clean |
+| `ws6-32x9-fight` | 32:9 | HUD at the left edge, the chapter select's bottom bar across; the character select's right edge still a lighter strip |
+| `ws6-21x9-title`, `ws6-16x9-title` | 21:9, 16:9 | the hook logged at 21:9, nothing installed at 16:9 |
+
+All exit 0, saves unchanged, isolated copy restored.
