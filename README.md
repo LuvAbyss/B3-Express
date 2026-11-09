@@ -6,15 +6,15 @@ An undergraduate graduate project: Bayonetta 3 v1.2.0 running natively on Window
 
 Current state, measurements and what's left: [docs/STATUS.md](docs/STATUS.md).
 
-## New in 0.2.5
+## 0.2.5 is out
 
-A big release, so it skips ahead from 0.2.0 to 0.2.5. Download it from [Releases](https://github.com/LuvAbyss/B3-Express/releases).
+The latest version is 0.2.5, a big release, so it skips ahead from 0.2.0. Download `B3-Express-0.2.5-windows-x64.zip` from the [latest release](https://github.com/LuvAbyss/B3-Express/releases/latest).
 
 - **Mods.** A new Mods page in the launcher adds a mod from its folder or its zip, turns mods on and off, sets their order and removes them. Mods that replace game files (a `romfs` folder) and code patches (`.ips` and `.pchtxt` for v1.2.0) both work, in the layouts made for yuzu, Ryujinx and Atmosphère. Your installed game files are never changed, and turning a mod off brings the originals back. Turning code patches on or off compiles the game code again at the next Play, which takes about 3 minutes.
 - **More detail.** New options for sharper textures in the distance, every model at its finest level of detail, and the game's film grain off. In our tests fine detail went up by 11 to 49 percent at no measurable cost in frame rate.
 - **Widescreen (experimental).** The game's picture at 16:10, 21:9 and 32:9 instead of black bars. Wider screens show more at the sides, 16:10 shows more above and below, and the HUD sits at the screen's edges at its normal size (or in the middle, your choice). Movies keep their 16:9 shape with black bars, as on a TV. A few menus can still end short of the screen's edges.
 
-The detail options and widescreen are ported from [Witch Time](https://github.com/Zexyen/Witch-Time), with thanks. As before, updating means unzipping the new version and running Install again.
+The detail options and widescreen are ported from [Witch Time](https://github.com/Zexyen/Witch-Time), with thanks. To update from an older version, unzip 0.2.5 to a new folder and run Install again from your extracted dump. To keep your progress, copy the `save` folder from `Bayo3_120\Bayo3_120_data` of your old folder into the same place in the new one before you play.
 
 ## Layout
 
