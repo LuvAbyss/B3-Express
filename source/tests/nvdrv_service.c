@@ -565,8 +565,9 @@ static void test_nvmap_as(void) {
     CHECK(nvmap_call(0x0E, d) == 1);
     memcpy(d, &h, 4);
     CHECK(nvmap_call(0x03, d) == 1); /* no live handle with that id */
+    /* a freed number waits until the table's others are used: the SDK takes it out of its own table after FREE */
     again = nvmap_new(0x3000, 0x9000);
-    CHECK(again == h);
+    CHECK(again && again != h);
 
     /* ALLOC_SPACE: allocator VA at a multiple of the alignment, from VA_BASE up */
     memset(d, 0, sizeof d);

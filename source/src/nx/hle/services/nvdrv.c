@@ -68,10 +68,12 @@ typedef struct {
 static struct {
     NvMapH nvh[8192];
     u32 nvh_next; /* handles below this have been handed out */
-    /* freed handles, handed out again before nvh_next grows: movies create and free buffers for every clip, and a
-       handle past the table would be written outside it */
+    /* freed handles, oldest first (a ring from nvh_free_at), handed out again only once nvh_next has reached the
+       table's end, and then the longest-freed first. The SDK's NvRmMemHandleFree sends FREE before it takes the
+       handle out of its own table, so a number given out again at once (a movie starting while the last one ends,
+       chapter 14) names its dying entry there and NvRmMemMap returns a null pointer */
     u32 nvh_free[8192];
-    u32 nvh_nfree;
+    u32 nvh_free_at, nvh_nfree;
     PMutex lock;
     u64** gmmu;    /* gmmu[i] -> 4096 entries of (guest addr | 1) */
     PMutex aslock; /* held across ioctl_as: the mappings below and the VA allocator */
@@ -113,9 +115,7 @@ int nvmap_get(u32 h, u64* addr, u32* size) {
 }
 /* the live handle an id names, 0 for none. Called with the lock held */
 static u32 nvmap_from_id(u32 id) {
-    for (u32 i = 1; i < nv.nvh_next; i++)
-        if (nv.nvh[i].alive && nv.nvh[i].id == id) return i;
-    return 0;
+    return id && id < 8192 && nv.nvh[id].alive && nv.nvh[id].id == id ? id : 0; /* CREATE makes the id the handle */
 }
 u64 nvmap_addr_by_id(u32 id) {
     pm_lock(&nv.lock);
@@ -579,7 +579,14 @@ static u32 ioctl_nvmap(u32 cmd, u8* d, u32 n) {
     switch (cmd & 0xFF) {
         case 0x01: /* CREATE {u32 size; out u32 handle} */
             pm_lock(&nv.lock);
-            h = nv.nvh_nfree ? nv.nvh_free[--nv.nvh_nfree] : nv.nvh_next < NVMAP_HANDLES ? nv.nvh_next++ : 0;
+            if (nv.nvh_next < NVMAP_HANDLES)
+                h = nv.nvh_next++;
+            else if (nv.nvh_nfree) {
+                h = nv.nvh_free[nv.nvh_free_at];
+                nv.nvh_free_at = (nv.nvh_free_at + 1) % NVMAP_HANDLES;
+                nv.nvh_nfree--;
+            } else
+                h = 0;
             if (h) {
                 m = &nv.nvh[h];
                 memset(m, 0, sizeof *m);
@@ -645,7 +652,7 @@ static u32 ioctl_nvmap(u32 cmd, u8* d, u32 n) {
                 /* NVDEC and VIC drop what they mapped of it before the number can name another buffer */
                 host1x_forget_handle(h);
                 pm_lock(&nv.lock);
-                nv.nvh_free[nv.nvh_nfree++] = h;
+                nv.nvh_free[(nv.nvh_free_at + nv.nvh_nfree++) % NVMAP_HANDLES] = h;
                 pm_unlock(&nv.lock);
             }
             return 0;
