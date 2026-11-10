@@ -852,7 +852,7 @@ def make_report():
     sessions = sorted(LOGS.glob('session-*.log'))[-2:] if LOGS.is_dir() else []
     with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
         z.writestr('system.txt', system_text())
-        for p in [GAME / (NAME + '.log'), INI, LOGS / 'launcher-errors.log', LOGS / 'build-code.log', *sessions]:
+        for p in [GAME / (NAME + '.log'), GAME / (NAME + '.prev.log'), INI, LOGS / 'launcher-errors.log', LOGS / 'build-code.log', *sessions]:
             if p.is_file():
                 z.write(p, p.name)
     return path

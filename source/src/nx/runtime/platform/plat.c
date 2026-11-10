@@ -44,10 +44,14 @@ void log_crash_mode(void) {
 /* The log is made once the game's code module is loaded (g_mod), so a run that never gets that far (a mistyped
    --game, a dump given instead of a game) leaves no log behind */
 static void log_create_nl(void) {
-    char path[1400];
+    char path[1400], prev[1400];
     FILE* file;
     if (g_log || g_log_gave_up || !g_mod) return;
     snprintf(path, sizeof path, "%s%s.log", g_statedir, g_exename);
+    /* the run before stays as <name>.prev.log: a crash's log was lost to the next start before anyone read it */
+    snprintf(prev, sizeof prev, "%s%s.prev.log", g_statedir, g_exename);
+    remove(prev);
+    rename(path, prev);
     file = fopen(path, "w");
     if (!file) {
         g_log_gave_up = 1;

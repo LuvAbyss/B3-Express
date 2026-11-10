@@ -714,10 +714,16 @@ void win_fatal_box(const char* msg) {
     }
 #ifdef _WIN32
     wchar_t w[4096]; /* on the stack: this also runs in the crash report, where the heap may be what broke */
+    /* a fullscreen game window covered the box (chapter 14, 2026-11-08: two minutes of a frozen picture). The box
+       is topmost, and the window is asked to minimize without waiting: its thread may be the one held up */
+    HWND hwnd = g_win ? (HWND)SDL_GetPointerProperty(SDL_GetWindowProperties(g_win), SDL_PROP_WINDOW_WIN32_HWND_POINTER,
+                                                     NULL)
+                      : NULL;
+    if (hwnd && g_fullscreen) ShowWindowAsync(hwnd, SW_MINIMIZE);
     if (MultiByteToWideChar(CP_UTF8, 0, msg, -1, w, 4096))
-        MessageBoxW(NULL, w, L"ScarletNX", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+        MessageBoxW(NULL, w, L"ScarletNX", MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST);
     else
-        MessageBoxA(NULL, msg, "ScarletNX", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+        MessageBoxA(NULL, msg, "ScarletNX", MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST);
 #endif
 }
 

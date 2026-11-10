@@ -1237,10 +1237,11 @@ static int nns_nvdrv_INvDrvServices_Ioctl3(SvcObj* self, u32 fd, u32 request, Ip
 static int nns_nvdrv_INvDrvServices_Close(SvcObj* self, u32 fd, u32* error) {
     NvFile old;
     NvEvent* slots = NULL;
-    int release = 0, open = 0;
+    int release = 0, open = 0, dev = DEV_NONE;
     pm_lock(&nv.lock);
     if (fd < 256 && nv.nvf[fd].dev && !nv.nvf[fd].closed) {
         open = 1;
+        dev = nv.nvf[fd].dev;
         if (nv.nvf[fd].users) { /* the last ioctl releases it */
             nv.nvf[fd].closed = 1;
         } else {
@@ -1251,6 +1252,9 @@ static int nns_nvdrv_INvDrvServices_Close(SvcObj* self, u32 fd, u32* error) {
         }
     }
     pm_unlock(&nv.lock);
+    /* opens are logged: with closes beside them, a movie's decoder teardown and the next one's start read in order */
+    if (dev == DEV_NVDEC || dev == DEV_VIC)
+        LOG("nvdrv: close %u%s\n", fd, release ? "" : " (an ioctl is still running on it)");
     if (release) nv_release(&old, slots);
     *error = open ? 0 : 8; /* an fd that isn't open, or closed already: the NvError the ioctls answer for it */
     R_SUCCEED();
