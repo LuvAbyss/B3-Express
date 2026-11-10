@@ -3954,6 +3954,16 @@ void vk_nvn_replay_draw(const NvnPipeDesc* d, const NvnStageBind* bind, const Nv
             return;
         }
     }
+    if (g_rp.debug_frame) /* a captured frame: what each draw is */
+        LOG("nvn-live: draw %llu: shaders vs %08x fs %08x (gs %08x), kind %d prim %u count %u inst %u; colour fmt %u "
+            "%u depth fmt %u, blend %x [%u %u %u %u %u %u], mask %x; depth test %u write %u func %u, stencil %u, cull "
+            "%u ccw %u%s\n",
+            (unsigned long long)g_rp.draws, d->mod[0] >= 0 ? g_mod[d->mod[0]].spv_hash : 0,
+            d->mod[4] >= 0 ? g_mod[d->mod[4]].spv_hash : 0, d->mod[3] >= 0 ? g_mod[d->mod[3]].spv_hash : 0, call->kind,
+            call->primitive, call->count, call->instances, d->color_format[0], d->color_format[1], d->depth_format,
+            d->blend_on, d->blend[0][0], d->blend[0][1], d->blend[0][2], d->blend[0][3], d->blend[0][4], d->blend[0][5],
+            d->chanmask, y->depth_test, y->depth_write, y->depth_func, y->stencil_test, y->cull, y->front_ccw,
+            !p || !p->p ? ", no pipeline" : "");
     if (!p || !p->p) RSKIP("no pipeline");
     if (call->primitive == 7) RSKIP("quads");
     if (call->kind >= 1 && call->index_type == 0) RSKIP("8-bit indices");

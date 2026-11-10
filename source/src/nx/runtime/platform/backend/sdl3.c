@@ -7,6 +7,7 @@
 #include "nx/runtime/options.h"
 #include "nx/hle/services/hid.h"
 #include "nx/hle/kernel/kernel.h"
+#include "nx/hle/nvn/cmdlist.h"
 #include "nx/runtime/platform/backend.h"
 #include "nx/runtime/platform/log.h"
 #include "nx/runtime/platform/plat.h"
@@ -370,14 +371,15 @@ int backend_vk_surface(VkInstance instance, VkSurfaceKHR* surface) {
     LOG("video: no Vulkan surface: %s\n", SDL_GetError());
     return 0;
 }
-static const char* HELP = "Controller: A, B, X and Y where the console's are (gamepad_swap_ab=1 swaps A and B). Home: "
-                          "the game's menu.\n\n"
-                          "Keyboard (keys by position, as on a US layout):\n"
-                          "  Arrows = D-Pad     W A S D = left stick    I J K L = right stick\n"
-                          "  X / Space = A    Z = B    C = X    V = Y\n"
-                          "  Q = L   E = R   1 = ZL   3 = ZR   Enter = +   Backspace = -\n\n"
-                          "F1 = this help   F2 = the game's menu   F3 = screenshot   F4 = FPS limit on / off\n"
-                          "F5 = thread dump   F11 / Alt+Enter = fullscreen   Esc = quit";
+static const char* HELP =
+    "Controller: A, B, X and Y where the console's are (gamepad_swap_ab=1 swaps A and B). Home: "
+    "the game's menu.\n\n"
+    "Keyboard (keys by position, as on a US layout):\n"
+    "  Arrows = D-Pad     W A S D = left stick    I J K L = right stick\n"
+    "  X / Space = A    Z = B    C = X    V = Y\n"
+    "  Q = L   E = R   1 = ZL   3 = ZR   Enter = +   Backspace = -\n\n"
+    "F1 = this help   F2 = the game's menu   F3 = screenshot   F4 = FPS limit on / off\n"
+    "F5 = thread dump   F6 = capture a frame for a bug report   F11 / Alt+Enter = fullscreen   Esc = quit";
 
 static PadKind gamepad_kind(int type) {
     switch (type) {
@@ -758,6 +760,22 @@ static void hotkey(SDL_Keycode k) {
             break;
         }
         case SDLK_F5: kernel_dump_threads(); break;
+        case SDLK_F6: { /* the next frame's images and draws, for a graphics bug report */
+            char p[1200];
+            time_t now = time(NULL);
+            struct tm t;
+#ifdef _WIN32
+            localtime_s(&t, &now);
+#else
+            localtime_r(&now, &t);
+#endif
+            snprintf(p, sizeof p, "%scaptures", g_exedir);
+            plat_mkdir(p);
+            snprintf(p, sizeof p, "%scaptures/frame_%04d%02d%02d_%02d%02d%02d", g_exedir, t.tm_year + 1900,
+                     t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
+            nvn_capture_frame(p);
+            break;
+        }
         case SDLK_F11: set_fullscreen(!g_fullscreen); break;
     }
 }

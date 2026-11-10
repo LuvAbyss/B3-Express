@@ -955,6 +955,10 @@ static u32 g_nwin_tex;
 static u64 g_replay_frame = ~0ull;
 static int g_replaying;
 static char g_live_out[600]; /* SNX_NVN_LIVE_OUT: path prefix of the pictures saved every 600 presents */
+/* nvn_capture_frame: g_cap_req set by the caller, taken at the next present, which arms the frame after it */
+static char g_cap_out[600];
+static int g_cap_req;
+static u64 g_cap_frame;
 /* the clip distances a vertex pipeline's last stage clips with (SNX_NVN_CLIP): the driver sets SetUserClipEnable to
    0xFF, seen on every draw of the route, so whatever a program writes clips */
 static u32 g_clip_on = 0xFF;
@@ -1359,6 +1363,13 @@ static u64 cpu_of(u64 gpu) { /* lock held: the CPU address of a GPU address in a
     return 0;
 }
 static u64 g_sync_ns, g_sync_n; /* how long the game's threads wait in NVN for the GPU, all threads together */
+void nvn_capture_frame(const char* prefix) {
+    pm_lock(&g_lk);
+    snprintf(g_cap_out, sizeof g_cap_out, "%s", prefix);
+    pm_unlock(&g_lk);
+    __atomic_store_n(&g_cap_req, 1, __ATOMIC_RELEASE);
+    if (!g_live) LOG("capture: needs the live renderer (the default), nothing saved\n");
+}
 static void present(CPU* RESTRICT c, const NvnFn* f) { /* nvnQueuePresentTexture(queue, window, index) */
     u32 index = (u32)c->x[2];
     pm_lock(&g_lk);
@@ -1368,9 +1379,24 @@ static void present(CPU* RESTRICT c, const NvnFn* f) { /* nvnQueuePresentTexture
         char path[640];
         const char* d = getenv("SNX_NVN_LIVE_DUMP"); /* a frame to save every image of */
         int all = d && strtoull(d, NULL, 10) == frame, snap = (frame % 600 == 0 || all) && g_live_out[0];
-        snprintf(path, sizeof path, "%s-f%06llu", g_live_out, (unsigned long long)frame);
-        vk_nvn_live_present(gpu, gpu ? gmmu_translate(gpu) : 0, snap ? path : NULL, all);
-        vk_nvn_live_debug(d && strtoull(d, NULL, 10) == frame + 1);
+        const char* at = getenv("SNX_NVN_CAPTURE_AT"); /* F6 at that present, for scripted runs */
+        if (at && strtoull(at, NULL, 10) == frame && !g_cap_frame) {
+            snprintf(g_cap_out, sizeof g_cap_out, "%s", g_live_out[0] ? g_live_out : "capture");
+            __atomic_store_n(&g_cap_req, 1, __ATOMIC_RELEASE);
+        }
+        int cap = g_cap_frame == frame;
+        snprintf(path, sizeof path, "%s-f%06llu", cap ? g_cap_out : g_live_out, (unsigned long long)frame);
+        vk_nvn_live_present(gpu, gpu ? gmmu_translate(gpu) : 0, snap || cap ? path : NULL, all || cap);
+        if (cap) {
+            g_cap_frame = 0;
+            LOG("capture: frame %llu saved to %s*\n", (unsigned long long)frame, path);
+        }
+        if (__atomic_exchange_n(&g_cap_req, 0, __ATOMIC_ACQ_REL)) {
+            /* two presents on, so the frame saved is logged whole whichever side of a present its submits fall */
+            g_cap_frame = frame + 2;
+            LOG("capture: frame %llu, the draws up to it follow\n", (unsigned long long)g_cap_frame);
+        }
+        vk_nvn_live_debug((d && strtoull(d, NULL, 10) == frame + 1) || (g_cap_frame && g_cap_frame <= frame + 2));
         if (frame % 600 == 0) {
             static u64 ns_seen, n_seen;
             u64 ns = __atomic_load_n(&g_sync_ns, __ATOMIC_RELAXED), n = __atomic_load_n(&g_sync_n, __ATOMIC_RELAXED);

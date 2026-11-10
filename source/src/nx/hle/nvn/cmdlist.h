@@ -9,5 +9,8 @@
 
 /* the recording handler for an NVN function and its operation number in *op, NULL for a function it doesn't keep */
 NvnHandler nvn_cmd_handler(const char* name, int* op);
+/* F6: the next whole frame saved, every host image of it at prefix-fNNNNNN, each draw logged with its shaders and
+   state (as SNX_NVN_LIVE_DUMP does for a frame number given beforehand). Any thread */
+void nvn_capture_frame(const char* prefix);
 
 #endif
