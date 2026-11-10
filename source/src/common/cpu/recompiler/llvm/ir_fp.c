@@ -76,6 +76,15 @@ static V ixc_set(SnxIr* ir) {
     V fpsr = ir_cpu_load(ir, ir->t_i32, ir_off_fpcr() + 4);
     return LLVMBuildICmp(B, LLVMIntNE, LLVMBuildAnd(B, fpsr, i32c(ir, 1u << 4), ""), i32c(ir, 0), "");
 }
+/* denormals are the architecture's too: FPCR.FZ (bit 24) clear and RMode to nearest, with FPSR's UFC (bit 3) and
+   IXC (bit 4) both set already */
+static V denormals_ok(SnxIr* ir) {
+    V fpcr = ir_cpu_load(ir, ir->t_i32, ir_off_fpcr());
+    V fpsr = ir_cpu_load(ir, ir->t_i32, ir_off_fpcr() + 4);
+    V mode = LLVMBuildICmp(B, LLVMIntEQ, LLVMBuildAnd(B, fpcr, i32c(ir, (1u << 24) | (3u << 22)), ""), i32c(ir, 0), "");
+    V flags = LLVMBuildICmp(B, LLVMIntEQ, LLVMBuildAnd(B, fpsr, i32c(ir, 3u << 3), ""), i32c(ir, 3u << 3), "");
+    return LLVMBuildAnd(B, mode, flags, "");
+}
 /* the host fuses multiply-add in hardware (x86 FMA3 from CPUID; AArch64 always): llvm.fma is then one instruction,
    never a call into a C library the module doesn't link */
 static int host_fma(SnxIr* ir) {
@@ -99,13 +108,18 @@ static V lane_and(SnxIr* ir, V x, V y) { return LLVMBuildAnd(B, x, y, ""); }
 
 void ir_fp_fast(SnxIr* ir, unsigned op, unsigned width, unsigned lanes, V a, V b, V add, SnxFpFast* out) {
     Shape s;
-    V fa, fb, r, lane_in, zero_ok, exact_ok, args[3], ixc, za, zb = NULL, result;
+    V fa, fb, r, lane_in, lane_fin, zero_ok, exact_ok, args[3], ixc, za, zb = NULL, result;
     unsigned p, top;
     shape(ir, width, lanes, &s);
     p = s.precision;
     top = s.emax - 1;
     fa = LLVMBuildBitCast(B, a, s.ft, "");
     fb = b ? LLVMBuildBitCast(B, b, s.ft, "") : NULL;
+    /* lane_fin: the operands finite (denormals too) with the operation's own exclusions, for the second way in at the
+       end. A thread whose DSP leaves denormals behind (Wwise's mixer, FZ clear) otherwise took the soft-float helpers
+       lane by lane for every operation touching one: about half of a core in Bayonetta 3's gallery */
+    lane_fin = lane_exponent_in(ir, &s, a, 0, top);
+    if (b) lane_fin = lane_and(ir, lane_fin, lane_exponent_in(ir, &s, b, 0, top));
     /* operands normal or zero: zeros follow IEEE's rules on the host, which are the architecture's (FPAdd, FPMul,
        FPMulAdd, FPDiv and FPSqrt give the same zero and sign in round to nearest, and raise nothing for them) */
     za = lane_zero(ir, &s, a);
@@ -149,6 +163,7 @@ void ir_fp_fast(SnxIr* ir, unsigned op, unsigned width, unsigned lanes, V a, V b
             break;
         case SNX_IR_FP_DIV:
             lane_in = lane_and(ir, lane_in, LLVMBuildNot(B, zb, "")); /* by zero: DZC, or IOC for 0/0 */
+            lane_fin = lane_and(ir, lane_fin, LLVMBuildNot(B, zb, ""));
             zero_ok = za;
             r = LLVMBuildFDiv(B, fa, fb, "");
             if (host_fma(ir)) { /* a - r*b, exact under the same bounds on a and r, or for a zero dividend */
@@ -167,6 +182,7 @@ void ir_fp_fast(SnxIr* ir, unsigned op, unsigned width, unsigned lanes, V a, V b
         case SNX_IR_FP_SQRT: {
             /* sqrt(-0) is -0 without a flag; other negative operands are invalid */
             lane_in = lane_and(ir, lane_in, lane_or(ir, LLVMBuildICmp(B, LLVMIntSGE, a, kint(ir, &s, 0), ""), za));
+            lane_fin = lane_and(ir, lane_fin, lane_or(ir, LLVMBuildICmp(B, LLVMIntSGE, a, kint(ir, &s, 0), ""), za));
             zero_ok = za;
             r = fp_intrinsic(ir, "llvm.sqrt", &s, &fa, 1);
             if (host_fma(ir)) { /* a - r*r */
@@ -182,6 +198,7 @@ void ir_fp_fast(SnxIr* ir, unsigned op, unsigned width, unsigned lanes, V a, V b
             V zp = lane_or(ir, za, zb);
             args[0] = fa, args[1] = fb, args[2] = LLVMBuildBitCast(B, add, s.ft, "");
             lane_in = lane_and(ir, lane_in, lane_or(ir, lane_exponent_in(ir, &s, add, 1, top), lane_zero(ir, &s, add)));
+            lane_fin = lane_and(ir, lane_fin, lane_exponent_in(ir, &s, add, 0, top));
             zero_ok = zp;
             r = host_fma(ir) ? fp_intrinsic(ir, "llvm.fma", &s, args, 3) : NULL;
             if (r)
@@ -200,6 +217,16 @@ void ir_fp_fast(SnxIr* ir, unsigned op, unsigned width, unsigned lanes, V a, V b
         lane_or(ir, lane_exponent_in(ir, &s, out->value, 2, top), lane_and(ir, lane_zero(ir, &s, out->value), zero_ok));
     out->ok = LLVMBuildAnd(B, LLVMBuildAnd(B, rounds_to_nearest(ir), all(ir, &s, lane_and(ir, lane_in, result)), ""),
                            exact_ok, "");
+    /* or: with FZ clear the host's IEEE arithmetic gives the architecture's value for denormal operands and results
+       too (FPProcessDenorm only flushes with FZ set), and the flags they could add are UFC and IXC, which are set
+       already. Overflow (an infinite result), NaNs, infinities, a division by zero and a negative square root stay
+       out: they raise OFC, IOC or DZC */
+    if (host_fma(ir) || op != SNX_IR_FP_FMA) /* without hardware FMA, r above is not the fused result */
+        out->ok = LLVMBuildOr(
+            B, out->ok,
+            LLVMBuildAnd(B, denormals_ok(ir),
+                         all(ir, &s, lane_and(ir, lane_fin, lane_exponent_in(ir, &s, out->value, 0, top))), ""),
+            "");
 }
 
 LLVMBasicBlockRef ir_fp_branch(SnxIr* ir, V ok, LLVMBasicBlockRef* slow) {
