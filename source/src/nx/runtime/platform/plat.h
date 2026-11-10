@@ -50,6 +50,7 @@ extern __thread void* tls_thread;
 
 /* ---- time */
 u64 plat_ns(void);        /* a monotonic clock in nanoseconds */
+u32 plat_thread_host_id(void); /* the calling thread's id as the OS (and the profiler) names it, 0 where unknown */
 i64 plat_unix_time(void); /* seconds since 1970 UTC */
 i64 plat_tz_offset(void); /* local time minus UTC, in seconds */
 

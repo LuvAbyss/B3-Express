@@ -354,6 +354,8 @@ void kernel_dump_threads(void) {
         LOG("  thread %llu '%s' prio %d (base %d) core %d%s: %s%s%s\n", (unsigned long long)t->id, name, t->prio,
             t->base_prio, t->core, mask, thread_state(t, st, sizeof st),
             t->on_core == -2 ? " (waiting for its core)" : "", t->suspended ? " (paused by svcSetThreadActivity)" : "");
+        /* the float state the recompiled code's fast paths depend on (FZ bit 24, RMode 22-23; IXC bit 4) */
+        LOG("    fpcr %08x fpsr %08x\n", t->cpu.fpcr, t->cpu.fpsr);
         if (g_sleeps[i].t != t) {
             g_sleeps[i].t = t;
             g_sleeps[i].n = 0;

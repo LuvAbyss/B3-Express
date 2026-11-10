@@ -58,6 +58,7 @@ struct H1Ch {
     PMutex lk; /* the queue, the flags below it and syncpt[] */
     PCond cv;  /* the queue changed, or the worker ended */
     u32* queue[H1_QUEUE];
+    u64 queued[H1_QUEUE]; /* when each job was submitted (plat_ns) */
     u32 head, count;
     int started, closing, exited;
     u32 syncpt[H1_SYNCPTS]; /* 0: not handed out yet (syncpt_alloc never returns 0) */
@@ -65,6 +66,7 @@ struct H1Ch {
     int is_vic;
     u32 cls, method, payload; /* the class the stream addresses, the engine method selected, LOAD_SYNCPT_PAYLOAD_32 */
     NvdecCtx* dec;
+    u64 waited; /* the running job's host waits so far */
     u32 regs[H1_REGS];
 };
 
@@ -153,23 +155,25 @@ void host1x_forget_handle(u32 h) {
 
 /* ---- running a job on the worker */
 /* a host class wait: syncpoint id reaching thresh. The engines' lock is let go meanwhile */
-static void host_wait(u32 id, u32 thresh) {
+static void host_wait(H1Ch* ch, u32 id, u32 thresh) {
+    u64 t = plat_ns();
     pm_unlock(&g_engine_lk);
     if (!syncpt_wait(id, thresh, HOST_WAIT_NS))
         WARN_LIMIT(8, "host1x: a job waited 2 s for syncpoint %u to reach %u (it is at %u), and goes on\n", id, thresh,
                    syncpt_read(id));
     pm_lock(&g_engine_lk);
+    ch->waited += plat_ns() - t;
 }
 static void host_method(H1Ch* ch, u32 off, u32 v) {
     switch (off) {
         case 0x08: { /* WAIT_SYNCPT: index in bits 24-31, a 24 bit threshold, taken next to the syncpoint's value */
             u32 id = v >> 24, cur = syncpt_read(id), t = (cur & ~0xFFFFFFu) | (v & 0xFFFFFFu);
             if ((i32)(t - cur) < -(i32)0x800000) t += 0x1000000u;
-            host_wait(id, t);
+            host_wait(ch, id, t);
             break;
         }
         case 0x4E: ch->payload = v; break; /* LOAD_SYNCPT_PAYLOAD_32 */
-        case 0x50: host_wait(v, ch->payload); break; /* WAIT_SYNCPT_32 */
+        case 0x50: host_wait(ch, v, ch->payload); break; /* WAIT_SYNCPT_32 */
         default: break; /* increments come from the submit's list */
     }
 }
@@ -223,15 +227,54 @@ static void run_words(H1Ch* ch, const u32* w, u32 n) {
         }
     }
 }
-static void run_job(H1Ch* ch, const u32* job) {
+/* what the jobs cost, logged every 5 s while they run: [0] NVDEC, [1] VIC. ns counts the engines' work, wait the
+   time a job stood at the engines' lock or a host wait, lag how long after its SUBMIT a job started */
+typedef struct {
+    u64 n[2], ns[2], worst[2], wait[2], lag[2], lag_worst[2];
+} H1Stats;
+static PMutex g_stats_lk = PMUTEX_INIT;
+static u64 g_stats_since;
+static H1Stats g_stats;
+static void stats_add(int vic, u64 work, u64 wait, u64 lag) {
+    u64 now = plat_ns();
+    pm_lock(&g_stats_lk);
+    if (!g_stats_since) g_stats_since = now;
+    g_stats.n[vic]++;
+    g_stats.ns[vic] += work;
+    g_stats.wait[vic] += wait;
+    g_stats.lag[vic] += lag;
+    if (work > g_stats.worst[vic]) g_stats.worst[vic] = work;
+    if (lag > g_stats.lag_worst[vic]) g_stats.lag_worst[vic] = lag;
+    if (now - g_stats_since >= 5000000000ull) {
+        int i;
+        for (i = 0; i < 2; i++)
+            if (g_stats.n[i])
+                LOG("host1x: %s over %.1f s: %llu jobs, %.2f ms each (worst %.2f), %.2f ms waiting each, started "
+                    "%.2f ms after their submit (worst %.2f)\n",
+                    i ? "VIC" : "NVDEC", (double)(now - g_stats_since) / 1e9, (unsigned long long)g_stats.n[i],
+                    (double)g_stats.ns[i] / (double)g_stats.n[i] / 1e6, (double)g_stats.worst[i] / 1e6,
+                    (double)g_stats.wait[i] / (double)g_stats.n[i] / 1e6,
+                    (double)g_stats.lag[i] / (double)g_stats.n[i] / 1e6, (double)g_stats.lag_worst[i] / 1e6);
+        memset(&g_stats, 0, sizeof g_stats);
+        g_stats_since = now;
+    }
+    pm_unlock(&g_stats_lk);
+}
+static void run_job(H1Ch* ch, const u32* job, u64 queued) {
     u32 ncb = job[0], ninc = job[1], k = 2, c;
+    u64 t0 = plat_ns(), t1, t2, waited;
     pm_lock(&g_engine_lk);
+    t1 = plat_ns();
+    ch->waited = 0;
     for (c = 0; c < ncb; c++) {
         u32 len = job[k++];
         run_words(ch, job + k, len);
         k += len;
     }
+    waited = ch->waited;
     pm_unlock(&g_engine_lk);
+    t2 = plat_ns();
+    stats_add(ch->is_vic, t2 - t1 - waited, t1 - t0 + waited, t0 > queued ? t0 - queued : 0);
     for (c = 0; c < ninc; c++, k += 2) syncpt_add(job[k], job[k + 1]);
 }
 static void worker(void* arg) {
@@ -239,11 +282,13 @@ static void worker(void* arg) {
     pm_lock(&ch->lk);
     for (;;) {
         u32* job;
+        u64 queued;
         while (!ch->count && !ch->closing) pc_wait(&ch->cv, &ch->lk, -1);
         if (!ch->count) break; /* closing, and every queued job ran */
         job = ch->queue[ch->head];
+        queued = ch->queued[ch->head];
         pm_unlock(&ch->lk);
-        run_job(ch, job);
+        run_job(ch, job, queued);
         free(job);
         pm_lock(&ch->lk);
         ch->head = (ch->head + 1) % H1_QUEUE;
@@ -335,6 +380,7 @@ static u32 submit(H1Ch* ch, u8* d, u32 n) {
         if (i < nfe && o_fe + 4ull * i + 4 <= n) wr32(d, (u32)(o_fe + 4ull * i), v);
     }
     ch->queue[(ch->head + ch->count) % H1_QUEUE] = job;
+    ch->queued[(ch->head + ch->count) % H1_QUEUE] = plat_ns();
     ch->count++;
     pc_broadcast(&ch->cv);
     if (!ch->started) {

@@ -187,6 +187,7 @@ void plat_exit_now(int code) {
 }
 
 /* ================================================================ time */
+u32 plat_thread_host_id(void) { return 0; }
 u64 plat_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);

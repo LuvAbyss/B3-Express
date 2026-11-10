@@ -132,6 +132,7 @@ void plat_exit_now(int code) {
 }
 
 /* ================================================================ time */
+u32 plat_thread_host_id(void) { return (u32)GetCurrentThreadId(); }
 u64 plat_ns(void) {
     static LARGE_INTEGER freq; /* set once, before any other thread runs: the first log line asks */
     LARGE_INTEGER c;

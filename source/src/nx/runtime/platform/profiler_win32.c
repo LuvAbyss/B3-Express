@@ -97,9 +97,32 @@ static u32 g_ring_at;
 static u64 g_spike_from, g_spike_to, g_spike_frame;
 static int g_spike_req;
 
+#if !defined(_M_ARM64) && !defined(__aarch64__)
+/* SNX_PROF_CALLERS: a sample outside every game function but inside the game module (its helpers: soft float,
+   SIMD) counts for the game function that called it, found by unwinding with the module's .pdata, tagged with bit 0.
+   RtlLookupFunctionEntry reads the loader's function table: a debugging option, since the stopped thread could in
+   principle hold that lock */
+static u64 caller_of(CONTEXT* c) {
+    CONTEXT u = *c;
+    int depth;
+    if (fn_at(c->Rip)) return c->Rip;
+    for (depth = 0; depth < 4; depth++) {
+        DWORD64 base = 0;
+        PVOID handler = NULL;
+        DWORD64 frame = 0;
+        PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(u.Rip, &base, NULL);
+        const ProfFn* f;
+        if (!rf) return c->Rip; /* a leaf, or code without unwind data */
+        RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, u.Rip, rf, &u, &handler, &frame, NULL);
+        f = fn_at(u.Rip);
+        if (f) return f->host | 1;
+    }
+    return c->Rip;
+}
+#endif
 static u64 record(u64 pc) {
-    const ProfFn* f = fn_at(pc);
-    u64 key = f ? f->host : pc & ~(u64)15;
+    const ProfFn* f = (pc & 1) ? NULL : fn_at(pc);
+    u64 key = (pc & 1) ? pc : f ? f->host : pc & ~(u64)15;
     u32 i, probe;
     g_samples++;
     if (!key) key = 16; /* 0 marks a free bucket */
@@ -117,8 +140,10 @@ static u64 record(u64 pc) {
 /* key as write_profile names it: a game function's guest address, the runtime's offset, or a host address */
 static void key_text(u64 key, char* out, size_t n) {
     u64 image = (u64)(size_t)&__ImageBase;
-    const ProfFn* fn = fn_at(key);
-    if (fn && fn->host == key)
+    const ProfFn* fn = fn_at(key & ~(u64)1);
+    if (fn && (key & 1) && fn->host == (key & ~(u64)1))
+        snprintf(out, n, "helpers called from game function %llx", (unsigned long long)fn->guest);
+    else if (fn && fn->host == key)
         snprintf(out, n, "game function %llx", (unsigned long long)fn->guest);
     else if (key >= image && key - image < 0x10000000u)
         snprintf(out, n, "runtime +%llx", (unsigned long long)(key - image));
@@ -216,7 +241,10 @@ static void write_profile(u64 started) {
 
 static DWORD WINAPI sampler(LPVOID unused) {
     u64 started = plat_ns(), next_write = started + (u64)PROF_PERIOD_MS * 1000000u;
+    const char* e = getenv("SNX_PROF_CALLERS");
+    int callers = e && *e && strcmp(e, "0");
     (void)unused;
+    (void)callers; /* x86-64 only */
     fns_index();
     for (;;) {
         int i, used = __atomic_load_n(&g_threads_used, __ATOMIC_ACQUIRE);
@@ -233,12 +261,12 @@ static DWORD WINAPI sampler(LPVOID unused) {
             if (SuspendThread(h) == (DWORD)-1) continue;
             /* nothing here may allocate or lock: the stopped thread could hold the heap's lock */
             memset(&c, 0, sizeof c);
-            c.ContextFlags = CONTEXT_CONTROL;
+            c.ContextFlags = callers ? CONTEXT_CONTROL | CONTEXT_INTEGER : CONTEXT_CONTROL;
             if (GetThreadContext(h, &c)) {
 #if defined(_M_ARM64) || defined(__aarch64__)
                 u64 key = record((u64)c.Pc);
 #else
-                u64 key = record((u64)c.Rip);
+                u64 key = record(callers ? caller_of(&c) : (u64)c.Rip);
 #endif
                 u32 at = g_ring_at++ & (PROF_RING - 1);
                 g_ring[at].ns = plat_ns();

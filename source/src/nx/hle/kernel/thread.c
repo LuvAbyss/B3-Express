@@ -89,8 +89,70 @@ static int core_idle_nl(const KThread* t) {
         if (((t->affinity >> j) & 1) && !g_core_owner[j]) return j;
     return -1;
 }
+/* SNX_CORE_STATS: the time threads waited for a core, by waiter and the holder when it started waiting, logged every
+   5 s (the 8 longest). Under g_core_lk */
+#define CW_SLOTS 64
+static struct {
+    u32 waiter, holder;
+    char wname[32], hname[32];
+    u64 ns, n;
+} g_cw[CW_SLOTS];
+static u64 g_cw_since;
+static u32 g_cw_host[256]; /* each guest thread's host id, by guest id & 255, for the profile lines */
+static int core_stats_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char* e = getenv("SNX_CORE_STATS");
+        on = e && *e && strcmp(e, "0");
+    }
+    return on;
+}
+static void core_stats_nl(const KThread* t, const KThread* h, u64 ns) {
+    u64 now = plat_ns();
+    g_cw_host[t->id & 255] = plat_thread_host_id();
+    /* a long wait: what every thread did meanwhile, with the profile option (once at a time) */
+    if (ns > 30000000u && h) {
+        LOG("cores: thread %u (host %u) waited %.1f ms for core %d, held by %u (host %u)\n", (u32)t->id,
+            g_cw_host[t->id & 255], (double)ns / 1e6, t->on_core, (u32)h->id, g_cw_host[h->id & 255]);
+        plat_prof_spike(now - ns, now, h->id);
+    }
+    int i, free_i = -1, j, top;
+    for (i = 0; i < CW_SLOTS; i++) {
+        if (g_cw[i].n && g_cw[i].waiter == t->id && g_cw[i].holder == (h ? h->id : 0)) break;
+        if (!g_cw[i].n && free_i < 0) free_i = i;
+    }
+    if (i == CW_SLOTS) i = free_i;
+    if (i >= 0) {
+        if (!g_cw[i].n) {
+            g_cw[i].waiter = t->id;
+            g_cw[i].holder = h ? h->id : 0;
+            memcpy(g_cw[i].wname, t->name, sizeof g_cw[i].wname);
+            if (h) memcpy(g_cw[i].hname, h->name, sizeof g_cw[i].hname);
+            else
+                g_cw[i].hname[0] = 0;
+        }
+        g_cw[i].n++;
+        g_cw[i].ns += ns;
+    }
+    if (!g_cw_since) g_cw_since = now;
+    if (now - g_cw_since < 5000000000ull) return;
+    for (top = 0; top < 8; top++) {
+        j = -1;
+        for (i = 0; i < CW_SLOTS; i++)
+            if (g_cw[i].n && (j < 0 || g_cw[i].ns > g_cw[j].ns)) j = i;
+        if (j < 0) break;
+        LOG("cores: over %.1f s thread %u '%.31s' waited %.1f ms in %llu waits for its core, held by %u '%.31s'\n",
+            (double)(now - g_cw_since) / 1e9, g_cw[j].waiter, g_cw[j].wname, (double)g_cw[j].ns / 1e6,
+            (unsigned long long)g_cw[j].n, g_cw[j].holder, g_cw[j].hname);
+        g_cw[j].n = 0;
+    }
+    memset(g_cw, 0, sizeof g_cw);
+    g_cw_since = now;
+}
 /* t waits on core k's list until a holder hands the core over (it may be another core by then) */
 static void core_wait_nl(KThread* t, int k) {
+    const KThread* h = g_core_owner[k];
+    u64 t0 = core_stats_on() ? plat_ns() : 0;
     t->core = k;
     t->on_core = -2;
     t->core_ticket = ++g_core_ticket;
@@ -99,6 +161,7 @@ static void core_wait_nl(KThread* t, int k) {
     if (t->prio < g_core_best[k]) g_core_best[k] = t->prio;
     core_flag_nl(k);
     while (t->on_core == -2) pc_wait(&t->cv, &g_core_lk, -1);
+    if (t0) core_stats_nl(t, h, plat_ns() - t0);
 }
 /* t (holding no core) takes one: its own if free; with a holder it would preempt, it waits there and flags the holder;
    otherwise an idle core of its mask, or a place in its own core's line */
