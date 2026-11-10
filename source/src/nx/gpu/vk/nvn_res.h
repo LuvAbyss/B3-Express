@@ -107,6 +107,8 @@ typedef struct {
     float offset[3]; /* polygon offset factor, units, clamp */
     float blend_color[4], line_width, alpha_ref;
     u32 alpha_func; /* the colour state's NVNalphaFunc */
+    u32 depth_bounds_on; /* nvnCommandBufferSetDepthBounds: the test on, and its range in depth buffer values */
+    float depth_bounds[2];
     NvnRange vbuf[16];
     u32 stride[16];
 } NvnDrawDyn;

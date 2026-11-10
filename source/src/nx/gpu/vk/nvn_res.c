@@ -1941,6 +1941,8 @@ typedef struct {
     u32 b[8];
     u32 s[2][7];
     float f[8];
+    u32 db;       /* the depth bounds test on */
+    float dbr[2]; /* its range */
 } RpDyn;
 static struct {
     int valid;
@@ -3351,6 +3353,67 @@ static int rp_debug(void) {
     }
     return dbg;
 }
+/* SNX_NVN_SKIP_SHADER=hash,hash,...: draws whose vertex or fragment module has one of these SPIR-V hashes (the
+   capture's "shaders vs .. fs .." values) are left out, to find which draw makes what in a picture */
+static int rp_skip_shader(const NvnPipeDesc* d) {
+    static u32 h[64];
+    static int n = -1;
+    int i;
+    if (n < 0) {
+        const char* e = getenv("SNX_NVN_SKIP_SHADER");
+        char* q;
+        n = 0;
+        while (e && *e && n < 64) {
+            h[n++] = (u32)strtoul(e, &q, 16);
+            if (q == e) break;
+            e = *q == ',' ? q + 1 : q;
+        }
+    }
+    {
+        static int odd = -1; /* SNX_NVN_SKIP_ODD=1: only on odd frames, so two captures of one run compare */
+        if (odd < 0) odd = getenv("SNX_NVN_SKIP_ODD") != NULL;
+        if (odd && !(g_rp.frame & 1)) return 0;
+    }
+    for (i = 0; i < n; i++)
+        if ((d->mod[0] >= 0 && g_mod[d->mod[0]].spv_hash == h[i]) ||
+            (d->mod[4] >= 0 && g_mod[d->mod[4]].spv_hash == h[i])) {
+            if (g_rp.debug_frame)
+                LOG("nvn-live: draw %llu skipped (SNX_NVN_SKIP_SHADER)\n", (unsigned long long)g_rp.draws);
+            return 1;
+        }
+    return 0;
+}
+/* SNX_NVN_NEUTRAL=hash/tN/v,hash/cN/0,...: in the stage whose module has that SPIR-V hash, texture slot N reads v
+   everywhere (0 or 1 in every component), or constant buffer N reads zeros. -1 when nothing is set for it */
+static int rp_neutral(int mod, char kind, u32 slot) {
+    static struct {
+        u32 h, slot;
+        char kind;
+        int v;
+    } e[32];
+    static int n = -1;
+    int i;
+    if (n < 0) {
+        const char* s = getenv("SNX_NVN_NEUTRAL");
+        char* q;
+        n = 0;
+        while (s && *s && n < 32) {
+            e[n].h = (u32)strtoul(s, &q, 16);
+            if (*q != '/' || (q[1] != 't' && q[1] != 'c')) break;
+            e[n].kind = q[1];
+            e[n].slot = (u32)strtoul(q + 2, &q, 10);
+            e[n].v = *q == '/' ? (int)strtol(q + 1, &q, 10) : 0;
+            n++;
+            if (*q != ',') break;
+            s = q + 1;
+        }
+        if (n) LOG("nvn-live: SNX_NVN_NEUTRAL has %d entries\n", n);
+    }
+    for (i = 0; i < n; i++)
+        if (mod >= 0 && mod < g_nmod && e[i].h == g_mod[mod].spv_hash && e[i].kind == kind && e[i].slot == slot)
+            return e[i].v;
+    return -1;
+}
 static int rp_stage_set(int mod, const NvnStageBind* b, int stage, VkDescriptorSet* set, const char** why) {
     static VkWriteDescriptorSet w[SNX_VKB_END];
     static VkDescriptorBufferInfo bi[SNX_VKB_END];
@@ -3430,6 +3493,7 @@ static int rp_stage_set(int mod, const NvnStageBind* b, int stage, VkDescriptorS
             bi[SNX_VKB_CB + i] = (VkDescriptorBufferInfo){g_rp.sbuf, off, size};
         } else {
             u64 a = i == 1 ? b->cb1 : b->ubo[i - 3].addr, have = i == 1 ? b->cb1_size : b->ubo[i - 3].size;
+            if (rp_neutral(mod, 'c', i) >= 0) a = 0; /* SNX_NVN_NEUTRAL: this buffer reads zeros */
             /* with real writes the pool itself where it can be bound: a compute pass of the frame may fill it. The
                range is what the game bound: past it robust buffer access reads zero, as the zeros of a copy, and a
                program of indexed reads (declared 64 KiB) would otherwise cost a 64 KiB copy a draw: 99% of staging */
@@ -3533,6 +3597,14 @@ static int rp_stage_set(int mod, const NvnStageBind* b, int stage, VkDescriptorS
             if (u == g_rp.nused) {
                 if (u == RP_USED) return *why = "too many textures", 0;
                 g_rp.used[g_rp.nused++] = g_tc[slot].t;
+            }
+        }
+        {
+            int one = rp_neutral(mod, 't', i);
+            if (one >= 0) { /* SNX_NVN_NEUTRAL: this slot reads zeros or ones */
+                VkImageViewType vt = vk_tex_view_type(st);
+                view = one ? vk_one_view(vt, st->shadow ? 3 : num) : vk_null_view(vt, st->shadow ? 3 : num);
+                layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             }
         }
         if (!view) return *why = "no view", 0;
@@ -3664,6 +3736,15 @@ static void rp_tex_ready(int mod, const NvnStageBind* b) {
                 if (g_rp.t[q].img && gva > g_rp.t[q].gpu &&
                     gva - g_rp.t[q].gpu < (u64)g_rp.t[q].w * g_rp.t[q].h * 16 * g_rp.t[q].layers)
                     inside = (int)q;
+            LOG("nvn-live: draw %llu stage %d tex %u: texture %llx, TIC %08x %08x, %ux%u, levels-word %08x, host %s "
+                "fkey %08x %ux%u levels %u, uploaded %d valid %d, ASTC base %u pending %u%s\n",
+                (unsigned long long)g_rp.draws, b->nvn_stage, i, (unsigned long long)gva, g_tc[slot].tic[0],
+                g_tc[slot].tic[2], (g_tc[slot].tic[4] & 0xFFFF) + 1, (g_tc[slot].tic[5] & 0xFFFF) + 1,
+                g_tc[slot].tic[7], g_tc[slot].t ? "yes" : "no", g_tc[slot].t ? g_tc[slot].t->fkey : 0,
+                g_tc[slot].t ? g_tc[slot].t->w : 0, g_tc[slot].t ? g_tc[slot].t->h : 0,
+                g_tc[slot].t ? g_tc[slot].t->levels : 0, g_tc[slot].t ? g_tc[slot].t->uploaded : 0,
+                g_tc[slot].t ? g_tc[slot].t->upload_valid : 0, g_tc[slot].t ? g_tc[slot].t->astc_base : 0,
+                g_tc[slot].t ? g_tc[slot].t->astc_pending : 0, g_tc[slot].null_view ? ", null view" : "");
             if (m && !nz)
                 LOG("nvn-live: zero texture %llx, TIC %08x %ux%u levels-word %08x, stage tex %d, near image %d (GPU "
                     "%llx, %ux%u)\n",
@@ -3773,6 +3854,11 @@ static void rp_dynamic(const NvnDrawDyn* y, const NvnPipeDesc* d, u32 primitive)
         n.f[2] = y->offset[0];
         n.f[3] = g_vk.feat.wideLines && y->line_width > 0 ? y->line_width * g_rp.psx : 1.0f;
         memcpy(&n.f[4], y->blend_color, 16);
+        /* the depth bounds test: volumes drawn from inside (the Kraken's goo in chapter 14) keep only the pixels whose
+           depth already in the buffer lies in their range, the rest of the box is never seen */
+        n.db = g_vk.feat.depthBounds && depth && y->depth_bounds_on;
+        n.dbr[0] = n.db ? clamp01(y->depth_bounds[0]) : 0.0f;
+        n.dbr[1] = n.db ? clamp01(y->depth_bounds[1]) : 1.0f;
 #define DYN_NEW(field) (all || memcmp(&n.field, &g_rpd.d.field, sizeof n.field))
         if (DYN_NEW(vp)) vkCmdSetViewportWithCount(cb, 1, &n.vp);
         if (DYN_NEW(sc)) vkCmdSetScissorWithCount(cb, 1, &n.sc);
@@ -3783,6 +3869,8 @@ static void rp_dynamic(const NvnDrawDyn* y, const NvnPipeDesc* d, u32 primitive)
         if (DYN_NEW(b[4])) vkCmdSetDepthWriteEnable(cb, n.b[4]);
         if (DYN_NEW(b[5])) vkCmdSetDepthCompareOp(cb, (VkCompareOp)n.b[5]);
         if (DYN_NEW(b[6])) vkCmdSetStencilTestEnable(cb, n.b[6]);
+        if (DYN_NEW(db)) vkCmdSetDepthBoundsTestEnable(cb, n.db);
+        if (DYN_NEW(dbr)) vkCmdSetDepthBounds(cb, n.dbr[0], n.dbr[1]);
         for (f = 0; f < 2; f++)
             if (DYN_NEW(s[f])) {
                 VkStencilFaceFlags face = f ? VK_STENCIL_FACE_BACK_BIT : VK_STENCIL_FACE_FRONT_BIT;
@@ -3798,8 +3886,6 @@ static void rp_dynamic(const NvnDrawDyn* y, const NvnPipeDesc* d, u32 primitive)
         if (all || memcmp(&n.f[4], &g_rpd.d.f[4], 16)) vkCmdSetBlendConstants(cb, y->blend_color);
 #undef DYN_NEW
         if (all) { /* never change */
-            vkCmdSetDepthBoundsTestEnable(cb, VK_FALSE);
-            vkCmdSetDepthBounds(cb, 0.0f, 1.0f);
             vkCmdSetPrimitiveRestartEnable(cb, VK_FALSE);
             vkCmdSetRasterizerDiscardEnable(cb, VK_FALSE);
         }
@@ -3964,7 +4050,23 @@ void vk_nvn_replay_draw(const NvnPipeDesc* d, const NvnStageBind* bind, const Nv
             d->blend_on, d->blend[0][0], d->blend[0][1], d->blend[0][2], d->blend[0][3], d->blend[0][4], d->blend[0][5],
             d->chanmask, y->depth_test, y->depth_write, y->depth_func, y->stencil_test, y->cull, y->front_ccw,
             !p || !p->p ? ", no pipeline" : "");
+    if (g_rp.debug_frame) { /* its vertex attributes: NVN format, offset, stream (and that stream's stride) */
+        char a[400];
+        u32 k, o = 0;
+        a[0] = 0;
+        for (k = 0; k < d->nattr && k < 16 && o < sizeof a - 40; k++)
+            if (d->attr_format[k])
+                o += (u32)snprintf(a + o, sizeof a - o, " %u:%u@%u/s%u(%u)", k, d->attr_format[k], d->attr_offset[k],
+                                   d->attr_stream[k], d->attr_stream[k] < 16 ? y->stride[d->attr_stream[k]] : 0);
+        LOG("nvn-live: draw %llu attributes%s; depth bounds %u [%g %g]; depth clamp %u, polygon %u, offset %x [%g %g "
+            "%g], depth range [%g %g], viewport %d %d %d %d, depth zero %u, upper left %u\n",
+            (unsigned long long)g_rp.draws, a, y->depth_bounds_on, (double)y->depth_bounds[0],
+            (double)y->depth_bounds[1], d->depth_clamp, d->polygon, y->offset_enables, (double)y->offset[0],
+            (double)y->offset[1], (double)y->offset[2], (double)y->depth_range[0], (double)y->depth_range[1],
+            y->viewport[0], y->viewport[1], y->viewport[2], y->viewport[3], y->depth_zero, y->upper_left);
+    }
     if (!p || !p->p) RSKIP("no pipeline");
+    if (rp_skip_shader(d)) RSKIP("SNX_NVN_SKIP_SHADER");
     if (call->primitive == 7) RSKIP("quads");
     if (call->kind >= 1 && call->index_type == 0) RSKIP("8-bit indices");
     if (call->kind == 3 && !g_vk.has_indirect_count) RSKIP("indirect count unavailable");
@@ -4218,6 +4320,16 @@ static struct {
     VmaAllocationInfo info;
     int srgb;
 } g_rb[RP_TARGETS];
+/* SNX_NVN_CAPTURE_LAYER=k: captures save layer k of an array target (its last when it has fewer), not layer 0 */
+static u32 rp_cap_layer(const RpTarget* t) {
+    static int k = -1;
+    if (k < 0) {
+        const char* e = getenv("SNX_NVN_CAPTURE_LAYER");
+        k = e ? atoi(e) : 0;
+        if (k < 0) k = 0;
+    }
+    return t->layers > 1 ? ((u32)k < t->layers ? (u32)k : t->layers - 1) : 0;
+}
 static void rp_readback(int i) {
     RpTarget* t = &g_rp.t[i];
     int hdr = t->f == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || t->f == VK_FORMAT_R16G16B16A16_SFLOAT ||
@@ -4241,7 +4353,7 @@ static void rp_readback(int i) {
     VmaAllocationCreateInfo bai = {.flags =
                                        VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
                                    .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST};
-    VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+    VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, rp_cap_layer(t), 1},
                       .srcOffsets = {{0, 0, 0}, {(i32)t->sw, (i32)t->sh, 1}},
                       .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                       .dstOffsets = {{0, 0, 0}, {(i32)t->sw, (i32)t->sh, 1}}};
@@ -4633,8 +4745,11 @@ void vk_nvn_live_present(u64 gpu, u64 cpu, const char* out, int all) {
             if (!g_rp.t[i].img || i == shown) continue;
             snprintf(path, sizeof path, "%s-t%02d.ppm", out, i);
             if (g_rb[i].buf && rp_save(i, path))
-                LOG("nvn-live:   image %d: GPU %llx, %ux%u, layers %u, format %d\n", i,
-                    (unsigned long long)g_rp.t[i].gpu, g_rp.t[i].w, g_rp.t[i].h, g_rp.t[i].layers, (int)g_rp.t[i].f);
+                LOG("nvn-live:   image %d: GPU %llx, %ux%u, layers %u, format %d; float components NaN %llu, infinite "
+                    "%llu, non-zero %llu, largest %g\n",
+                    i, (unsigned long long)g_rp.t[i].gpu, g_rp.t[i].w, g_rp.t[i].h, g_rp.t[i].layers, (int)g_rp.t[i].f,
+                    (unsigned long long)g_hdr[0], (unsigned long long)g_hdr[1], (unsigned long long)g_hdr[2],
+                    (double)g_hdr_max);
             if (g_rb[i].img) vmaDestroyImage(g_vk.vma, g_rb[i].img, g_rb[i].img_mem);
             if (g_rb[i].buf) vmaDestroyBuffer(g_vk.vma, g_rb[i].buf, g_rb[i].buf_mem);
             memset(&g_rb[i], 0, sizeof g_rb[i]);

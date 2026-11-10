@@ -945,6 +945,8 @@ typedef struct {
     i32 viewport[4], scissor[4];
     float depth_range[2], alpha_ref, blend_color[4], line_width, offset[3];
     u32 stencil_ref[2], stencil_wmask[2], stencil_vmask[2];
+    u32 depth_bounds_on;
+    float depth_bounds[2];
 } NvnDrawState;
 /* nvnDeviceSetWindowOriginMode (1 upper left) and nvnDeviceSetDepthMode (1 near is zero), and the window's textures
    (nvnWindowBuilderSetTextures), by present index */
@@ -1019,6 +1021,8 @@ static void replay_dyn(NvnDrawDyn* y) { /* lock held */
     y->line_width = g_ds.line_width;
     y->alpha_func = (u32)(g_ds.color >> 16) & 15;
     y->alpha_ref = g_ds.alpha_ref;
+    y->depth_bounds_on = g_ds.depth_bounds_on;
+    memcpy(y->depth_bounds, g_ds.depth_bounds, sizeof y->depth_bounds);
     memcpy(y->vbuf, g_ds.vbuf, sizeof y->vbuf);
     for (i = 0; i < g_ds.nstream && i < 16; i++) y->stride[i] = (u32)g_ds.vstream[i] & 0xFFFF;
 }
@@ -1379,10 +1383,14 @@ static void present(CPU* RESTRICT c, const NvnFn* f) { /* nvnQueuePresentTexture
         char path[640];
         const char* d = getenv("SNX_NVN_LIVE_DUMP"); /* a frame to save every image of */
         int all = d && strtoull(d, NULL, 10) == frame, snap = (frame % 600 == 0 || all) && g_live_out[0];
-        const char* at = getenv("SNX_NVN_CAPTURE_AT"); /* F6 at that present, for scripted runs */
-        if (at && strtoull(at, NULL, 10) == frame && !g_cap_frame) {
-            snprintf(g_cap_out, sizeof g_cap_out, "%s", g_live_out[0] ? g_live_out : "capture");
-            __atomic_store_n(&g_cap_req, 1, __ATOMIC_RELEASE);
+        const char* at = getenv("SNX_NVN_CAPTURE_AT"); /* F6 at these presents (a comma list), for scripted runs */
+        while (at && *at && !g_cap_frame) {
+            char* e;
+            if (strtoull(at, &e, 10) == frame) {
+                snprintf(g_cap_out, sizeof g_cap_out, "%s", g_live_out[0] ? g_live_out : "capture");
+                __atomic_store_n(&g_cap_req, 1, __ATOMIC_RELEASE);
+            }
+            at = e != at && *e == ',' ? e + 1 : NULL;
         }
         int cap = g_cap_frame == frame;
         snprintf(path, sizeof path, "%s-f%06llu", cap ? g_cap_out : g_live_out, (unsigned long long)frame);
@@ -1450,13 +1458,33 @@ static void device_mode(CPU* RESTRICT c, const NvnFn* f) { /* nvnDeviceSetWindow
 
 /* the commands that set dynamic state (part 3), and in a replay the clears and the commands it leaves out */
 static void ds_dynamic(const HostCmd* h, const u8* blob) { /* lock held */
-    enum { VP, SC, DR, SREF, SMASK, SVMASK, AREF, BCOLOR, LWIDTH, POFF, VBUF, CCOLOR, CDEPTH, DISP, DISPI, COPY, CLEARB,
-           UPDATE, NDYN };
+    enum {
+        VP,
+        SC,
+        DR,
+        SREF,
+        SMASK,
+        SVMASK,
+        AREF,
+        BCOLOR,
+        LWIDTH,
+        POFF,
+        VBUF,
+        CCOLOR,
+        CDEPTH,
+        DISP,
+        DISPI,
+        COPY,
+        CLEARB,
+        UPDATE,
+        DBOUNDS,
+        NDYN
+    };
     static const char* const names[NDYN] = {
-        "SetViewport",     "SetScissor",    "SetDepthRange",         "SetStencilRef",   "SetStencilMask",
+        "SetViewport",         "SetScissor",  "SetDepthRange",       "SetStencilRef",   "SetStencilMask",
         "SetStencilValueMask", "SetAlphaRef", "SetBlendColor",       "SetLineWidth",    "SetPolygonOffsetClamp",
-        "BindVertexBuffers", "ClearColor",  "ClearDepthStencil",     "DispatchCompute", "DispatchComputeIndirect",
-        "CopyBufferToBuffer", "ClearBuffer", "UpdateUniformBuffer"};
+        "BindVertexBuffers",   "ClearColor",  "ClearDepthStencil",   "DispatchCompute", "DispatchComputeIndirect",
+        "CopyBufferToBuffer",  "ClearBuffer", "UpdateUniformBuffer", "SetDepthBounds"};
     static int op[NDYN] = {-2};
     u32 i, k;
     if (op[0] == -2)
@@ -1481,6 +1509,10 @@ static void ds_dynamic(const HostCmd* h, const u8* blob) { /* lock held */
                         (u32)h->a[1] & 0xFF;
             break;
         case AREF: memcpy(&g_ds.alpha_ref, h->f, 4); break;
+        case DBOUNDS: /* (cmd, enable, min, max) */
+            g_ds.depth_bounds_on = (u32)h->a[0] & 1;
+            memcpy(g_ds.depth_bounds, h->f, 8);
+            break;
         case BCOLOR:
             if (h->blob_len >= 16) memcpy(g_ds.blend_color, blob, 16);
             break;

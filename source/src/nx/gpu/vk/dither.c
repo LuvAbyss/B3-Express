@@ -330,6 +330,24 @@ int dither_patch(uint32_t** spv_io, size_t* words_io, int mode, float fade_test,
         mt.cmp = i, mt.fade_slot = fade_first ? 2 : 3, mt.fade = a[mt.fade_slot];
         match[nmatch++] = mt;
     }
+    /* DITHER_BLEND is for fades: an alpha from the vertices and the material's constants that a scene fades over
+       time. An alpha from a sampled texture (other than the pattern) is a cut-out the discard shapes: the Kraken's
+       goo in chapter 14 is a box carved to its shape by two noise textures and the scene's depth, and blended it
+       showed as a flat black slab. Such a stage keeps the game's discard */
+    if (nmatch && mode == DITHER_BLEND) {
+        memset(t, 0, m.bound);
+        for (i = m.body; i < m.n; i++) {
+            uint32_t op = op_of(&m, i);
+            const uint32_t* a = arg(&m, i);
+            if (op >= 87 && op <= 97 && len_of(&m, i) >= 4 && id_ok(&m, a[1]) && !tf[a[1]]) t[a[1]] = 1;
+        }
+        taint(&m, t, held, root);
+        for (k = 0; k < nmatch; k++)
+            if (id_ok(&m, match[k].fade) && t[match[k].fade]) {
+                nmatch = 0, found = 0;
+                goto done;
+            }
+    }
     if (!nmatch || (mode == DITHER_GAME && fade_test < 0.0f)) {
         if (!nmatch) found = 0;
         goto done;

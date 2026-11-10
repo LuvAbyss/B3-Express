@@ -846,12 +846,13 @@ VkImageView vk_tex_view(Surf* s, VkImageViewType type, int srgb, const VkCompone
 
 /* empty textures for slots whose texture is missing or doesn't match the shader: zero, or depth 1.0 for shadow
    samplers, which compare against depth formats only */
-VkImageView vk_null_view(VkImageViewType type, int num) {
-    static VkImageView views[8][4];
+static VkImageView null_view(VkImageViewType type, int num, int one) {
+    static VkImageView views[2][8][4];
     static Surf* imgs[2][4]; /* [3D][num] */
     if ((unsigned)type >= 8 || num < 0 || num > 3) return VK_NULL_HANDLE;
     if (num == 3 && type == VK_IMAGE_VIEW_TYPE_3D) num = 0; /* no 3D depth images (nor 3D shadow samplers) */
-    if (views[type][num]) return views[type][num];
+    if (one && num == 3) one = 0;                           /* a depth view's swizzle is ignored */
+    if (views[one][type][num]) return views[one][type][num];
     if (type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY && !g_vk.feat.imageCubeArray) return VK_NULL_HANDLE;
     int is3d = type == VK_IMAGE_VIEW_TYPE_3D;
     Surf* s = imgs[is3d][num];
@@ -898,10 +899,13 @@ VkImageView vk_null_view(VkImageViewType type, int num) {
                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
         imgs[is3d][num] = s;
     }
-    VkComponentMapping id = {0};
-    views[type][num] = vk_tex_view(s, type, 0, &id, 0);
-    return views[type][num];
+    VkComponentMapping id = {0}, ones = {VK_COMPONENT_SWIZZLE_ONE, VK_COMPONENT_SWIZZLE_ONE, VK_COMPONENT_SWIZZLE_ONE,
+                                         VK_COMPONENT_SWIZZLE_ONE};
+    views[one][type][num] = vk_tex_view(s, type, 0, one ? &ones : &id, 0);
+    return views[one][type][num];
 }
+VkImageView vk_null_view(VkImageViewType type, int num) { return null_view(type, num, 0); }
+VkImageView vk_one_view(VkImageViewType type, int num) { return null_view(type, num, 1); }
 
 /* ------------------------------------------------------------ samplers */
 static VkSamplerAddressMode wrap(u32 m) {
