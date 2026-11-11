@@ -2741,6 +2741,8 @@ static void mir_bind(void) {
 static void mir_cpu_at(int arg, u64 off, u64 n) { mir_cpu_wrote(arg >> 8, g_mir_at + off, n); }
 
 /* ---- c7: storage buffers the GPU writes, in video memory (MIR_GPU). Ported from Witch Time's compute buffers ---- */
+/* the merges' unit from offset i of a block of size bs: an aligned 32-bit word, or the bytes left at its end */
+static u64 own_word(u64 i, u64 bs) { return bs - i < 4 ? bs - i : 4; }
 static u64 own_bsize(int p, u64 b) {
     u64 off = b << MIR_SHIFT, size = 1ull << MIR_SHIFT;
     return off + size > g_import[p].size ? g_import[p].size - off : size;
@@ -2770,9 +2772,9 @@ static int mir_fill_block(int p, u64 b) {
     g_mir_bytes += size;
     return 1;
 }
-/* the GPU's bytes of block b, res, into guest memory: a byte the GPU changed against the snapshot goes in where the
-   guest still holds the snapshot's byte (as writeback.c's vk_write_changed, on the pool's host memory). The block is
-   the pool's again */
+/* the GPU's words of block b, res, into guest memory: a 32-bit word the GPU changed against the snapshot goes in where
+   the guest still holds the snapshot's word (as writeback.c's vk_write_changed, on the pool's host memory, but whole
+   words, so a word the game wrote meanwhile stays the game's and is never torn). The block is the pool's again */
 static void own_merge(int p, u64 b, const u8* res) {
     u64 off = b << MIR_SHIFT, size = own_bsize(p, b), i;
     u8* g = GP(g_import[p].cpu + off);
@@ -2786,11 +2788,12 @@ static void own_merge(int p, u64 b, const u8* res) {
             memcpy(g + i, res + i, 8);
             continue;
         }
-        for (u64 k = i; k < i + 8; k++)
-            if (res[k] != s[k] && g[k] == s[k]) g[k] = res[k];
+        for (u64 k = i; k < i + 8; k += 4)
+            if (memcmp(res + k, s + k, 4) && !memcmp(g + k, s + k, 4)) memcpy(g + k, res + k, 4);
     }
-    for (; i < size; i++)
-        if (res[i] != s[i] && g[i] == s[i]) g[i] = res[i];
+    for (; i < size; i += own_word(i, size))
+        if (memcmp(res + i, s + i, own_word(i, size)) && !memcmp(g + i, s + i, own_word(i, size)))
+            memcpy(g + i, res + i, own_word(i, size));
     if (g_import[p].gpu) gpu_mem_written(g_import[p].gpu + off, size);
     free(g_mir[p].snap[b]);
     g_mir[p].snap[b] = NULL;
@@ -2899,14 +2902,16 @@ static void own_patch(void) {
         u8* q;
         if (g_mir[p].st[b] != MIR_GPU || !s) continue;
         memcpy(cur, GP(g_import[p].cpu + bo), bs);
-        /* only the bytes the game changed: one it didn't may hold the GPU's result in the copy */
+        /* only the words the game changed: one it didn't may hold the GPU's result in the copy. Whole 32-bit words, as
+           the game writes them: by bytes, a float the GPU and then the game wrote kept the GPU's bytes where the
+           game's matched the snapshot (its exponent, often): a torn vertex flies off as a spike */
         while (i < bs && n < OWN_RUNS) {
             u64 start;
             while (i + 8 <= bs && !memcmp(cur + i, s + i, 8)) i += 8;
-            while (i < bs && cur[i] == s[i]) i++;
+            while (i < bs && !memcmp(cur + i, s + i, own_word(i, bs))) i += own_word(i, bs);
             if (i >= bs) break;
             start = i;
-            while (i < bs && cur[i] != s[i]) i++;
+            while (i < bs && memcmp(cur + i, s + i, own_word(i, bs))) i += own_word(i, bs);
             r[n].srcOffset = total; /* relative to the staging bytes until they have a place */
             r[n].dstOffset = bo + start;
             r[n++].size = i - start;
