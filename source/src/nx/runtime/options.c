@@ -24,7 +24,8 @@
 
 int g_opt_fullscreen, g_opt_docked = 1, g_opt_lang = 1, g_opt_fps = SNX_FPS_GAME, g_opt_diag, g_opt_shadows = 1;
 int g_opt_prof, g_opt_auto_stub_ipc = 1, g_opt_network, g_opt_vsync = 1, g_opt_aniso, g_opt_mute_unfocused = 1;
-int g_opt_cutscene_fps = 30, g_opt_film_grain = 1, g_opt_model_lod, g_opt_dither = 3, g_opt_fast_renderer = 1;
+int g_opt_cutscene_fps = 30, g_opt_film_grain = 1, g_opt_model_lod, g_opt_dither = 3, g_opt_dither_cutouts = 1,
+    g_opt_fast_renderer = 1;
 int g_opt_hud_area;
 float g_opt_resf = 1, g_opt_lod_bias, g_opt_aspect, g_opt_fsr, g_opt_fsr_sharpness = 0.2f;
 
@@ -113,6 +114,11 @@ static const IniOpt g_display[] = {
      "2 = the pattern at the screen's own pixels, even at any resolution, 3 = see-through by blending instead.\n"
      "Bayonetta 3 only (gpu/vk/dither.c). 3 costs nothing measurable (diagnostics/dither-20261104)",
      INI_INT, INI_STARTUP, &g_opt_dither, 0, 3, NULL, "Object fade", "Game|Off|Even|Blend", 0, 0},
+    {"dither_cutouts", "1",
+     "With dither=3: 1 = an object whose fade comes from a texture keeps the game's checkerboard, which keeps the\n"
+     "Kraken's goo in chapter 14 right but leaves its debris as dots; 0 = blend those too, the debris fades but the\n"
+     "goo shows as a flat dark slab",
+     INI_INT, INI_STARTUP, &g_opt_dither_cutouts, 0, 1, NULL, "Fade cut-outs", "Blend|Game", 0, 0},
     {"model_lod", "0",
      "0 = models lose detail with distance as on the console; 1 = every model with detail levels stays at its finest\n"
      "(far ones with a single level still go). Needs a game module compiled with the .tablecalls file. Bayonetta 3\n"

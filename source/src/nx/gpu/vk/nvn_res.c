@@ -35,8 +35,11 @@ static float rp_xstretch(void) {
 }
 static int rp_scaling(void) { return g_vk_scale != 1.0f || rp_fsr_on() || rp_xstretch() != 1.0f; }
 /* what prepared shaders are for, beside the driver: the scaling (FragCoord in the game's pixels) and dither=N, which
-   change pixel stages. 0 and 1 with dither=0, as before it existed. The launcher reads it back (shaders_ready) */
-static int prep_mode(void) { return rp_scaling() + 2 * g_opt_dither; }
+   change pixel stages (and dither_cutouts=0, 8 more, only with dither=3). 0 and 1 with dither=0, as before it
+   existed. The launcher reads it back (shaders_ready) */
+static int prep_mode(void) {
+    return rp_scaling() + 2 * g_opt_dither + (g_opt_dither == 3 && !g_opt_dither_cutouts ? 8 : 0);
+}
 
 /* c7 (the video memory copies, below): the GPU's blocks of a range land in guest memory before the CPU reads it */
 static void own_land_range(int p, u64 off, u64 size);
@@ -259,7 +262,7 @@ static void dither_stage(u32** spv, size_t* words, ShaderInfo* si) {
             fade >= 0.0f ? ", every fade at a fixed alpha (SNX_DITHER_FADE)" : "");
     }
     if (mode == DITHER_GAME && fade < 0.0f) return;
-    n = dither_patch(spv, words, mode, fade, &blend);
+    n = dither_patch(spv, words, mode, fade, g_opt_dither_cutouts, &blend);
     if (!n) return;
     si->dither_blend = blend;
     stages++, compares += n;
