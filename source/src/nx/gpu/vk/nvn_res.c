@@ -542,7 +542,7 @@ static int prep_key(const PrepJob* j, const u8* code, const NvnStageKey* key, u3
     vk_lock();
     /* compute code comes without a program header, as cmdlist.c records it: framed as vk_nvn_shader frames it */
     spv = stage_spirv(j->stage, code, j->window, j->stage == ST_CS, j->cb, j->cb_size,
-                      j->stage == ST_CS ? j->cs_local : NULL, j->shared, key, &si, &words);
+                      j->stage == ST_CS ? j->cs_local : NULL, j->shared, key, &si, &words, NULL, NULL);
     vk_unlock();
     if (!spv) return 0;
     *in_mask = si.in_mask;
