@@ -32,6 +32,9 @@ int vk_nvn_shader(int stage, u64 code_gva, u32 window, int compute_stub, u64 cb1
 /* what a module's translation found: generic inputs read, outputs written, and whether the fragment program header
    declares colour outputs (sph word 18). 0 for no such module */
 int vk_nvn_shader_io(int mod, u32* in_mask, u32* out_mask, u32* frag_outputs);
+/* 1 when the module is a pixel stage whose fade dither=3 made a blend, and which has a cut-out twin for the passes
+   that can't blend (NvnPipeDesc.fade_cut) */
+int vk_nvn_shader_fade_cut(int mod);
 /* a vertex, fragment or compute stage the game gave a program: prepared by the workers before a draw or dispatch
    needs it. cs_local (the workgroup size) and shared are a compute stage's, NULL and 0 for the others */
 void vk_nvn_prep_add(int stage, u64 code_gva, u32 window, u64 cb1_gva, u32 cb1_size, const u32* cs_local, u32 shared);
@@ -56,6 +59,8 @@ typedef struct {
     u32 blend_on;        /* the colour state's blend enable per target */
     u8 blend[8][6];      /* per target: src and dst RGB, src and dst alpha (NVNblendFunc), RGB and alpha equation */
     u32 chanmask;        /* r, g, b, a write per target, 4 bits each */
+    u32 fade_cut;        /* a fading pixel stage (vk_nvn_shader_fade_cut) drawn with the depth test EQUAL: the colour
+                            pass of a depth prepass, which has to cut the object where the prepass did, not blend it */
 } NvnPipeDesc;
 /* the Vulkan pipeline for d in the renderer's layout (g_vk_playout) through its own vk_pipeline_get: 1 when there is
    one (*made: it was created now), 0 with the reason in why. Takes vk_lock to create */

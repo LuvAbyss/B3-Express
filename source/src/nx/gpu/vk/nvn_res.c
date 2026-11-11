@@ -232,6 +232,8 @@ int vk_nvn_pool_import(u64 cpu, u64 size) {
 #define MODULES 8192
 static struct {
     VkShaderModule mod;
+    VkShaderModule cut; /* dither=3, a stage made to blend its fade: the same with the even pattern's discard, for
+                           the pipelines that can't blend by it (pipe_key) */
     ShaderInfo si;
     u32 spv_hash; /* the same across runs, for the logs */
 } g_mod[MODULES];
@@ -245,8 +247,11 @@ static int cb1_read(u32 idx, u32 off, u32* out) {
 }
 /* dither=N: the game's screen-door fade in a pixel stage, changed as gpu/vk/dither.c says. SNX_DITHER_FADE=a (test
    only) gives every fading object alpha a, so the pattern shows on everything that has it. Blending needs dual-source
-   blending: without it the fade is only switched off */
-static void dither_stage(u32** spv, size_t* words, ShaderInfo* si) {
+   blending: without it the fade is only switched off. A stage made to blend also comes back as *cut (when cut isn't
+   NULL, the caller to free it), with the even pattern's discard instead: a pass that can't blend by the alpha (a depth
+   prepass, or the colour pass that draws only where that depth is equal) has to cut the object as its other pass does,
+   or the faded object's whole shape stays in the depth and hides what is behind it */
+static void dither_stage(u32** spv, size_t* words, ShaderInfo* si, u32** cut, size_t* cut_words) {
     static int mode = -1, stages, compares;
     static float fade = -1.0f;
     /* Stages that shape their alpha into a cut-out as well as fade it: the Kraken's goo in chapter 14 and the ground
@@ -279,7 +284,18 @@ static void dither_stage(u32** spv, size_t* words, ShaderInfo* si) {
         for (k = 0; k < (int)(sizeof patches / sizeof *patches); k++)
             if (patches[k] == h0) m = DITHER_EVEN;
     }
+    if (cut && m == DITHER_BLEND && (*cut = malloc(*words * 4))) { /* the stage as translated, for the even cut */
+        memcpy(*cut, *spv, *words * 4);
+        *cut_words = *words;
+    }
     n = dither_patch(spv, words, m, fade, &blend);
+    if (cut && *cut) {
+        int b = 0;
+        if (n <= 0 || !blend || dither_patch(cut, cut_words, DITHER_EVEN, fade, &b) <= 0) {
+            free(*cut);
+            *cut = NULL;
+        }
+    }
     if (n <= 0) return;
     if (getenv("SNX_DITHER_LOG"))
         LOG("nvn-live: object fade stage %08x: %d fades%s\n", h0, n, blend ? " (blended)" : m != mode ? " (even)" : "");
@@ -309,7 +325,8 @@ static u32 grain_word(int stage, const u8* code, u32 window) {
 }
 /* the stage's SPIR-V for key, the caller to free it. Under vk_lock: the translator's state is shared */
 static u32* stage_spirv(int stage, const u8* code, u32 window, int compute_stub, u64 cb1_gva, u32 cb1_size,
-                        const u32* cs_local, u32 shared, const NvnStageKey* key, ShaderInfo* out, size_t* words) {
+                        const u32* cs_local, u32 shared, const NvnStageKey* key, ShaderInfo* out, size_t* words,
+                        u32** cut, size_t* cut_words) {
     static u8 framed[0x10000 + 80];
     ShaderInfo si;
     VkCbReads reads = {NULL, 0};
@@ -352,7 +369,7 @@ static u32* stage_spirv(int stage, const u8* code, u32 window, int compute_stub,
     g_shader_instance_base_builtin = g_vk.has_shader_draw_parameters;
     spv = vk_translate_spirv(code, window, stage, &si, words, cb1_read, &reads);
     g_shader_instance_base_builtin = 0;
-    if (spv && stage == ST_FS) dither_stage(&spv, words, &si);
+    if (spv && stage == ST_FS) dither_stage(&spv, words, &si, cut, cut_words);
     g_cb1 = NULL;
     free(reads.r);
     *out = si;
@@ -385,8 +402,8 @@ int vk_nvn_shader(int stage, u64 code_gva, u32 window, int compute_stub, u64 cb1
                   u32 shared, const NvnStageKey* key, char* why, u32 why_size) {
     const u8* code = window ? gmem_ptr_untracked(code_gva, window) : NULL;
     ShaderInfo si;
-    size_t words = 0;
-    u32* spv;
+    size_t words = 0, cut_words = 0;
+    u32 *spv, *cut = NULL;
     int r = -1;
     why[0] = 0;
     if (!code || window > 0x10000 || stage < ST_VS || stage > ST_CS) {
@@ -394,7 +411,8 @@ int vk_nvn_shader(int stage, u64 code_gva, u32 window, int compute_stub, u64 cb1
         return -1;
     }
     vk_lock();
-    spv = stage_spirv(stage, code, window, compute_stub, cb1_gva, cb1_size, cs_local, shared, key, &si, &words);
+    spv = stage_spirv(stage, code, window, compute_stub, cb1_gva, cb1_size, cs_local, shared, key, &si, &words, &cut,
+                      &cut_words);
     if (!spv)
         snprintf(why, why_size, "%s", si.first_unsupported[0] ? si.first_unsupported : "not translated");
     else if (g_nmod == MODULES)
@@ -407,11 +425,19 @@ int vk_nvn_shader(int stage, u64 code_gva, u32 window, int compute_stub, u64 cb1
             for (w = 0; w < words; w++) h = (h ^ spv[w]) * 16777619u;
             g_mod[g_nmod].si = si;
             g_mod[g_nmod].spv_hash = h;
+            g_mod[g_nmod].cut = VK_NULL_HANDLE;
+            if (cut) {
+                VkShaderModuleCreateInfo ci = {
+                    .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = cut_words * 4, .pCode = cut};
+                if (vkCreateShaderModule(g_vk.dev, &ci, NULL, &g_mod[g_nmod].cut) != VK_SUCCESS)
+                    g_mod[g_nmod].cut = VK_NULL_HANDLE;
+            }
             r = g_nmod++;
             spv_dump(h, stage, spv, words, code, window, cb1_gva, cb1_size);
         } else
             snprintf(why, why_size, "vkCreateShaderModule refused it");
     }
+    free(cut);
     free(spv);
     vk_unlock();
     return r;
@@ -700,6 +726,7 @@ int vk_nvn_shader_io(int mod, u32* in_mask, u32* out_mask, u32* frag_outputs) {
     *frag_outputs = g_mod[mod].si.sph[18] != 0;
     return 1;
 }
+int vk_nvn_shader_fade_cut(int mod) { return mod >= 0 && mod < g_nmod && g_mod[mod].cut != VK_NULL_HANDLE; }
 
 /* ------------------------------------------------------------ formats (phase 3 step 3c part 2) */
 /* NVNformat to Vulkan, after B2recomp's runtime/nvn_vk_draw.c (comp_fmt, tex_vkfmt, vertex_vkfmt),
@@ -1074,12 +1101,17 @@ static int pipe_key(const NvnPipeDesc* d, PipeKey* k, u32* bstream, char* why, u
     }
     /* dither=3: a fading object blends by the alpha its stage now writes as the second source (dither.c), where the
        game draws it unblended into one target, the most dual-source blending allows */
-    if (d->mod[4] >= 0 && g_mod[d->mod[4]].si.dither_blend && d->ncolor == 1 && k->color[0] && !k->blend[0].en &&
-        g_vk.props.limits.maxFragmentDualSrcAttachments >= 1) {
-        k->blend[0].en = 1;
-        k->blend[0].sc = k->blend[0].sa = VK_BLEND_FACTOR_SRC1_ALPHA;
-        k->blend[0].dc = k->blend[0].da = VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
-        k->blend[0].cop = k->blend[0].aop = VK_BLEND_OP_ADD;
+    if (d->mod[4] >= 0 && g_mod[d->mod[4]].si.dither_blend) {
+        if (d->ncolor == 1 && k->color[0] && !k->blend[0].en && !d->fade_cut &&
+            g_vk.props.limits.maxFragmentDualSrcAttachments >= 1) {
+            k->blend[0].en = 1;
+            k->blend[0].sc = k->blend[0].sa = VK_BLEND_FACTOR_SRC1_ALPHA;
+            k->blend[0].dc = k->blend[0].da = VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
+            k->blend[0].cop = k->blend[0].aop = VK_BLEND_OP_ADD;
+        } else if (g_mod[d->mod[4]].cut) /* a depth prepass, a pass drawing where it is equal, or other targets:
+                                            without the cut, the faded object's whole shape stays in the depth and
+                                            hides the ground behind it, which then keeps the last frame's colour */
+            k->fs = g_mod[d->mod[4]].cut;
     }
     if (d->depth_format) {
         VkFormat f = target_fmt(d->depth_format);

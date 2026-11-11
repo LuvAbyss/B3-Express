@@ -1223,6 +1223,8 @@ static void draw_pipeline(const HostCmd* h) { /* lock held: a draw command, its 
         d.blend[i][5] = (u8)b;
     }
     d.chanmask = (u32)g_ds.chanmask;
+    /* depth test on, NVN_DEPTH_FUNC_EQUAL (3): the colour pass of a depth prepass */
+    d.fade_cut = d.depth_format && (g_ds.depth & 1) && (g_ds.depth >> 4 & 15) == 3 && vk_nvn_shader_fade_cut(d.mod[4]);
     t0 = plat_ns();
     s = vk_nvn_pipeline(&d, &made, why, sizeof why);
     g_fr_pipe_ns += plat_ns() - t0;
