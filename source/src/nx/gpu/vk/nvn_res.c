@@ -35,11 +35,8 @@ static float rp_xstretch(void) {
 }
 static int rp_scaling(void) { return g_vk_scale != 1.0f || rp_fsr_on() || rp_xstretch() != 1.0f; }
 /* what prepared shaders are for, beside the driver: the scaling (FragCoord in the game's pixels) and dither=N, which
-   change pixel stages (and dither_cutouts=0, 8 more, only with dither=3). 0 and 1 with dither=0, as before it
-   existed. The launcher reads it back (shaders_ready) */
-static int prep_mode(void) {
-    return rp_scaling() + 2 * g_opt_dither + (g_opt_dither == 3 && !g_opt_dither_cutouts ? 8 : 0);
-}
+   change pixel stages. 0 and 1 with dither=0, as before it existed. The launcher reads it back (shaders_ready) */
+static int prep_mode(void) { return rp_scaling() + 2 * g_opt_dither; }
 
 /* c7 (the video memory copies, below): the GPU's blocks of a range land in guest memory before the CPU reads it */
 static void own_land_range(int p, u64 off, u64 size);
@@ -252,7 +249,18 @@ static int cb1_read(u32 idx, u32 off, u32* out) {
 static void dither_stage(u32** spv, size_t* words, ShaderInfo* si) {
     static int mode = -1, stages, compares;
     static float fade = -1.0f;
-    int n, blend = 0;
+    /* Stages that shape their alpha into a cut-out and are not a fade: the Kraken's goo in chapter 14 (a box carved
+       to its shape by noise textures and the scene's depth, drawn as a mound on the arena). Blended, a cut-out shows
+       as a flat black slab, so these keep the game's discard. They are known by the FNV-1a hash of their translated
+       SPIR-V (the id the logs print), found by logging every blended draw on the Kraken route and keeping stages
+       back one by one until the slab was gone. Every other fade, the debris after a slam included, is blended.
+       Bayonetta 3 v1.2.0; a change of the translator changes the hashes (SNX_NVN_PREP=0 and the log line "object
+       fade stage" list the blended ones) */
+    static const u32 cutouts[] = {0xc70b81b3u, 0xf365d5d8u, 0xbf85cba5u, 0x66bb28fbu,
+                                  0x6e52579bu, 0xbd400088u, 0x2041db38u, 0xf9977847u};
+    int n, blend = 0, k;
+    u32 h0 = 2166136261u;
+    size_t w;
     if (mode < 0) {
         const char* e = getenv("SNX_DITHER_FADE");
         mode = g_opt_dither;
@@ -262,8 +270,13 @@ static void dither_stage(u32** spv, size_t* words, ShaderInfo* si) {
             fade >= 0.0f ? ", every fade at a fixed alpha (SNX_DITHER_FADE)" : "");
     }
     if (mode == DITHER_GAME && fade < 0.0f) return;
-    n = dither_patch(spv, words, mode, fade, g_opt_dither_cutouts, &blend);
+    for (w = 0; w < *words; w++) h0 = (h0 ^ (*spv)[w]) * 16777619u;
+    if (mode == DITHER_BLEND && fade < 0.0f)
+        for (k = 0; k < (int)(sizeof cutouts / sizeof *cutouts); k++)
+            if (cutouts[k] == h0) return;
+    n = dither_patch(spv, words, mode, fade, &blend);
     if (!n) return;
+    if (getenv("SNX_DITHER_LOG")) LOG("nvn-live: object fade stage %08x: %d fades%s\n", h0, n, blend ? " (blended)" : "");
     si->dither_blend = blend;
     stages++, compares += n;
     if (stages <= 3 || stages % 100 == 0) LOG("nvn-live: object fade: %d stages changed, %d fades\n", stages, compares);

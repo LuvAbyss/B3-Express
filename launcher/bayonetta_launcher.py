@@ -277,8 +277,7 @@ def prep_mode(text):
         dither = max(0, min(3, int(ini_get(text, 'dither', '3'))))
     except ValueError:
         dither = 0
-    extra = 8 if dither == 3 and ini_get(text, 'dither_cutouts', '1').strip() == '0' else 0
-    return int(scaled_mode(text)) + 2 * dither + extra
+    return int(scaled_mode(text)) + 2 * dither
 
 
 # the game's button_prompts values, as the Controller page names them

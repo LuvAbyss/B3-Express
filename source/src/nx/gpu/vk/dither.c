@@ -202,7 +202,7 @@ static uint32_t find_type(const Mod* m, uint32_t op, uint32_t x, uint32_t y, int
     return 0;
 }
 
-int dither_patch(uint32_t** spv_io, size_t* words_io, int mode, float fade_test, int keep_cutouts, int* blend) {
+int dither_patch(uint32_t** spv_io, size_t* words_io, int mode, float fade_test, int* blend) {
     const uint32_t* w = *spv_io;
     size_t words = *words_io;
     Mod m;
@@ -329,26 +329,6 @@ int dither_patch(uint32_t** spv_io, size_t* words_io, int mode, float fade_test,
         }
         mt.cmp = i, mt.fade_slot = fade_first ? 2 : 3, mt.fade = a[mt.fade_slot];
         match[nmatch++] = mt;
-    }
-    /* DITHER_BLEND is for fades: an alpha from the vertices and the material's constants that a scene fades over
-       time. An alpha from a sampled texture (other than the pattern) is a cut-out the discard shapes: the Kraken's
-       goo in chapter 14 is a box carved to its shape by two noise textures and the scene's depth, and blended it
-       showed as a flat black slab. Such a stage keeps the game's discard (keep_cutouts, the INI's dither_cutouts).
-       It also keeps the debris after a slam as the game's dots: the alpha of a fade made from a texture looks the
-       same to this test, so dither_cutouts=0 blends them all and brings the slab back */
-    if (nmatch && mode == DITHER_BLEND && keep_cutouts) {
-        memset(t, 0, m.bound);
-        for (i = m.body; i < m.n; i++) {
-            uint32_t op = op_of(&m, i);
-            const uint32_t* a = arg(&m, i);
-            if (op >= 87 && op <= 97 && len_of(&m, i) >= 4 && id_ok(&m, a[1]) && !tf[a[1]]) t[a[1]] = 1;
-        }
-        taint(&m, t, held, root);
-        for (k = 0; k < nmatch; k++)
-            if (id_ok(&m, match[k].fade) && t[match[k].fade]) {
-                nmatch = 0, found = 0;
-                goto done;
-            }
     }
     if (!nmatch || (mode == DITHER_GAME && fade_test < 0.0f)) {
         if (!nmatch) found = 0;
