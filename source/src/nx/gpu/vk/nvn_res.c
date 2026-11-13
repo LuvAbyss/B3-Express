@@ -4835,11 +4835,14 @@ void vk_nvn_live_present(u64 gpu, u64 cpu, const char* out, int all) {
             memset(g_rpt, 0, sizeof g_rpt);
         }
         {
-            static u64 spike_ns; /* SNX_NVN_SPIKE_MS: the time before the first window that gets profiled, 150 ms */
+            static u64 spike_ns; /* SNX_NVN_SPIKE_MS: the time before the first window, or after the last, that gets
+                                    profiled, 150 ms */
             if (!spike_ns)
                 spike_ns = (getenv("SNX_NVN_SPIKE_MS") ? (u64)atoi(getenv("SNX_NVN_SPIKE_MS")) : 150) * 1000000ull + 1;
             if (g_rp.last_present && g_rp.fr_first && g_rp.fr_first - g_rp.last_present >= spike_ns)
-                plat_prof_spike(g_rp.last_present, g_rp.fr_first, g_rp.frame); /* what ran before the first list */
+                plat_prof_spike(g_rp.last_present, g_rp.fr_first, g_rp.frame, "before its first window");
+            else if (g_rp.last_present && g_rp.fr_last && now - g_rp.fr_last >= spike_ns)
+                plat_prof_spike(g_rp.fr_last, now, g_rp.frame, "after its last window"); /* the game's own work */
         }
         /* what a frame's picture lacked: a dark frame in play is found by its time here */
         if (g_rp.fr_deferred || g_fr_null)

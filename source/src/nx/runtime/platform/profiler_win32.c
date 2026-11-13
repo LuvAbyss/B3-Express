@@ -95,6 +95,7 @@ static struct {
 static u32 g_ring_at;
 /* a spike to report (plat_prof_spike): set by the frame loop, read and cleared by the sampler */
 static u64 g_spike_from, g_spike_to, g_spike_frame;
+static const char* g_spike_what;
 static int g_spike_req;
 
 #if !defined(_M_ARM64) && !defined(__aarch64__)
@@ -160,8 +161,9 @@ static void key_text(u64 key, char* out, size_t n) {
             snprintf(out, n, "host %llx", (unsigned long long)key);
     }
 }
-void plat_prof_spike(u64 from_ns, u64 to_ns, u64 frame) {
+void plat_prof_spike(u64 from_ns, u64 to_ns, u64 frame, const char* what) {
     if (__atomic_load_n(&g_spike_req, __ATOMIC_ACQUIRE)) return; /* one at a time */
+    g_spike_what = what;
     g_spike_from = from_ns;
     g_spike_to = to_ns;
     g_spike_frame = frame;
@@ -169,7 +171,7 @@ void plat_prof_spike(u64 from_ns, u64 to_ns, u64 frame) {
 }
 /* the sampler, between rounds (no thread suspended): each thread's samples in the spike, and its top functions */
 static void spike_report(void) {
-    enum { CELLS = 1024, TOP = 6 };
+    enum { CELLS = 1024, TOP = 24 };
     static struct {
         u64 key;
         u32 thread, count;
@@ -186,12 +188,18 @@ static void spike_report(void) {
         if (k == n && n < CELLS) cell[n++] = (typeof(cell[0])){g_ring[i].key, t, 0};
         if (k < n) cell[k].count++;
     }
-    LOG("profile: frame %llu, %.1f ms before its first window, by thread (1 ms samples):\n",
-        (unsigned long long)g_spike_frame, (double)(g_spike_to - g_spike_from) / 1e6);
+    LOG("profile: frame %llu, %.1f ms %s, by thread (1 ms samples):\n", (unsigned long long)g_spike_frame,
+        (double)(g_spike_to - g_spike_from) / 1e6, g_spike_what);
     for (i = 0; i < PROF_THREADS; i++) {
         HANDLE h = __atomic_load_n(&g_threads[i], __ATOMIC_ACQUIRE);
-        u32 shown;
+        u32 shown, most = 0;
         if (per_thread[i] < 10) continue;
+        /* a thread that sat at one place outside the game and the runtime the whole time was waiting: not shown */
+        for (k = 0; k < n; k++)
+            if (cell[k].thread == i && (most == 0 || cell[k].count > cell[most - 1].count)) most = k + 1;
+        if (most && cell[most - 1].count * 10 >= per_thread[i] * 9 && !fn_at(cell[most - 1].key & ~(u64)1) &&
+            cell[most - 1].key - (u64)(size_t)&__ImageBase >= 0x10000000u)
+            continue;
         LOG("profile:   thread %lu, %u samples:\n", h ? (unsigned long)GetThreadId(h) : 0ul, per_thread[i]);
         for (shown = 0; shown < TOP; shown++) { /* the largest left for this thread, taken out as it is shown */
             u32 best = CELLS;

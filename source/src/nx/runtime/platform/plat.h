@@ -136,7 +136,7 @@ void plat_install_crash_handler(void);
 void plat_prof_start(void); /* starts the sampling profiler (the profile option): Windows only */
 /* with the profile option: logs, per thread, the functions sampled between from_ns and to_ns (plat_ns), the time a
    slow frame spent before its first window. Ignored while one is being reported */
-void plat_prof_spike(u64 from_ns, u64 to_ns, u64 frame);
+void plat_prof_spike(u64 from_ns, u64 to_ns, u64 frame, const char* what); /* what: a literal, for the log's line */
 #if defined(_WIN32)
 void plat_prof_add_thread(HANDLE h); /* a thread to sample; the profiler keeps its own handle */
 #endif

@@ -114,7 +114,7 @@ static void core_stats_nl(const KThread* t, const KThread* h, u64 ns) {
     if (ns > 30000000u && h) {
         LOG("cores: thread %u (host %u) waited %.1f ms for core %d, held by %u (host %u)\n", (u32)t->id,
             g_cw_host[t->id & 255], (double)ns / 1e6, t->on_core, (u32)h->id, g_cw_host[h->id & 255]);
-        plat_prof_spike(now - ns, now, h->id);
+        plat_prof_spike(now - ns, now, h->id, "of a wait for a core (the holder's id for the frame)");
     }
     int i, free_i = -1, j, top;
     for (i = 0; i < CW_SLOTS; i++) {

@@ -730,7 +730,8 @@ void plat_install_crash_handler(void) {
 }
 
 void plat_prof_start(void) {}
-void plat_prof_spike(u64 from_ns, u64 to_ns, u64 frame) {
+void plat_prof_spike(u64 from_ns, u64 to_ns, u64 frame, const char* what) {
+    (void)what;
     (void)from_ns;
     (void)to_ns;
     (void)frame;
