@@ -13,6 +13,8 @@ void frontend_frame(void); /* screenshots and the unattended limits, after each 
 
 /* the backend's .ini settings (the touch screen's mode) */
 extern const IniOpt g_backend_ini[];
+/* the keyboard and the mouse as player 1's controller: the mouse as the camera, and each control's keys */
+extern const IniOpt g_kbm_ini[];
 /* Offers a .ini or command line setting to the backend, the on-screen controls and the unattended options: 1 when
    one of them took it */
 int backend_ini(const char* k, const char* v);

@@ -204,6 +204,7 @@ static const Section g_sections[] = {
      0,
      {g_gamepad_ini, g_gamepad_map_ini, g_gamepad_players_ini},
      {NULL, SNX_GAMEPAD_MAP, SNX_GAMEPAD_PLAYERS}},
+    {"Keyboard and mouse", 0, {g_kbm_ini, NULL, NULL}, {NULL, NULL, NULL}},
     {"Network", 1, {g_network, NULL, NULL}, {NULL, NULL, NULL}},
     {"Debug", 1, {g_debug, NULL, NULL}, {NULL, NULL, NULL}}};
 #define SECTIONS ((int)(sizeof g_sections / sizeof *g_sections))

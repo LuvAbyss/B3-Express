@@ -175,6 +175,170 @@ void plat_audio_volume(PAudio* a, float volume) {
     pm_unlock(&g_audio_streams_lock);
 }
 
+/* ---- the keyboard and the mouse as player 1's controller ----
+   Each control has up to three keys or mouse buttons, in the .ini as their names between commas (key_a = Mouse Right,
+   X): a key by SDL's name for its scancode (its position, as on a US layout), Mouse Left, Mouse Right, Mouse Middle,
+   Mouse 4, Mouse 5, Wheel Up, Wheel Down. The mouse plays only while the window holds it (mouse_camera, taken with a
+   click in the window): its motion is the right stick, its buttons are controls. It is let go when the window loses
+   the focus and while the game's menu is open. Bits 0..15 are HidNpadButton's, 40..47 the stick keys and 48 walks */
+#define KBM_MOUSE 0x1000 /* + SDL's button number */
+#define KBM_WHEEL 0x2000 /* up, + 1 down */
+#define KBM_WALK  (1ull << 48)
+#define KBM_BINDS 3
+static const struct {
+    const char* key;
+    int bit;
+} KBM_ACT[] = {
+    {"key_a", 0},          {"key_b", 1},          {"key_x", 2},           {"key_y", 3},           {"key_lstick", 4},
+    {"key_rstick", 5},     {"key_l", 6},          {"key_r", 7},           {"key_zl", 8},          {"key_zr", 9},
+    {"key_plus", 10},      {"key_minus", 11},     {"key_left", 12},       {"key_up", 13},         {"key_right", 14},
+    {"key_down", 15},      {"key_move_left", 40}, {"key_move_up", 41},    {"key_move_right", 42}, {"key_move_down", 43},
+    {"key_look_left", 44}, {"key_look_up", 45},   {"key_look_right", 46}, {"key_look_down", 47},  {"key_walk", 48}};
+#define KBM_ACTS ((int)(sizeof KBM_ACT / sizeof *KBM_ACT))
+static u16 g_kbm_bind[KBM_ACTS][KBM_BINDS];
+static int g_mouse_cam = 1, g_mouse_sens = 100, g_mouse_invert;
+static int g_mouse_held_win; /* the window holds the mouse (relative mode) */
+static int g_mouse_again;    /* it did when the menu opened: taken again as it closes */
+static u64 g_mouse_buttons;  /* the controls its buttons hold */
+static u64 g_wheel_bits;     /* the controls a wheel notch pressed, for g_wheel_left more polls */
+static int g_wheel_left;
+static float g_mouse_dx, g_mouse_dy; /* its motion since the last poll */
+
+static int kbm_code(const char* name, size_t n) {
+    static const struct {
+        const char* name;
+        int code;
+    } M[] = {{"Mouse Left", KBM_MOUSE + SDL_BUTTON_LEFT},
+             {"Mouse Right", KBM_MOUSE + SDL_BUTTON_RIGHT},
+             {"Mouse Middle", KBM_MOUSE + SDL_BUTTON_MIDDLE},
+             {"Mouse 4", KBM_MOUSE + SDL_BUTTON_X1},
+             {"Mouse 5", KBM_MOUSE + SDL_BUTTON_X2},
+             {"Wheel Up", KBM_WHEEL},
+             {"Wheel Down", KBM_WHEEL + 1}};
+    char one[32];
+    size_t i;
+    while (n && (*name == ' ' || *name == '\t')) name++, n--;
+    while (n && (name[n - 1] == ' ' || name[n - 1] == '\t' || name[n - 1] == '\r')) n--;
+    if (!n || n >= sizeof one) return 0;
+    memcpy(one, name, n);
+    one[n] = 0;
+    for (i = 0; i < sizeof M / sizeof *M; i++)
+        if (!SDL_strcasecmp(one, M[i].name)) return M[i].code;
+    return (int)SDL_GetScancodeFromName(one); /* SDL_SCANCODE_UNKNOWN (0) for a name it doesn't have */
+}
+/* a control's keys from the .ini: names between commas, none for a control with no key */
+static void kbm_bind_set(const IniOpt* o, const char* v) {
+    int a, n = 0;
+    for (a = 0; a < KBM_ACTS; a++)
+        if (!strcmp(o->key, KBM_ACT[a].key)) break;
+    if (a == KBM_ACTS) return;
+    memset(g_kbm_bind[a], 0, sizeof g_kbm_bind[a]);
+    while (*v && n < KBM_BINDS) {
+        const char* e = strchr(v, ',');
+        size_t len = e ? (size_t)(e - v) : strlen(v);
+        int code = kbm_code(v, len);
+        if (code)
+            g_kbm_bind[a][n++] = (u16)code;
+        else if (len)
+            LOG("input: %s names no key or mouse button with \"%.*s\"\n", o->key, (int)len, v);
+        v += len + (e != NULL);
+    }
+    keys_held = g_mouse_buttons = 0; /* a key held across the change would stay held under its old control */
+}
+/* the controls a key (its scancode), a mouse button (KBM_MOUSE + n) or a wheel notch holds */
+static u64 kbm_bits(int code) {
+    u64 b = 0;
+    int a, i;
+    if (!code) return 0;
+    for (a = 0; a < KBM_ACTS; a++)
+        for (i = 0; i < KBM_BINDS; i++)
+            if (g_kbm_bind[a][i] == code) b |= 1ull << KBM_ACT[a].bit;
+    return b;
+}
+static void mouse_hold(int on) {
+    if (!g_win || g_mouse_held_win == on) return;
+    if (!SDL_SetWindowRelativeMouseMode(g_win, on != 0) && on) {
+        LOG_LIMIT(4, "input: the window can't hold the mouse: %s\n", SDL_GetError());
+        return;
+    }
+    g_mouse_held_win = on;
+    g_mouse_buttons = 0;
+    g_wheel_bits = 0;
+    g_mouse_dx = g_mouse_dy = 0;
+}
+static void mouse_cam_set(const IniOpt* o, const char* v) {
+    (void)o;
+    (void)v;
+    if (!g_mouse_cam) {
+        mouse_hold(0);
+        g_mouse_again = 0;
+    }
+}
+/* the right stick from the mouse's motion of one poll. The game turns the camera at a speed in proportion to the
+   stick, so the motion of a poll as the stick of that poll turns it as far as the mouse moved, up to the stick's
+   end: 80 counts a poll at 100 percent. The stick starts past the game's dead zone, or slow motion would do nothing,
+   and half of the poll before stays in, as polls and mouse reports don't line up */
+static void mouse_stick(i32* rx, i32* ry) {
+    static float px, py;
+    const float dead = 0.12f;
+    float x = g_mouse_dx * (float)g_mouse_sens / 8000.0f, y = g_mouse_dy * (float)g_mouse_sens / 8000.0f, m;
+    g_mouse_dx = g_mouse_dy = 0;
+    x = 0.6f * x + 0.4f * px;
+    y = 0.6f * y + 0.4f * py;
+    px = x;
+    py = y;
+    m = SDL_sqrtf(x * x + y * y);
+    if (m < 0.002f) {
+        px = py = 0;
+        return;
+    }
+    {
+        float out = dead + (1.0f - dead) * (m > 1.0f ? 1.0f : m);
+        *rx = (i32)(x / m * out * 32767.0f);
+        *ry = (i32)((g_mouse_invert ? y : -y) / m * out * 32767.0f);
+    }
+}
+#define KBM_KEY(k, d, said, label) {k, d, said, INI_TEXT, 0, NULL, 0, 0, kbm_bind_set, label, NULL, 0, 0}
+const IniOpt g_kbm_ini[] = {
+    {"mouse_camera", "1",
+     "1 = a click in the window gives the mouse to the game: it turns the camera (the right stick) and its buttons\n"
+     "are controls, until the window loses the focus or the game's menu opens (Esc, F2). 0 = the mouse stays a pointer",
+     INI_INT, 0, &g_mouse_cam, 0, 1, mouse_cam_set, "Mouse camera", "Off|On", 0, 0},
+    {"mouse_sensitivity", "100", "How far the camera turns for the mouse's motion, in percent", INI_INT, 0,
+     &g_mouse_sens, 10, 500, NULL, "Mouse sensitivity", "#%", 10, 0},
+    {"mouse_invert_y", "0", "1 = the mouse pushed away looks down", INI_INT, 0, &g_mouse_invert, 0, 1, NULL,
+     "Invert mouse Y", "Off|On", 0, 0},
+    KBM_KEY("key_a", "Mouse Right, X",
+            "The keys and mouse buttons of each control, up to three between commas. Keys by SDL's name for their\n"
+            "position on a US layout (W, Left Shift, Space, Return, Up); Mouse Left, Mouse Right, Mouse Middle,\n"
+            "Mouse 4, Mouse 5, Wheel Up and Wheel Down work while the game has the mouse. Nothing = no key",
+            "A"),
+    KBM_KEY("key_b", "Space, Z", NULL, "B"),
+    KBM_KEY("key_x", "Mouse Left, C", NULL, "X"),
+    KBM_KEY("key_y", "F, V", NULL, "Y"),
+    KBM_KEY("key_l", "Q", NULL, "L"),
+    KBM_KEY("key_r", "E", NULL, "R"),
+    KBM_KEY("key_zl", "Left Ctrl, 1", NULL, "ZL"),
+    KBM_KEY("key_zr", "Left Shift, 3", NULL, "ZR"),
+    KBM_KEY("key_plus", "Return", NULL, "Plus"),
+    KBM_KEY("key_minus", "Backspace, Tab", NULL, "Minus"),
+    KBM_KEY("key_lstick", "T", NULL, "Left stick press"),
+    KBM_KEY("key_rstick", "Mouse Middle, R", NULL, "Right stick press"),
+    KBM_KEY("key_left", "Left", NULL, "D-Pad left"),
+    KBM_KEY("key_up", "Up", NULL, "D-Pad up"),
+    KBM_KEY("key_right", "Right", NULL, "D-Pad right"),
+    KBM_KEY("key_down", "Down", NULL, "D-Pad down"),
+    KBM_KEY("key_move_left", "A", NULL, "Left stick left"),
+    KBM_KEY("key_move_up", "W", NULL, "Left stick up"),
+    KBM_KEY("key_move_right", "D", NULL, "Left stick right"),
+    KBM_KEY("key_move_down", "S", NULL, "Left stick down"),
+    KBM_KEY("key_look_left", "J", NULL, "Right stick left"),
+    KBM_KEY("key_look_up", "I", NULL, "Right stick up"),
+    KBM_KEY("key_look_right", "L", NULL, "Right stick right"),
+    KBM_KEY("key_look_down", "K", NULL, "Right stick down"),
+    KBM_KEY("key_walk", "Left Alt", "Held, the left stick's keys push it less than half way: a walk", "Walk"),
+    {NULL, NULL, NULL, 0, 0, NULL, 0, 0, NULL, NULL, NULL, 0, 0}};
+
 /* the game's touch screen: 0 nothing, 1 the fingers, 2 the fingers and the mouse's left button (ini key touch) */
 static int g_touch_mode = 2;
 static u64 g_touch_ids[SNX_HID_TOUCHES]; /* the finger in each slot of g_touch */
@@ -202,6 +366,7 @@ void backend_touch_set(int mode) {
 int backend_ini(const char* k, const char* v) {
     const IniOpt* o = ini_find(g_backend_ini, k);
     int known;
+    if (!o) o = ini_find(g_kbm_ini, k);
     /* the in-game menu reads the touch mode, and the renderer the on-screen controls, under ui_lock */
     ui_lock();
     if (o) ini_read(o, v);
@@ -374,12 +539,14 @@ int backend_vk_surface(VkInstance instance, VkSurfaceKHR* surface) {
 static const char* HELP =
     "Controller: A, B, X and Y where the console's are (gamepad_swap_ab=1 swaps A and B). Home: "
     "the game's menu.\n\n"
-    "Keyboard (keys by position, as on a US layout):\n"
-    "  Arrows = D-Pad     W A S D = left stick    I J K L = right stick\n"
-    "  X / Space = A    Z = B    C = X    V = Y\n"
-    "  Q = L   E = R   1 = ZL   3 = ZR   Enter = +   Backspace = -\n\n"
+    "Keyboard and mouse (as set at first; the keys are in the settings, by position as on a US layout):\n"
+    "  Click in the window: the mouse turns the camera. Esc, F2 or Alt+Tab gives it back.\n"
+    "  W A S D = left stick (Left Alt: walk)    mouse or I J K L = right stick    Arrows = D-Pad\n"
+    "  Mouse Left / C = X    Mouse Right / X = A    Space / Z = B    F / V = Y\n"
+    "  Q = L   E = R   Left Ctrl / 1 = ZL   Left Shift / 3 = ZR   Enter = +   Backspace / Tab = -\n"
+    "  T = left stick press    Mouse Middle / R = right stick press\n\n"
     "F1 = this help   F2 = the game's menu   F3 = screenshot   F4 = FPS limit on / off\n"
-    "F5 = thread dump   F6 = capture a frame for a bug report   F11 / Alt+Enter = fullscreen   Esc = quit";
+    "F5 = thread dump   F6 = capture a frame for a bug report   F11 / Alt+Enter = fullscreen   Esc = the game's menu, with Exit";
 
 static PadKind gamepad_kind(int type) {
     switch (type) {
@@ -390,38 +557,9 @@ static PadKind gamepad_kind(int type) {
     }
 }
 
-/* keys -> HidNpadButton bits; 40..47 are the stick keys, turned into axes in video_poll. By scancode, the key's
-   position: the keycode depends on the layout and on the modifiers, so Shift pressed while 1 was held made its release
-   a different key, and ZL stayed held */
-static u64 keymap(SDL_Scancode k) {
-    switch (k) {
-        case SDL_SCANCODE_X:
-        case SDL_SCANCODE_SPACE: return 1ull << 0; /* A */
-        case SDL_SCANCODE_Z: return 1ull << 1;     /* B */
-        case SDL_SCANCODE_C: return 1ull << 2;     /* X */
-        case SDL_SCANCODE_V: return 1ull << 3;     /* Y */
-        case SDL_SCANCODE_Q: return 1ull << 6;     /* L */
-        case SDL_SCANCODE_E: return 1ull << 7;     /* R */
-        case SDL_SCANCODE_1: return 1ull << 8;     /* ZL */
-        case SDL_SCANCODE_3: return 1ull << 9;     /* ZR */
-        case SDL_SCANCODE_RETURN: return 1ull << 10;
-        case SDL_SCANCODE_BACKSPACE: return 1ull << 11;
-        case SDL_SCANCODE_LEFT: return 1ull << 12;
-        case SDL_SCANCODE_UP: return 1ull << 13;
-        case SDL_SCANCODE_RIGHT: return 1ull << 14;
-        case SDL_SCANCODE_DOWN: return 1ull << 15;
-        case SDL_SCANCODE_A: return 1ull << 40;
-        case SDL_SCANCODE_W: return 1ull << 41;
-        case SDL_SCANCODE_D: return 1ull << 42;
-        case SDL_SCANCODE_S: return 1ull << 43;
-        case SDL_SCANCODE_J: return 1ull << 44;
-        case SDL_SCANCODE_I: return 1ull << 45;
-        case SDL_SCANCODE_L: return 1ull << 46;
-        case SDL_SCANCODE_K: return 1ull << 47;
-        default: break;
-    }
-    return 0;
-}
+/* a key's controls, by scancode, the key's position: the keycode depends on the layout and on the modifiers, so Shift
+   pressed while 1 was held made its release a different key, and ZL stayed held */
+static u64 keymap(SDL_Scancode k) { return kbm_bits((int)k); }
 
 /* g_fullscreen follows the window: also set from the fullscreen events, for a change the window manager made */
 static void set_fullscreen(int on) {
@@ -733,6 +871,7 @@ static void hotkey(SDL_Keycode k) {
     switch (k) {
         case SDLK_F1: {
             int fs = g_fullscreen;
+            mouse_hold(0); /* a pointer for the box */
             if (fs) set_fullscreen(0);
             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "ScarletNX", HELP, g_win);
             if (fs) set_fullscreen(1);
@@ -951,6 +1090,43 @@ static void touch_mouse(const SDL_Event* e) {
             touch_up(&g_touch, g_touch_ids, SNX_TOUCH_MOUSE);
     }
 }
+/* A mouse event the game's controller takes: every one while the window holds the mouse, and the click that gives
+   it the mouse (mouse_camera, with no on-screen controls shown, which the mouse works otherwise). 0 for the others:
+   the pointer's, as before */
+static int kbm_mouse_event(const SDL_Event* e) {
+    if (e->type == SDL_EVENT_MOUSE_WHEEL) {
+        if (g_mouse_held_win && e->wheel.y != 0) {
+            g_wheel_bits |= kbm_bits(KBM_WHEEL + (e->wheel.y < 0));
+            g_wheel_left = 4; /* a notch is a press of four polls: the game samples the pad each frame */
+        }
+        return g_mouse_held_win;
+    }
+    if (e->type == SDL_EVENT_MOUSE_MOTION) {
+        if (!g_mouse_held_win || e->motion.which == SDL_TOUCH_MOUSEID) return 0;
+        g_mouse_dx += e->motion.xrel;
+        g_mouse_dy += e->motion.yrel;
+        return 1;
+    }
+    if (e->button.which == SDL_TOUCH_MOUSEID) return 0;
+    if (g_mouse_held_win) {
+        if (e->type == SDL_EVENT_MOUSE_BUTTON_DOWN)
+            g_mouse_buttons |= kbm_bits(KBM_MOUSE + e->button.button);
+        else
+            g_mouse_buttons &= ~kbm_bits(KBM_MOUSE + e->button.button);
+        return 1;
+    }
+    if (e->type == SDL_EVENT_MOUSE_BUTTON_DOWN && e->button.button == SDL_BUTTON_LEFT && g_mouse_cam) {
+        int shown;
+        ui_lock();
+        shown = vpad_shown();
+        ui_unlock();
+        if (!shown) {
+            mouse_hold(1); /* this click only takes the mouse: it presses nothing */
+            return g_mouse_held_win;
+        }
+    }
+    return 0;
+}
 void video_poll(void) {
     SDL_Event e;
     char* left = __atomic_load_n(&g_fatal_left, __ATOMIC_ACQUIRE);
@@ -961,6 +1137,10 @@ void video_poll(void) {
     }
     /* the menu had the controls when this poll began: the press that closes it (B) is in this poll's state */
     int menu_had = overlay_shown() || vpad_editing();
+    if (menu_had && g_mouse_held_win) { /* the menu has a pointer */
+        mouse_hold(0);
+        g_mouse_again = 1;
+    }
     while (!g_opt_headless && SDL_PollEvent(&e)) {
         if (overlay_event(&e)) continue;
         switch (e.type) {
@@ -985,7 +1165,10 @@ void video_poll(void) {
             case SDL_EVENT_FINGER_CANCELED: touch_finger(&e); break;
             case SDL_EVENT_MOUSE_BUTTON_DOWN:
             case SDL_EVENT_MOUSE_BUTTON_UP:
-            case SDL_EVENT_MOUSE_MOTION: touch_mouse(&e); break;
+            case SDL_EVENT_MOUSE_MOTION:
+            case SDL_EVENT_MOUSE_WHEEL:
+                if (!kbm_mouse_event(&e) && e.type != SDL_EVENT_MOUSE_WHEEL) touch_mouse(&e);
+                break;
             case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
                 g_fullscreen = 1;
                 wsafe_set();
@@ -995,8 +1178,14 @@ void video_poll(void) {
                 wsafe_set();
                 break;
             case SDL_EVENT_KEY_DOWN:
-                if (e.key.key == SDLK_ESCAPE) { /* a fresh press: the repeats of the Esc that closed the menu don't */
-                    if (!e.key.repeat) g_quit = 1;
+                /* Esc opens the game's menu, which has Exit: it ended the game at once, a key pressed by habit on
+                   a keyboard. A fresh press: the repeats of the Esc that closed the menu don't open it again */
+                if (e.key.key == SDLK_ESCAPE) {
+                    if (!e.key.repeat) {
+                        ui_lock();
+                        menu_open(1);
+                        ui_unlock();
+                    }
                     break;
                 }
                 if (e.key.key == SDLK_RETURN && (e.key.mod & SDL_KMOD_ALT)) {
@@ -1014,6 +1203,8 @@ void video_poll(void) {
             case SDL_EVENT_WINDOW_FOCUS_LOST:
                 audio_focus(0);
                 keys_held = 0;
+                mouse_hold(0); /* the pointer back, for the window that took the focus */
+                g_mouse_again = 0;
                 ui_lock();
                 vpad_release();
                 overlay_pointers_reset(); /* lifts that come without their presses don't tap the menu */
@@ -1029,12 +1220,22 @@ void video_poll(void) {
     }
     /* the scripted presses act like keys, stick keys included. Bits 16..23 (the stick directions as buttons) can be
        scripted too, but the stick keys (40..47) are no npad buttons */
-    u64 s = unattended_buttons(), k = keys_held | s;
+    if (g_wheel_left && !--g_wheel_left) g_wheel_bits = 0;
+    if (g_mouse_again && !menu_had && !overlay_shown() && !vpad_editing()) { /* the menu closed: the mouse again */
+        g_mouse_again = 0;
+        mouse_hold(g_mouse_cam);
+    }
+    u64 s = unattended_buttons(), k = keys_held | g_mouse_buttons | g_wheel_bits | s;
     u64 nonpad = (k & 0xFFFFull) | (s & 0xFF0000ull), b;
     i32 st[4], pad[4], pad0[4];
     u64 pb;
     input_key_sticks(k, st);
     i32 lx = st[0], ly = st[1], rx = st[2], ry = st[3];
+    if (k & KBM_WALK) { /* the game walks under about half the stick's travel */
+        lx = lx * 2 / 5;
+        ly = ly * 2 / 5;
+    }
+    if (g_mouse_held_win) mouse_stick(&rx, &ry);
     pm_lock(&g_pad_input_lock);
     /* Each SDL slot is one guest Npad. Keyboard, scripted and on-screen input also drive No1. */
     static u32 previous_ids[SNX_GAMEPADS];

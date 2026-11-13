@@ -368,15 +368,21 @@ detected joystick, whether it has an SDL mapping, and any gamepad open error. On
 the hidraw nodes of the console's controllers, for Joy-Con features. Reload udev rules and reconnect the controller
 after installation. Other HIDAPI controllers may need their vendor's own hidraw rule.
 
-| Keyboard | Switch |
+| Keyboard and mouse, as first set | Switch |
 | --- | --- |
-| Arrows; WASD / IJKL | D-pad; L/R sticks |
-| X or Space / Z / C / V | A / B / X / Y |
-| Q / E / 1 / 3 | L / R / ZL / ZR |
-| Enter / Backspace | Plus / Minus |
+| Arrows; WASD; the mouse or IJKL | D-pad; left stick; right stick |
+| Mouse Right or X / Space or Z / Mouse Left or C / F or V | A / B / X / Y |
+| Q / E / Left Ctrl or 1 / Left Shift or 3 | L / R / ZL / ZR |
+| Enter / Backspace or Tab | Plus / Minus |
+| T / Mouse Middle or R; Left Alt held | Stick presses; a walk |
+
+A click in the window gives the game the mouse (`mouse_camera`): its motion turns the camera and its buttons are
+controls until the window loses the focus or the game's menu opens. Each control's keys are in the settings file's
+`[Keyboard and mouse]` section (`key_a = Mouse Right, X`), up to three names between commas, with
+`mouse_sensitivity` and `mouse_invert_y`.
 
 F1 help; F2 the game's menu; F3 screenshot; F4 FPS limit off and on; F5 thread dump; F11/Alt+Enter fullscreen;
-Escape quit. A window shows at most one image per refresh and drops the rest unless images tear, and the game keeps
+Escape the game's menu, which has Exit. A window shows at most one image per refresh and drops the rest unless images tear, and the game keeps
 the pace `fps_limit` sets.
 
 In the game's menu the arrows, Enter and Escape move, select and go back; a gamepad's D-pad or left stick, A and
