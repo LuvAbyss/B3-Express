@@ -560,7 +560,7 @@ extern u64 g_vk_prefetch_hits, g_vk_prefetch_stale, g_vk_prefetch_kept;
    before, never */
 extern u64 g_vk_made_at_draw[4];
 VkPipelineCache vk_pipeline_cache(void); /* for pipelines made elsewhere (compute) */
-void vk_pipeline_save(void);
+void vk_pipeline_save(int last);
 VkShaderModule vk_module_spv(const u32* words, size_t count);
 VkShaderModule vk_module_spv_location(const u32* words, size_t count, u32 location);
 

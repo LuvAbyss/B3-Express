@@ -292,7 +292,7 @@ void snx_save_before_exit(void) {
     pm_lock(&lock);
     if (!saved) {
         save_hints();
-        if (g_renderer && g_renderer->save) g_renderer->save();
+        if (g_renderer && g_renderer->save) g_renderer->save(1);
         saved = 1;
     }
     pm_unlock(&lock);
@@ -314,7 +314,7 @@ static void saver(void* arg) {
         while (!g_saver_wanted) pc_wait(&g_saver_cv, &g_saver_lk, -1);
         g_saver_wanted = 0;
         pm_unlock(&g_saver_lk);
-        g_renderer->save();
+        g_renderer->save(0);
         pm_lock(&g_saver_lk);
     }
 }
@@ -329,7 +329,7 @@ static void save_in_background(void) {
     g_saver_wanted = 1;
     if (state > 0) pc_signal(&g_saver_cv);
     pm_unlock(&g_saver_lk);
-    if (state < 0) g_renderer->save(); /* no thread: here, as before */
+    if (state < 0) g_renderer->save(0); /* no thread: here, as before */
 }
 
 #define STALL_NS ((u64)15000000000u) /* this long without a new frame is worth a line and a dump */

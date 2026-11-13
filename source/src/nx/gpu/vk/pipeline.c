@@ -22,11 +22,56 @@
 /* The caches live in shader_cache/ next to the games, shared by all of them, wherever the runtime was started from */
 static char g_cache_dir[1100], g_pcache_path[1200], g_pcache_tmp[1230];
 static int g_pcache_dirty; /* pipelines made since the cache was last written (atomic: it is saved outside vk_lock) */
+static u64 g_pcache_used;  /* when the newest of them was made (atomic) */
+static void pcache_note(void) {
+    __atomic_store_n(&g_pcache_used, plat_ns(), __ATOMIC_RELAXED);
+    __atomic_store_n(&g_pcache_dirty, 1, __ATOMIC_RELAXED);
+}
 
 VkPipelineLayout g_vk_playout;
 VkDescriptorSetLayout g_vk_dslayout[5];
 u32 g_vk_stage_sets;
 static VkPipelineCache g_pcache;
+static size_t g_pcache_saved; /* its size as loaded or last written (vk_pipeline_save) */
+/* Whether size bytes at data, the pipeline cache's file, may go to the driver: they start with the header Vulkan puts
+   first in a pipeline cache's data (VkPipelineCacheHeaderVersionOne, least significant byte first), and it names this
+   device: its vendor, device and pipelineCacheUUID, which changes with the driver's build. Vulkan lets a driver be
+   given only data it gave out, whole, and some drivers do not check what they are given: a file cut short by a run
+   that stopped while writing, or one from another GPU or driver. 0, or -1 with what was found in why. From upstream
+   ScarletNX's snx_vk_pipeline_cache_check (911fd5e9) */
+static u32 pcache_le32(const u8* p) { return p[0] | (u32)p[1] << 8 | (u32)p[2] << 16 | (u32)p[3] << 24; }
+static int pcache_check(const void* data, size_t size, char* why, size_t n) {
+    const u8* p = (const u8*)data;
+    const VkPhysicalDeviceProperties* props = &g_vk.props;
+    u32 header, version, vendor, device;
+    *why = 0;
+    if (size < 16 + VK_UUID_SIZE) {
+        snprintf(why, n, "holds %zu bytes, fewer than the %u of a pipeline cache's header", size,
+                 (unsigned)(16 + VK_UUID_SIZE));
+        return -1;
+    }
+    header = pcache_le32(p), version = pcache_le32(p + 4), vendor = pcache_le32(p + 8), device = pcache_le32(p + 12);
+    if (header < 16 + VK_UUID_SIZE || header > size) {
+        snprintf(why, n, "has a header of %u bytes, where a pipeline cache's is %u or more and within the file's %zu",
+                 header, (unsigned)(16 + VK_UUID_SIZE), size);
+        return -1;
+    }
+    if (version != VK_PIPELINE_CACHE_HEADER_VERSION_ONE) {
+        snprintf(why, n, "has a header of version %u, where Vulkan's is %u", version,
+                 (unsigned)VK_PIPELINE_CACHE_HEADER_VERSION_ONE);
+        return -1;
+    }
+    if (vendor != props->vendorID || device != props->deviceID) {
+        snprintf(why, n, "was written for the GPU %04x:%08x, and this one is %04x:%08x", vendor, device,
+                 (unsigned)props->vendorID, (unsigned)props->deviceID);
+        return -1;
+    }
+    if (memcmp(p + 16, props->pipelineCacheUUID, VK_UUID_SIZE)) {
+        snprintf(why, n, "was written by another build of the driver (its pipeline cache UUID is not this one's)");
+        return -1;
+    }
+    return 0;
+}
 /* the channel and stage whose bound constant buffers the translator reads, for the vk_shader_get call running */
 static const GpuChannel* g_sh_ch;
 static int g_sh_bind;
@@ -265,19 +310,30 @@ void vk_pipeline_init(void) {
     unsigned pid = (unsigned)getpid();
 #endif
     snprintf(g_pcache_tmp, sizeof g_pcache_tmp, "%s.%u.tmp", g_pcache_path, pid);
-    /* the driver's compiled pipelines from earlier runs; it ignores data from another device or driver version */
+    /* the driver's compiled pipelines from earlier runs, when the file is this driver's own (pcache_check) */
     VkPipelineCacheCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
     PFileMap data;
+    char why[256];
     if (!plat_file_map(&data, g_pcache_path) && data.data) {
-        ci.initialDataSize = (size_t)data.size;
-        ci.pInitialData = data.data;
+        if (pcache_check(data.data, (size_t)data.size, why, sizeof why))
+            LOG("vulkan: the pipeline cache file %s, so the pipeline cache starts empty\n", why);
+        else {
+            ci.initialDataSize = (size_t)data.size;
+            ci.pInitialData = data.data;
+        }
     }
     if (!VK_OK(vkCreatePipelineCache(g_vk.dev, &ci, NULL, &g_pcache)) && ci.initialDataSize) {
+        LOG("vulkan: the driver refused the pipeline cache file's %zu bytes, so the pipeline cache starts empty\n",
+            ci.initialDataSize);
         ci.initialDataSize = 0;
         ci.pInitialData = NULL;
         VK_OK(vkCreatePipelineCache(g_vk.dev, &ci, NULL, &g_pcache));
     }
-    if (ci.initialDataSize) LOG("vulkan: pipeline cache loaded (%zu KB)\n", ci.initialDataSize >> 10);
+    if (ci.initialDataSize) {
+        LOG("vulkan: pipeline cache loaded (%zu KB)\n", ci.initialDataSize >> 10);
+        /* what the driver would write back now: only a cache grown past this is worth writing (vk_pipeline_save) */
+        if (vkGetPipelineCacheData(g_vk.dev, g_pcache, &g_pcache_saved, NULL) != VK_SUCCESS) g_pcache_saved = 0;
+    }
     plat_file_unmap(&data); /* the cache copied it, and a mapped file can't be replaced on Windows */
 }
 
@@ -840,7 +896,7 @@ VkPipeline vk_pipeline_get(const PipeKey* k) {
     p->k = *k;
     p->h = h;
     p->p = pipe_create(k, 0);
-    __atomic_store_n(&g_pcache_dirty, 1, __ATOMIC_RELAXED);
+    pcache_note();
     p->next = g_pipeh[b];
     g_pipeh[b] = p;
     return p->p;
@@ -859,7 +915,7 @@ void vk_pipeline_prep(VkShaderModule m, int vertex) {
     pipe_create(&k, 1);
 }
 const char* vk_pipeline_cache_dir(void) { return g_cache_dir; }
-void vk_pipeline_mark_dirty(void) { __atomic_store_n(&g_pcache_dirty, 1, __ATOMIC_RELAXED); }
+void vk_pipeline_mark_dirty(void) { pcache_note(); }
 int vk_cpu_threads(void) {
 #if defined(_WIN32)
     SYSTEM_INFO si;
@@ -877,37 +933,62 @@ void vk_thread_low(void) {
 }
 VkPipeline vk_pipeline_make(const PipeKey* k) {
     VkPipeline p = pipe_create(k, 0);
-    __atomic_store_n(&g_pcache_dirty, 1, __ATOMIC_RELAXED);
+    pcache_note();
     return p;
 }
 
 VkPipelineCache vk_pipeline_cache(void) {
-    __atomic_store_n(&g_pcache_dirty, 1, __ATOMIC_RELAXED);
+    pcache_note();
     return g_pcache;
 }
-/* writes the pipeline cache when pipelines were made since the last write. Called every few seconds and at exit
-   (the renderer's save), outside vk_lock: the driver synchronizes the cache itself. Saves one at a time, so the one
-   at exit waits for a periodic one in progress to finish its file before the process ends */
+/* Writes the pipeline cache when it has grown since it was last written (or loaded) and no pipeline was made for
+   PCACHE_QUIET_NS; last: at exit, whenever it has grown. The copy out of the driver holds the driver's lock on the
+   cache, 100 ms for 600 MB, and every pipeline being made waits for it: saved each 5 s whenever a pipeline had been
+   made, even one the cache already had, that was one draw of 50-110 ms in most fights, and 600 MB written to disk
+   each time (diagnostics/bench-20261112). The size alone is asked for in no time. The quiet time and the write
+   tried again after one that failed are upstream ScarletNX's (6f704735, f7649a16). Called outside vk_lock: the
+   driver synchronizes the cache itself. Saves one at a time, so the one at exit waits for a periodic one in progress
+   to finish its file before the process ends */
+#define PCACHE_QUIET_NS 20000000000ull
 static PMutex g_psave = PMUTEX_INIT;
-void vk_pipeline_save(void) {
+void vk_pipeline_save(int last) {
+    size_t n = 0;
+    void* d;
+    const char* why = NULL;
+    u64 t0, t1 = 0;
+    VkResult r;
+    if (!last && plat_ns() - __atomic_load_n(&g_pcache_used, __ATOMIC_RELAXED) < PCACHE_QUIET_NS) return;
     pm_lock(&g_psave);
-    if (!g_pcache || !__atomic_exchange_n(&g_pcache_dirty, 0, __ATOMIC_RELAXED)) {
+    /* waiting for another save can span new pipelines: asked again before the flag is cleared */
+    if (!g_pcache || (!last && plat_ns() - __atomic_load_n(&g_pcache_used, __ATOMIC_RELAXED) < PCACHE_QUIET_NS) ||
+        !__atomic_exchange_n(&g_pcache_dirty, 0, __ATOMIC_RELAXED) ||
+        (vkGetPipelineCacheData(g_vk.dev, g_pcache, &n, NULL) == VK_SUCCESS && n == g_pcache_saved)) {
         pm_unlock(&g_psave);
         return;
     }
-    size_t n = 0;
-    void* d = NULL;
-    if (vkGetPipelineCacheData(g_vk.dev, g_pcache, &n, NULL) == VK_SUCCESS && n) d = malloc(n);
-    if (d && vkGetPipelineCacheData(g_vk.dev, g_pcache, &n, d) == VK_SUCCESS) {
-        FILE* f = fopen(g_pcache_tmp, "wb");
-        if (f) {
-            int ok = fwrite(d, 1, n, f) == n;
-            if (fclose(f)) ok = 0;
-            if (ok)
-                plat_replace_file(g_pcache_tmp, g_pcache_path); /* the old cache stays whole until this */
-            else
-                remove(g_pcache_tmp);
-        }
+    t0 = plat_ns();
+    d = n ? malloc(n) : NULL;
+    if (!d) why = "no memory for its data";
+    /* VK_INCOMPLETE when a pipeline made since the size was asked grew the cache: what fits is no whole cache */
+    else if ((r = vkGetPipelineCacheData(g_vk.dev, g_pcache, &n, d)) != VK_SUCCESS)
+        why = r == VK_INCOMPLETE ? "it grew while it was copied" : "the driver did not give its data";
+    else {
+        FILE* f;
+        t1 = plat_ns();
+        f = fopen(g_pcache_tmp, "wb");
+        if (!f || fwrite(d, 1, n, f) != n) why = "its temporary file cannot be written";
+        if (f && fclose(f) && !why) why = "its temporary file cannot be written";
+        if (!why && plat_replace_file(g_pcache_tmp, g_pcache_path)) /* the old cache stays whole until this */
+            why = "its temporary file cannot be moved over it";
+        if (why && f) remove(g_pcache_tmp);
+    }
+    if (why) {
+        LOG_LIMIT(20, "vulkan: the pipeline cache could not be written to %s: %s\n", g_pcache_path, why);
+        pcache_note(); /* written again after another quiet time, or at exit */
+    } else {
+        g_pcache_saved = n;
+        LOG_LIMIT(200, "vulkan: pipeline cache saved, %zu KB: the copy out of the driver %.1f ms, the file %.1f\n",
+                  n >> 10, (double)(t1 - t0) / 1e6, (double)(plat_ns() - t1) / 1e6);
     }
     free(d);
     pm_unlock(&g_psave);
