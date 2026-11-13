@@ -100,6 +100,7 @@ void vk_queue_unlock(void);
 enum { VKM_NONE, VKM_TARGET, VKM_SURF, VKM_ASTC, VKM_BC, VKM_TEX, VKM_COPY, VKM_STAGE, VKM_BUF, VKM_KINDS };
 void vk_mem_tag(VmaAllocation a, int kind);
 void vk_mem_untag(VmaAllocation a);
+u64 vk_mem_budget(void); /* the video memory the process may use now, as the driver reports it */
 void vk_mem_log(void); /* one line: video memory by kind, and the process's use against its budget */
 
 /* cmd.c */
@@ -263,6 +264,7 @@ typedef struct Surf {
     /* the first level its views show: a big new ASTC texture is decoded from this level down, and drawn from it
        (blurrier), until the levels above are decoded at the next presents (texture.c astc_spread). 0 when whole */
     u8 astc_base;
+    u8 prefetched; /* 1: made ahead of its first draw (nvn_res.c rp_prefetch) and not drawn yet; 2: drawn since */
     struct Surf* next;
     struct Surf* rt_next; /* real render targets, for overlapping guest-memory writes */
 } Surf;
@@ -524,6 +526,39 @@ extern int g_vk_astc_bc; /* format.c: ASTC textures are stored as BC3 (device.c 
 extern u64 g_vk_tex_budget;
 extern int g_vk_tex_later;
 extern u64 g_vk_tex_deferred;
+/* where a frame's texture cache misses go, ns per part (nvn_res.c's slow frame line reads and clears them): guest
+   memory the GPU wrote landed first, vk_lock, the whole vk_tex_from_tic, and within it image creation, the hash and
+   write tracking of a new texture, its upload, and render targets' texels copied in; then the view and the sampler */
+enum {
+    VK_TP_LAND,
+    VK_TP_LOCK,
+    VK_TP_TIC,
+    VK_TP_CREATE,
+    VK_TP_HASH,
+    VK_TP_UPLOAD,
+    VK_TP_DRAWN,
+    VK_TP_VIEW,
+    VK_TP_SAMPLER,
+    VK_TP_END,
+    VK_TP_READ,
+    VK_TP_ROWS,
+    VK_TP_ASTC,
+    VK_TP_STAGE,
+    VK_TP_SALLOC,
+    VK_TP_SBYTES,
+    VK_TP_N
+};
+/* the upload's: render pass end, guest reads and buffers, deswizzle, ASTC staging and dispatch, other staging and
+   conversion, of which the staging allocation; SBYTES counts bytes staged, not ns */
+extern u64 g_vk_tex_ns[VK_TP_N];
+/* textures made ahead of their first draw: set while nvn_res.c makes one; how many of them a draw found later
+   (hits), and how many had changed in memory before that (stale, loaded twice); the guest bytes of those not drawn
+   yet, which eviction keeps up to SNX_NVN_PREFETCH_MB (surface.c vk_surf_evict) */
+extern int g_vk_prefetching;
+extern u64 g_vk_prefetch_hits, g_vk_prefetch_stale, g_vk_prefetch_kept;
+/* textures made at a draw instead, by when the game registered them: this present, 1-29 presents before, 30 or more
+   before, never */
+extern u64 g_vk_made_at_draw[4];
 VkPipelineCache vk_pipeline_cache(void); /* for pipelines made elsewhere (compute) */
 void vk_pipeline_save(void);
 VkShaderModule vk_module_spv(const u32* words, size_t count);

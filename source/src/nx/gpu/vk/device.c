@@ -516,6 +516,17 @@ void vk_mem_untag(VmaAllocation a) {
     __atomic_sub_fetch(&g_vkm[kind][mem_local(&ai)], ai.size, __ATOMIC_RELAXED);
     __atomic_sub_fetch(&g_vkm_n[kind], 1, __ATOMIC_RELAXED);
 }
+u64 vk_mem_budget(void) {
+    VmaBudget b[VK_MAX_MEMORY_HEAPS];
+    const VkPhysicalDeviceMemoryProperties* mp;
+    u64 budget = 0;
+    u32 i;
+    vmaGetMemoryProperties(g_vk.vma, &mp);
+    vmaGetHeapBudgets(g_vk.vma, b);
+    for (i = 0; i < mp->memoryHeapCount; i++)
+        if (mp->memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) budget += b[i].budget;
+    return budget;
+}
 void vk_mem_log(void) {
     VmaBudget b[VK_MAX_MEMORY_HEAPS];
     const VkPhysicalDeviceMemoryProperties* mp;

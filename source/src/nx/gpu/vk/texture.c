@@ -228,7 +228,9 @@ static int tex_upload_levels(Surf* t, u32 l0, u32 l1) {
     }
     t->upload_valid = 0;
     t->wgen = ++g_tex_upload_gen; /* even a new texture at a reused address invalidates an old target's copy */
-    vk_render_end();              /* copies and clears happen outside rendering passes */
+    u64 te0 = plat_ns();
+    vk_render_end(); /* copies and clears happen outside rendering passes */
+    g_vk_tex_ns[VK_TP_END] += plat_ns() - te0;
     VkCommandBuffer cb = vk_cmd();
     if (f->conv != VKC_ASTC) /* ASTC's: in vk_astc_flush, after the decodes, so no barrier comes between them */
         vk_surf_use(cb, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
@@ -258,6 +260,7 @@ static int tex_upload_levels(Surf* t, u32 l0, u32 l1) {
                 at += lsz;
                 continue;
             }
+            u64 tr0 = plat_ns();
             u8* src = gmem_ptr(t->gva + at, lsz);
             u8* tmp = NULL;
             /* a format the GPU takes as it is goes from guest memory straight into the staging buffer; the others
@@ -274,17 +277,26 @@ static int tex_upload_levels(Surf* t, u32 l0, u32 l1) {
                 goto done;
             }
             if (tmp) gmem_read(t->gva + at, tmp, lsz);
+            u64 tr1 = plat_ns();
+            g_vk_tex_ns[VK_TP_READ] += tr1 - tr0;
             if (!direct) level_rows(t, src, lsz, rowb, th, ld, lbh, lbd, lin);
+            u64 tr2 = plat_ns();
+            g_vk_tex_ns[VK_TP_ROWS] += tr2 - tr1;
             if (f->conv == VKC_ASTC) {
                 free(tmp);
                 vk_astc_upload(cb, t, lin, lw, lh, ld, l, layer);
                 free(lin);
+                g_vk_tex_ns[VK_TP_ASTC] += plat_ns() - tr2;
                 at += lsz;
                 continue;
             }
             u64 pixels = (u64)lw * lh * ld;
+            u64 tsg0 = plat_ns();
             u64 osz = packed_depth ? pixels * 5 : level_out_size(f, lw, lh, ld, rowb);
+            u64 tsa0 = plat_ns();
             u8* p = vk_stage(osz, 16, &buf, &off);
+            g_vk_tex_ns[VK_TP_SALLOC] += plat_ns() - tsa0;
+            g_vk_tex_ns[VK_TP_SBYTES] += osz;
             if (p) {
                 /* the staging ring grew into a new buffer: copy what went to the old one first */
                 if (nreg && buf != regbuf) {
@@ -311,6 +323,7 @@ static int tex_upload_levels(Surf* t, u32 l0, u32 l1) {
                 complete = 0;
             free(tmp);
             free(lin);
+            g_vk_tex_ns[VK_TP_STAGE] += plat_ns() - tsg0;
             if (!complete) goto done;
             at += lsz;
         }
@@ -369,10 +382,13 @@ static u64 mem_hash(u64 gva, u64 size) {
     return h;
 }
 /* the texture's memory hashed again, and loaded again when that changed: 1 if it did */
+int g_vk_prefetching;
+u64 g_vk_prefetch_hits, g_vk_prefetch_stale, g_vk_prefetch_kept, g_vk_made_at_draw[4];
 static int tex_rehash(Surf* t) {
     t->gw = gpu_mem_generation();
     u64 hh = mem_hash(t->gva, t->size);
     if (hh == t->hash && t->upload_valid) return 0;
+    if (t->prefetched == 1 && hh != t->hash) g_vk_prefetch_stale++;
     if (tex_upload(t)) t->hash = hh; /* an incomplete upload keeps the old hash, so the next check retries it */
     return 1;
 }
@@ -678,6 +694,11 @@ texture_from_memory:
             t->tws != tws || t->pitch != pitch || t->layer_size != stride)
             continue;
         t->last_used = g_vk_present;
+        if (t->prefetched == 1 && !g_vk_prefetching) {
+            t->prefetched = 2;
+            g_vk_prefetch_hits++;
+            g_vk_prefetch_kept -= t->size;
+        }
         /* an upload that ran out of memory or staging (here, or a re-upload below) is tried again once a frame. A
            texture is only returned whole */
         if (!t->upload_valid) {
@@ -750,26 +771,55 @@ texture_from_memory:
         return t->upload_valid ? t : NULL;
     }
     if (!format_samples(f.vk)) return NULL;
+    u64 tc0 = plat_ns();
     Surf* t = tex_create(gva, w, h, layers, d3, levels, vt, f, fkey, bl, bh, bd, pitch, stride);
+    g_vk_tex_ns[VK_TP_CREATE] += plat_ns() - tc0;
     if (!t) return NULL;
     t->tws = tws;
+    t->prefetched = (u8)(g_vk_prefetching != 0);
     t->tex_inval_gen = g_tex_inval_gen;
     /* this texture's levels in one layer; the layers before the last one take their whole stride */
     u64 sz = 0;
     for (u32 l = 0; l < levels; l++) sz += bl ? bl_level_size(w, h, d3, &f, bh, bd, tws, l, NULL, NULL) : stride;
     t->size = stride * (layers - 1) + sz;
+    if (t->prefetched) g_vk_prefetch_kept += t->size;
     vk_prompts_texture(gva, &f, w, h, bh); /* the button atlas is painted before it is hashed and loaded */
+    u64 th0 = plat_ns();
     t->wseen = vk_ww_now();
     vk_written_since(gmem_ptr(gva, t->size), t->size, 0); /* starts tracking it */
     t->wseen = vk_ww_now();
     t->gw = gpu_mem_generation();
     t->hash = mem_hash(gva, t->size);
+    g_vk_tex_ns[VK_TP_HASH] += plat_ns() - th0;
     t->checked = g_vk_present;
     t->next_check = g_vk_present + 4;
-    if (f.conv != VKC_ASTC) return tex_upload(t) ? t : NULL;
+    if (!g_vk_prefetching) { /* made at a draw: how long before it the game registered it */
+        long long known = vk_nvn_tex_known(gva);
+        g_vk_made_at_draw[known < 0 ? 3 : g_vk_present - known == 0 ? 0 : g_vk_present - known < 30 ? 1 : 2]++;
+        static int made_log = -1; /* SNX_VK_TEX_MADE_LOG=1: each texture of 1 MB or more made at a draw */
+        if (made_log < 0) made_log = getenv("SNX_VK_TEX_MADE_LOG") && atoi(getenv("SNX_VK_TEX_MADE_LOG"));
+        if (made_log && t->size >= (1u << 20)) {
+            const Surf* r = vk_rt_find(gva);
+            LOG_LIMIT(400,
+                      "tex-made: present %u, %llx %ux%u layers %u levels %u fkey %x conv %d, %.1f MB; registered %lld "
+                      "presents before; render target there: %s\n",
+                      g_vk_present, (unsigned long long)gva, w, h, layers, levels, fkey, (int)f.conv,
+                      (double)t->size / 1e6, known < 0 ? -1ll : (long long)g_vk_present - known,
+                      !r                                       ? "none"
+                      : r->layout == VK_IMAGE_LAYOUT_UNDEFINED ? "undefined"
+                                                               : "drawn");
+        }
+    }
+    if (f.conv != VKC_ASTC) {
+        u64 tu0 = plat_ns();
+        int ok = tex_upload(t);
+        g_vk_tex_ns[VK_TP_UPLOAD] += plat_ns() - tu0;
+        return ok ? t : NULL;
+    }
     { /* the ahead-of-draw measure: how long a first ASTC upload takes, and how long before it the game registered it */
         u64 t0 = plat_ns();
         int ok = tex_upload(t);
+        g_vk_tex_ns[VK_TP_UPLOAD] += plat_ns() - t0;
         long long known = vk_nvn_tex_known(gva);
         u64 px = (u64)w * h * layers * d3;
         g_ahead.n++;
@@ -1237,13 +1287,15 @@ static void tex_take_drawn(Surf* t) {
     }
     if (d != small) free(d);
 }
-Surf* vk_tex_from_tic(const u32* tic) {
-    Surf* t = tex_from_tic(tic, 0);
+u64 g_vk_tex_ns[VK_TP_N];
+static Surf* tex_from_tic_timed(const u32* tic, int raw) {
+    u64 t0 = plat_ns();
+    Surf* t = tex_from_tic(tic, raw);
+    u64 t1 = plat_ns();
     tex_take_drawn(t);
+    g_vk_tex_ns[VK_TP_DRAWN] += plat_ns() - t1;
+    g_vk_tex_ns[VK_TP_TIC] += plat_ns() - t0;
     return t;
 }
-Surf* vk_tex_from_tic_raw(const u32* tic) {
-    Surf* t = tex_from_tic(tic, 1);
-    tex_take_drawn(t);
-    return t;
-}
+Surf* vk_tex_from_tic(const u32* tic) { return tex_from_tic_timed(tic, 0); }
+Surf* vk_tex_from_tic_raw(const u32* tic) { return tex_from_tic_timed(tic, 1); }

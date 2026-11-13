@@ -41,6 +41,8 @@ static int prep_mode(void) { return rp_scaling() + 2 * g_opt_dither; }
 /* c7 (the video memory copies, below): the GPU's blocks of a range land in guest memory before the CPU reads it */
 static void own_land_range(int p, u64 off, u64 size);
 static void own_land_gpu(u64 gpu, u64 size);
+static void rp_prefetch(void);
+static void pf_forget(u64 gpu);
 /* why the next landing happens (own_land_now counts it): 0 the game wrote a GPU block, 1 a texture over it, 2 a CPU
    copy of a constant buffer, 3 no memory to own, 4 no write tracking, 5 a read partly in the copy, 6 a storage buffer
    written in the pool, 7 a buffer copy or clear, 8 a constant update */
@@ -1343,9 +1345,14 @@ static struct {
     VkImageView view;
     VkSampler smp;
     int null_view; /* view is the null texture of the declared type */
+    /* the replay has its own image for this descriptor (rp_target_of), which every draw binds in the texture's place:
+       no texture was made from guest memory, which holds nothing the game drew. view is the null texture, for a draw
+       after that image went */
+    int sub;
     const char* why;
 } g_tc[TCACHE];
 static void rp_live_miss(void); /* a texture to look up: live frames leave their pass first (it may upload) */
+static int rp_target_of(const u32* tic, u64 gva);
 static u32 g_tgen = 1;
 void vk_nvn_frame(void) { g_tgen++; }
 static u64 mix64(u64 h, u64 v) { return (h ^ v) * 0x100000001b3ull + (v >> 29); }
@@ -1382,6 +1389,7 @@ static int tex_get(const NvnStageBind* b, u32 handle, const ShTex* st, int num, 
     g_tc[i].view = VK_NULL_HANDLE;
     g_tc[i].smp = VK_NULL_HANDLE;
     g_tc[i].null_view = 0;
+    g_tc[i].sub = 0;
     g_tc[i].why = NULL;
     if (!b->tex_pool || id >= b->tex_count)
         g_tc[i].why = "texture id past its pool";
@@ -1393,15 +1401,42 @@ static int tex_get(const NvnStageBind* b, u32 handle, const ShTex* st, int num, 
             memset(g_tc[i].tsc, 0, 32);
         else
             memcpy(g_tc[i].tsc, GP(b->smp_pool + (u64)sid * 32), 32);
+        if (!image) {
+            /* A texture the replay drew: its image is bound in the texture's place, so one made from guest memory
+               would be read, hashed and uploaded for nothing. The game's resolution steps cost 38-71 MB of that in
+               one frame, 9-27 scene targets at a new size (diagnostics/bench-20261112). SNX_NVN_TARGET_TEX=1 makes
+               them as before */
+            static int old = -1;
+            const u32* t = g_tc[i].tic;
+            if (old < 0) old = getenv("SNX_NVN_TARGET_TEX") && atoi(getenv("SNX_NVN_TARGET_TEX"));
+            if (!old && rp_target_of(t, ((u64)(t[2] & 0xFFFF) << 32) | t[1]) >= 0) {
+                g_tc[i].sub = 1;
+                if (st) {
+                    VkImageViewType want = vk_tex_view_type(st);
+                    vk_lock();
+                    g_tc[i].smp = vk_tex_bind_sampler(g_tc[i].tsc, st, num, NULL, want);
+                    g_tc[i].view = vk_null_view(want, st->shadow ? 3 : num);
+                    vk_unlock();
+                    if (!g_tc[i].view || !g_tc[i].smp) g_tc[i].why = "no null texture";
+                }
+                g_fr_tex += plat_ns() - tex_t0;
+                *why = g_tc[i].why;
+                return !g_tc[i].why;
+            }
+        }
         if (g_rp_real) { /* c7: the texture cache reads guest memory: a GPU-written range under it lands first. The
                             size is an upper bound (16 bytes a texel, every layer) */
             const u32* t = g_tc[i].tic;
             u64 gva = ((u64)(t[2] & 0xFFFF) << 32) | t[1];
             u64 bytes = (u64)((t[4] & 0xFFFF) + 1) * ((t[5] & 0xFFFF) + 1) * 16 * (1 + ((t[5] >> 16) & 0x3FFF));
+            u64 tl0 = plat_ns();
             g_land_why = 1;
             own_land_gpu(gva, bytes < (256ull << 20) ? bytes : 256ull << 20);
+            g_vk_tex_ns[VK_TP_LAND] += plat_ns() - tl0;
         }
+        u64 tk0 = plat_ns();
         vk_lock();
+        g_vk_tex_ns[VK_TP_LOCK] += plat_ns() - tk0;
         g_vk_tex_later = 0;
         g_tc[i].t = st && (st->flags & 1) ? vk_tex_from_tic_raw(g_tc[i].tic) : vk_tex_from_tic(g_tc[i].tic);
         if (!g_tc[i].t && !image) {
@@ -1433,10 +1468,14 @@ static int tex_get(const NvnStageBind* b, u32 handle, const ShTex* st, int num, 
                 g_tc[i].why = "image: no 2D view";
         } else if (st) {
             VkImageViewType want = vk_tex_view_type(st);
+            u64 tv0 = plat_ns();
             g_tc[i].view = vk_tex_bind_view(g_tc[i].t, want, g_tc[i].tic, g_tc[i].tsc, num);
+            u64 ts0 = plat_ns();
+            g_vk_tex_ns[VK_TP_VIEW] += ts0 - tv0;
             /* a texture that can't be viewed as declared (a cube sampler on a 2D target, while loading) is the
                declared type's null texture, as the renderer's stage_set binds it */
             g_tc[i].smp = vk_tex_bind_sampler(g_tc[i].tsc, st, num, g_tc[i].view ? g_tc[i].t : NULL, want);
+            g_vk_tex_ns[VK_TP_SAMPLER] += plat_ns() - ts0;
             if (!g_tc[i].view) {
                 g_tc[i].null_view = 1;
                 g_tc[i].view = vk_null_view(want, st->shadow ? 3 : num);
@@ -1481,12 +1520,18 @@ void vk_nvn_tex_key(int mod, const NvnStageBind* b, NvnStageKey* key) {
         const char* why;
         u32 handle, ty;
         const Surf* t;
+        VkFmt tf = {
+            0}; /* the texture's format: a replay image's (sub) from its descriptor, as its texture would have had */
         if ((st->flags & SNX_TEX_INDEXED) || !tex_handle(b, st, &handle, &why) ||
             !tex_get(b, handle, NULL, 0, 0, &slot, &why))
             continue;
         t = g_tc[slot].t;
+        if (t)
+            tf = t->f;
+        else if (g_tc[slot].sub)
+            tf = vk_tic_format(g_tc[slot].tic[0], (g_tc[slot].tic[4] >> 22) & 1);
         if (st->shadow) {
-            if (t && !t->f.depth && !t->f.is_int) {
+            if ((t || g_tc[slot].sub) && !tf.depth && !tf.is_int) {
                 u32 func = (g_tc[slot].tsc[0] >> 9) & 1 ? (g_tc[slot].tsc[0] >> 10) & 7 : 3;
                 key->dc_mask |= 1ull << i;
                 if (nd < SH_DC_COLOR_MAX) key->dc_funcs |= func << (3 * nd);
@@ -1495,9 +1540,9 @@ void vk_nvn_tex_key(int mod, const NvnStageBind* b, NvnStageKey* key) {
             continue;
         }
         ty = (g_tc[slot].tic[0] >> 7) & 7;
-        if (vk_tic_reads_stencil(g_tc[slot].tic) || (t ? t->f.is_int : (ty == 3 || ty == 4))) {
+        if (vk_tic_reads_stencil(g_tc[slot].tic) || (t || g_tc[slot].sub ? tf.is_int : (ty == 3 || ty == 4))) {
             key->tex_int |= 1ull << i;
-            if (t ? t->f.sint : ty == 3) key->tex_sint |= 1ull << i;
+            if (t || g_tc[slot].sub ? tf.sint : ty == 3) key->tex_sint |= 1ull << i;
         }
     }
     for (i = 0; i < si->nimg && i < 8; i++) { /* storage images stored in the other kind than the bindless default */
@@ -2209,6 +2254,17 @@ static int rp_set_alloc(VkDescriptorSetLayout layout, VkDescriptorSet* set) {
     ai.descriptorPool = g_rp.dpool[g_rp.npool - 1];
     return vkAllocateDescriptorSets(g_vk.dev, &ai, set) == VK_SUCCESS;
 }
+/* a frame's CPU time in its windows by kind of command (the slow frame line): render targets set, draws, dispatches,
+   buffer copies and updates, clears, the mirror pass as a window opens and the submit as it closes */
+static u64 g_rpt[RPT_N];
+void vk_nvn_time_add(int kind, u64 ns) { g_rpt[kind] += ns; }
+static void rp_targets_body(const NvnTarget* color, u32 n, const NvnTarget* depth);
+static void rp_draw_body(const NvnPipeDesc* d, const NvnStageBind* bind, const NvnDrawDyn* y, const NvnDrawCall* call);
+static void rp_dispatch_body(int mod, const NvnStageBind* b, u32 x, u32 y, u32 z, u64 indirect);
+static void rp_buffer_body(u64 src, u64 dst, u64 size, u32 value);
+static void rp_update_body(u64 dst, const void* data, u32 size);
+static void rp_clear_color_body(u32 index, const float* rgba, u32 mask, const NvnDrawDyn* y);
+static void rp_clear_depth_body(float depth, int depth_mask, u32 stencil, u32 stencil_mask, const NvnDrawDyn* y);
 int vk_nvn_replay_begin(void) {
     VkCommandPoolCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                                    .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
@@ -2418,7 +2474,7 @@ static void rp_fsr_restore(void) { /* a final draw given up on: the window is th
     g_rp.fsr_win = 0;
     g_rp.dirty = 1;
 }
-void vk_nvn_replay_targets(const NvnTarget* color, u32 n, const NvnTarget* depth) {
+static void rp_targets_body(const NvnTarget* color, u32 n, const NvnTarget* depth) {
     int col[8], dep = -1;
     VkFormat colf[8];
     u32 coll[8], depl = depth ? depth->layer : 0, i;
@@ -4054,7 +4110,7 @@ static void rp_movie_bars(void) {
     vkCmdClearAttachments(g_rp.cb, 1, &a, 2, r);
     LOG_LIMIT(1, "nvn-live: a movie at %ux%u, black outside its 16:9 block\n", rw, rh);
 }
-void vk_nvn_replay_draw(const NvnPipeDesc* d, const NvnStageBind* bind, const NvnDrawDyn* y, const NvnDrawCall* call) {
+static void rp_draw_body(const NvnPipeDesc* d, const NvnStageBind* bind, const NvnDrawDyn* y, const NvnDrawCall* call) {
     static const int st_of[5] = {ST_VS, ST_TCS, ST_TES, ST_GS, ST_FS};
     VkDescriptorSet set[5] = {0};
     VkBuffer vb[17], ib = VK_NULL_HANDLE, xb = VK_NULL_HANDLE, pb = VK_NULL_HANDLE;
@@ -4236,7 +4292,7 @@ void vk_nvn_replay_draw(const NvnPipeDesc* d, const NvnStageBind* bind, const Nv
     g_rp.kinds[call->kind & 3]++;
     if (g_rp.fsr_win) rp_fsr_end();
 }
-void vk_nvn_replay_dispatch(int mod, const NvnStageBind* b, u32 x, u32 y, u32 z, u64 indirect) {
+static void rp_dispatch_body(int mod, const NvnStageBind* b, u32 x, u32 y, u32 z, u64 indirect) {
     VkDescriptorSet set;
     VkDescriptorBufferInfo ib;
     const char* why = NULL;
@@ -4282,7 +4338,7 @@ void vk_nvn_replay_dispatch(int mod, const NvnStageBind* b, u32 x, u32 y, u32 z,
     g_rp.dispatched++;
 }
 /* CopyBufferToBuffer (src not 0) and ClearBuffer (src 0, value): into the replay's copy of the destination */
-void vk_nvn_replay_buffer(u64 src, u64 dst, u64 size, u32 value) {
+static void rp_buffer_body(u64 src, u64 dst, u64 size, u32 value) {
     VkDescriptorBufferInfo d, s;
     u64 off;
     int n;
@@ -4323,7 +4379,7 @@ void vk_nvn_replay_buffer(u64 src, u64 dst, u64 size, u32 value) {
 }
 /* The hardware writes these in command order, so a draw recorded before sees the old bytes and one after sees the new:
    a copy from staging between them, into the pool the constant buffers are bound from */
-void vk_nvn_replay_update(u64 dst, const void* data, u32 size) {
+static void rp_update_body(u64 dst, const void* data, u32 size) {
     VkBufferCopy r;
     u64 off, from;
     int n;
@@ -4342,7 +4398,7 @@ void vk_nvn_replay_update(u64 dst, const void* data, u32 size) {
     vkCmdCopyBuffer(g_rp.cb, g_rp.sbuf, g_import[n].buf, 1, &r);
     rp_barrier();
 }
-void vk_nvn_replay_clear_color(u32 index, const float* rgba, u32 mask, const NvnDrawDyn* y) {
+static void rp_clear_color_body(u32 index, const float* rgba, u32 mask, const NvnDrawDyn* y) {
     VkClearAttachment a = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .colorAttachment = index};
     VkClearRect r;
     if (!g_rp.on) return;
@@ -4356,7 +4412,7 @@ void vk_nvn_replay_clear_color(u32 index, const float* rgba, u32 mask, const Nvn
     if (r.rect.extent.width && r.rect.extent.height) vkCmdClearAttachments(g_rp.cb, 1, &a, 1, &r);
     g_rp.cleared++;
 }
-void vk_nvn_replay_clear_depth(float depth, int depth_mask, u32 stencil, u32 stencil_mask, const NvnDrawDyn* y) {
+static void rp_clear_depth_body(float depth, int depth_mask, u32 stencil, u32 stencil_mask, const NvnDrawDyn* y) {
     VkImageAspectFlags za = g_rp.dep >= 0 ? g_rp.t[g_rp.dep].aspect : 0;
     VkClearAttachment a = {.aspectMask = (depth_mask ? za & VK_IMAGE_ASPECT_DEPTH_BIT : 0) |
                                          (stencil_mask ? za & VK_IMAGE_ASPECT_STENCIL_BIT : 0)};
@@ -4380,6 +4436,41 @@ static struct {
     int srgb;
 } g_rb[RP_TARGETS];
 /* SNX_NVN_CAPTURE_LAYER=k: captures save layer k of an array target (its last when it has fewer), not layer 0 */
+void vk_nvn_replay_targets(const NvnTarget* color, u32 n, const NvnTarget* depth) {
+    u64 t0 = plat_ns();
+    rp_targets_body(color, n, depth);
+    g_rpt[RPT_TARGETS] += plat_ns() - t0;
+}
+void vk_nvn_replay_draw(const NvnPipeDesc* d, const NvnStageBind* bind, const NvnDrawDyn* y, const NvnDrawCall* call) {
+    u64 t0 = plat_ns();
+    rp_draw_body(d, bind, y, call);
+    g_rpt[RPT_DRAW] += plat_ns() - t0;
+}
+void vk_nvn_replay_dispatch(int mod, const NvnStageBind* b, u32 x, u32 y, u32 z, u64 indirect) {
+    u64 t0 = plat_ns();
+    rp_dispatch_body(mod, b, x, y, z, indirect);
+    g_rpt[RPT_DISPATCH] += plat_ns() - t0;
+}
+void vk_nvn_replay_buffer(u64 src, u64 dst, u64 size, u32 value) {
+    u64 t0 = plat_ns();
+    rp_buffer_body(src, dst, size, value);
+    g_rpt[RPT_COPY] += plat_ns() - t0;
+}
+void vk_nvn_replay_update(u64 dst, const void* data, u32 size) {
+    u64 t0 = plat_ns();
+    rp_update_body(dst, data, size);
+    g_rpt[RPT_COPY] += plat_ns() - t0;
+}
+void vk_nvn_replay_clear_color(u32 index, const float* rgba, u32 mask, const NvnDrawDyn* y) {
+    u64 t0 = plat_ns();
+    rp_clear_color_body(index, rgba, mask, y);
+    g_rpt[RPT_CLEAR] += plat_ns() - t0;
+}
+void vk_nvn_replay_clear_depth(float depth, int depth_mask, u32 stencil, u32 stencil_mask, const NvnDrawDyn* y) {
+    u64 t0 = plat_ns();
+    rp_clear_depth_body(depth, depth_mask, stencil, stencil_mask, y);
+    g_rpt[RPT_CLEAR] += plat_ns() - t0;
+}
 static u32 rp_cap_layer(const RpTarget* t) {
     static int k = -1;
     if (k < 0) {
@@ -4604,7 +4695,11 @@ void vk_nvn_live_window(int open) {
                             VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         rp_barrier();
         pt_window();
-        if (g_rp.real) rp_mirror_window();
+        if (g_rp.real) {
+            u64 tm0 = plat_ns();
+            rp_mirror_window();
+            g_rpt[RPT_MIRROR] += plat_ns() - tm0;
+        }
         pt_mark(PT_COPIES, 0, 0, 0);
         dl_window();
         rp_ts_write(0);
@@ -4623,7 +4718,9 @@ void vk_nvn_live_window(int open) {
             VkDependencyInfo di = {
                 .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
             vkCmdPipelineBarrier2(g_rp.cb, &di);
+            u64 tq0 = plat_ns();
             vk_submit(VK_NULL_HANDLE, 0, VK_NULL_HANDLE);
+            g_rpt[RPT_SUBMIT] += plat_ns() - tq0;
             vk_release_host_gate(vk_last_submit());
             if (!g_nstamp_sent) {
                 g_nstamp_sent = g_nstamp;
@@ -4707,16 +4804,35 @@ void vk_nvn_live_present(u64 gpu, u64 cpu, const char* out, int all) {
             u64 slept = __atomic_load_n(&g_pace_slept_ns, __ATOMIC_RELAXED), held = slept - slept_before;
             slept_before = slept;
             if (g_rp.last_present && d >= slow_ns)
-                LOG_LIMIT(20000,
-                          "nvn-live: frame %llu took %.1f ms: windows %.1f, of which texture lookups %.1f (%u) and "
-                          "pipeline waits %.1f; vk_lock waits %.1f; draws %u; ASTC %.1f Mpx; before the first "
-                          "window %.1f, after the last %.1f, GPU busy at its start %d; held by the pacer %.1f\n",
-                          (unsigned long long)g_rp.frame, (double)d / 1e6, (double)g_rp.fr_win / 1e6,
-                          (double)g_fr_tex / 1e6, g_fr_miss, (double)g_rp.pipe_wait / 1e6, (double)g_rp.fr_lock / 1e6,
-                          g_rp.fr_draws, (double)(g_vk_astc_px - g_fr_astc) / 1e6,
-                          g_rp.fr_first ? (double)(g_rp.fr_first - g_rp.last_present) / 1e6 : 0.0,
-                          g_rp.fr_last ? (double)(now - g_rp.fr_last) / 1e6 : 0.0, g_rp.fr_gpu_busy,
-                          (double)held / 1e6);
+                LOG_LIMIT(
+                    20000,
+                    "nvn-live: frame %llu took %.1f ms: windows %.1f, of which texture lookups %.1f (%u) and "
+                    "pipeline waits %.1f; vk_lock waits %.1f; draws %u; ASTC %.1f Mpx; before the first "
+                    "window %.1f, after the last %.1f, GPU busy at its start %d; held by the pacer %.1f; texture "
+                    "misses: landing %.1f, lock %.1f, from TIC %.1f (image %.1f, hash %.1f, upload %.1f: pass end "
+                    "%.1f, reads %.1f, rows %.1f, ASTC %.1f, staging %.1f (allocation %.1f, %.1f MB); drawn "
+                    "%.1f), view %.1f, sampler %.1f; windows by kind: targets %.1f, draws %.1f, dispatches %.1f, "
+                    "copies %.1f, clears %.1f, mirror %.1f, submit %.1f; lists %.1f, of which draw setup %.1f, dispatch "
+                    "setup %.1f\n",
+                    (unsigned long long)g_rp.frame, (double)d / 1e6, (double)g_rp.fr_win / 1e6, (double)g_fr_tex / 1e6,
+                    g_fr_miss, (double)g_rp.pipe_wait / 1e6, (double)g_rp.fr_lock / 1e6, g_rp.fr_draws,
+                    (double)(g_vk_astc_px - g_fr_astc) / 1e6,
+                    g_rp.fr_first ? (double)(g_rp.fr_first - g_rp.last_present) / 1e6 : 0.0,
+                    g_rp.fr_last ? (double)(now - g_rp.fr_last) / 1e6 : 0.0, g_rp.fr_gpu_busy, (double)held / 1e6,
+                    (double)g_vk_tex_ns[VK_TP_LAND] / 1e6, (double)g_vk_tex_ns[VK_TP_LOCK] / 1e6,
+                    (double)g_vk_tex_ns[VK_TP_TIC] / 1e6, (double)g_vk_tex_ns[VK_TP_CREATE] / 1e6,
+                    (double)g_vk_tex_ns[VK_TP_HASH] / 1e6, (double)g_vk_tex_ns[VK_TP_UPLOAD] / 1e6,
+                    (double)g_vk_tex_ns[VK_TP_END] / 1e6, (double)g_vk_tex_ns[VK_TP_READ] / 1e6,
+                    (double)g_vk_tex_ns[VK_TP_ROWS] / 1e6, (double)g_vk_tex_ns[VK_TP_ASTC] / 1e6,
+                    (double)g_vk_tex_ns[VK_TP_STAGE] / 1e6, (double)g_vk_tex_ns[VK_TP_SALLOC] / 1e6,
+                    (double)g_vk_tex_ns[VK_TP_SBYTES] / 1e6, (double)g_vk_tex_ns[VK_TP_DRAWN] / 1e6,
+                    (double)g_vk_tex_ns[VK_TP_VIEW] / 1e6, (double)g_vk_tex_ns[VK_TP_SAMPLER] / 1e6,
+                    (double)g_rpt[RPT_TARGETS] / 1e6, (double)g_rpt[RPT_DRAW] / 1e6, (double)g_rpt[RPT_DISPATCH] / 1e6,
+                    (double)g_rpt[RPT_COPY] / 1e6, (double)g_rpt[RPT_CLEAR] / 1e6, (double)g_rpt[RPT_MIRROR] / 1e6,
+                    (double)g_rpt[RPT_SUBMIT] / 1e6, (double)g_rpt[RPT_LISTS] / 1e6, (double)g_rpt[RPT_CMD_DRAW] / 1e6,
+                    (double)g_rpt[RPT_CMD_DISPATCH] / 1e6);
+            memset(g_vk_tex_ns, 0, sizeof g_vk_tex_ns);
+            memset(g_rpt, 0, sizeof g_rpt);
         }
         {
             static u64 spike_ns; /* SNX_NVN_SPIKE_MS: the time before the first window that gets profiled, 150 ms */
@@ -4758,6 +4874,7 @@ void vk_nvn_live_present(u64 gpu, u64 cpu, const char* out, int all) {
     if (g_ts_pool) rp_ts_read();
     pt_read();
     if (g_rp.real && g_rp.frame % 300 == 0) rp_mirror_check();
+    rp_prefetch();
     if (all)
         for (nkeep = 0; nkeep < g_nrpw; nkeep++) {
             g_chk[nkeep].gpu = g_rpw[nkeep].gpu;
@@ -4819,6 +4936,7 @@ void vk_nvn_live_present(u64 gpu, u64 cpu, const char* out, int all) {
 }
 void vk_nvn_live_tex_free(u64 gpu) {
     int i;
+    if (gpu) pf_forget(gpu);
     if (!g_rp.live || !gpu) return;
     vk_lock();
     for (i = 0; i < g_rp.nt; i++)
@@ -5043,7 +5161,21 @@ static struct {
 } g_known[KNOWN];
 static PMutex g_known_lk = PMUTEX_INIT;
 static u64 g_known_count;
-void vk_nvn_tex_registered(u64 gpu) {
+/* Textures made ahead of their first draw. The game registers a texture 30 and more presents before it draws from it
+   (the astc-ahead line: 389 of 389 first uploads in a fight), and its first draw made it then: deswizzling, hashing
+   and uploading 40-50 MB in one frame, 17-28 ms of a 50-65 ms frame (diagnostics/bench-20261112). Each registration's
+   descriptor waits here; each present makes the oldest ones with the texture cache's own vk_tex_from_tic, within
+   SNX_NVN_PREFETCH_MS (2 ms when unset, 0 off). The first draw then finds the texture and only checks its memory, as
+   for any texture it saw before, so one that changed is loaded again (counted as stale) */
+#define PREFETCH 16384
+static struct {
+    u32 tic[8];
+} g_pf[PREFETCH];
+static u32 g_pf_head, g_pf_tail; /* under g_known_lk; the queue is g_pf_head - g_pf_tail long */
+static struct {
+    u64 queued, made, skipped, dropped, freed, ns;
+} g_pf_st;
+void vk_nvn_tex_registered(u64 gpu, const u32* tic) {
     u32 i = (u32)(gpu >> 8) & (KNOWN - 1), n;
     if (!gpu) return;
     pm_lock(&g_known_lk);
@@ -5056,7 +5188,95 @@ void vk_nvn_tex_registered(u64 gpu) {
             break;
         }
     }
+    if (tic) {
+        if (g_pf_head - g_pf_tail < PREFETCH) {
+            memcpy(g_pf[g_pf_head % PREFETCH].tic, tic, 32);
+            g_pf_head++;
+            g_pf_st.queued++;
+        } else
+            g_pf_st.dropped++;
+    }
     pm_unlock(&g_known_lk);
+}
+/* nvnTextureFinalize: a waiting descriptor of that address is left out */
+static void pf_forget(u64 gpu) {
+    u32 k;
+    pm_lock(&g_known_lk);
+    for (k = g_pf_tail; k != g_pf_head; k++) {
+        u32* t = g_pf[k % PREFETCH].tic;
+        if ((((u64)(t[2] & 0xFFFF) << 32) | t[1]) == gpu) {
+            memset(t, 0, 32);
+            g_pf_st.freed++;
+        }
+    }
+    pm_unlock(&g_known_lk);
+}
+/* each present, vk_lock held: the oldest waiting textures made, within the budget */
+static void rp_prefetch(void) {
+    static u64 budget = ~0ull;
+    u64 t0 = plat_ns(), saved[VK_TP_N];
+    if (budget == ~0ull) {
+        const char* e = getenv("SNX_NVN_PREFETCH_MS");
+        budget = (u64)(e ? atof(e) * 1e6 : 2e6);
+    }
+    if (budget && g_pf_head != g_pf_tail) {
+        memcpy(saved, g_vk_tex_ns, sizeof saved); /* the slow frame line's texture times stay the draws' */
+        g_vk_prefetching = 1;
+        while (plat_ns() - t0 < budget) {
+            u32 tic[8];
+            u64 gva;
+            pm_lock(&g_known_lk);
+            if (g_pf_head == g_pf_tail) {
+                pm_unlock(&g_known_lk);
+                break;
+            }
+            memcpy(tic, g_pf[g_pf_tail % PREFETCH].tic, 32);
+            g_pf_tail++;
+            pm_unlock(&g_known_lk);
+            gva = ((u64)(tic[2] & 0xFFFF) << 32) | tic[1];
+            if (!gva) continue; /* finalized while it waited */
+            {
+                /* memory the GPU draws into is left to the draws: a render target's, or an address registered at
+                   several sizes (the scene's dynamic resolution steps all start at one address) */
+                const Surf* o = vk_rt_find(gva);
+                u32 w = (tic[4] & 0xFFFF) + 1, h = (tic[5] & 0xFFFF) + 1;
+                for (o = o ? o : vk_surf_first(gva); o; o = o->next)
+                    if (o->gva == gva && (o->is_rt || o->sw != w || o->sh != h)) break;
+                if (o) {
+                    g_pf_st.skipped++;
+                    continue;
+                }
+            }
+            if (g_rp_real) { /* as tex_get: a GPU-written range under it lands first */
+                u64 bytes =
+                    (u64)((tic[4] & 0xFFFF) + 1) * ((tic[5] & 0xFFFF) + 1) * 16 * (1 + ((tic[5] >> 16) & 0x3FFF));
+                g_land_why = 1;
+                own_land_gpu(gva, bytes < (256ull << 20) ? bytes : 256ull << 20);
+            }
+            g_vk_tex_later = 0;
+            if (vk_tex_from_tic(tic)) g_pf_st.made++;
+        }
+        g_vk_prefetching = 0;
+        memcpy(g_vk_tex_ns, saved, sizeof saved);
+        g_pf_st.ns += plat_ns() - t0;
+    }
+    if (g_vk_present % 600 == 0 && (g_pf_st.queued || g_vk_made_at_draw[0] || g_vk_made_at_draw[1] ||
+                                    g_vk_made_at_draw[2] || g_vk_made_at_draw[3])) {
+        LOG("tex-prefetch: %llu registered, %llu made ahead (%.1f ms at presents), %llu left to the draws (render "
+            "target memory), %llu waiting, %llu finalized "
+            "first, %llu dropped (queue full); since the start %llu drawn later, %llu changed before (loaded again); "
+            "%.0f MB made and not drawn yet; made at a draw: registered at that present %llu, 1-29 before %llu, "
+            "30+ before %llu, never %llu\n",
+            (unsigned long long)g_pf_st.queued, (unsigned long long)g_pf_st.made, (double)g_pf_st.ns / 1e6,
+            (unsigned long long)g_pf_st.skipped, (unsigned long long)(g_pf_head - g_pf_tail),
+            (unsigned long long)g_pf_st.freed, (unsigned long long)g_pf_st.dropped,
+            (unsigned long long)g_vk_prefetch_hits, (unsigned long long)g_vk_prefetch_stale,
+            (double)g_vk_prefetch_kept / 1e6, (unsigned long long)g_vk_made_at_draw[0],
+            (unsigned long long)g_vk_made_at_draw[1], (unsigned long long)g_vk_made_at_draw[2],
+            (unsigned long long)g_vk_made_at_draw[3]);
+        memset(&g_pf_st, 0, sizeof g_pf_st);
+        memset(g_vk_made_at_draw, 0, sizeof g_vk_made_at_draw);
+    }
 }
 long long vk_nvn_tex_known(u64 gpu) {
     u32 i = (u32)(gpu >> 8) & (KNOWN - 1), n;

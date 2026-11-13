@@ -144,6 +144,23 @@ void vk_nvn_replay_update(u64 dst, const void* data, u32 size);
 void vk_nvn_replay_clear_color(u32 index, const float* rgba, u32 mask, const NvnDrawDyn* dyn);
 void vk_nvn_replay_clear_depth(float depth, int depth_mask, u32 stencil, u32 stencil_mask, const NvnDrawDyn* dyn);
 void vk_nvn_replay_skip(const char* why); /* a command the replay leaves out */
+/* a frame's CPU time in its windows by kind (the slow frame line): the replay's render targets, draws,
+   dispatches, buffer copies and updates, clears, mirror pass and submit; cmdlist.c's lists, and in them the
+   setup of draws and dispatches (pipeline keys, their first texture lookups, the replay calls) */
+enum {
+    RPT_TARGETS,
+    RPT_DRAW,
+    RPT_DISPATCH,
+    RPT_COPY,
+    RPT_CLEAR,
+    RPT_MIRROR,
+    RPT_SUBMIT,
+    RPT_LISTS,
+    RPT_CMD_DRAW,
+    RPT_CMD_DISPATCH,
+    RPT_N
+};
+void vk_nvn_time_add(int kind, u64 ns);
 void vk_nvn_replay_end(u64 present_gpu, u64 present_cpu, const char* out);
 /* SNX_NVN_LIVE (phase 4 step 4.1): the replay's commands every frame, into the renderer's command buffer, in images
    kept from frame to frame. live_window(1) takes vk_lock and ends the renderer's pass; every replay command of a
@@ -155,9 +172,10 @@ void vk_nvn_live_window(int open);
    and the renderer's next present of the buffer at cpu as out-renderer.ppm; all: every image as out-tNN.ppm too */
 void vk_nvn_live_present(u64 gpu, u64 cpu, const char* out, int all);
 void vk_nvn_live_tex_free(u64 gpu); /* nvnTextureFinalize: the image kept for that address goes */
-/* nvnTexturePoolRegisterTexture (game thread): the texture at gpu can be drawn from now. A measure for decoding ahead:
-   vk_nvn_tex_known gives the present it was first registered at, or -1 when it wasn't */
-void vk_nvn_tex_registered(u64 gpu);
+/* nvnTexturePoolRegisterTexture (game thread): the texture at gpu can be drawn from now. vk_nvn_tex_known gives the
+   present it was first registered at, or -1 when it wasn't. tic (may be NULL): its descriptor, for the texture to be
+   made ahead of its first draw at the next presents (SNX_NVN_PREFETCH_MS) */
+void vk_nvn_tex_registered(u64 gpu, const u32* tic);
 long long vk_nvn_tex_known(u64 gpu);
 void vk_nvn_live_show(void); /* SNX_NVN_FRONTEND=2: vi's presents show the host's images (vk_nvn_live_surf) */
 /* SNX_NVN_RELEASE_ONLY (step 4.3): what the frame writes goes to guest memory for real, each list goes to the GPU when

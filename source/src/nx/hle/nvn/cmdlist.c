@@ -492,7 +492,8 @@ static void spool_init(CPU* RESTRICT c, const NvnFn* f) { /* (pool, memory pool,
         }
     pm_unlock(&g_lk);
 }
-static void tic_check(u64 pool, u64 id, u64 tex) { /* lock held */
+/* lock held: 1 when the descriptor agrees with the driver's texture, with it in out (may be NULL) */
+static int tic_check(u64 pool, u64 id, u64 tex, u32* out) {
     const u8* p = NULL;
     const TexRec* t = tex_known(tex) ? tex_slot(tex, 0) : NULL;
     u32 tic[8], w, h, type;
@@ -503,11 +504,11 @@ static void tic_check(u64 pool, u64 id, u64 tex) { /* lock held */
             p = cpu_bytes(g_tpool[i].cpu + id * 32, 32);
     if (!p) {
         g_tic_nopool++;
-        return;
+        return 0;
     }
     if (!t) {
         g_tic_notex++;
-        return;
+        return 0;
     }
     memcpy(tic, p, 32);
     gva = ((u64)(tic[2] & 0xFFFF) << 32) | tic[1];
@@ -516,25 +517,31 @@ static void tic_check(u64 pool, u64 id, u64 tex) { /* lock held */
     type = (tic[4] >> 23) & 0xF;
     if (type == 0 || type == 4) h = 1; /* 1D and 1D arrays, as tex_from_tic reads them */
     g_tic_checked++;
-    if (gva == t->gpu && w == t->width && h == t->height)
+    if (gva == t->gpu && w == t->width && h == t->height) {
         g_tic_ok++;
-    else if (g_tic_logged < 8) {
+        if (out) memcpy(out, tic, 32);
+        return 1;
+    }
+    if (g_tic_logged < 8) {
         g_tic_logged++;
         LOG("nvn-cmdlist: descriptor %llu of pool %llx: address %llx %ux%u type %u; the driver's texture %llx: address "
             "%llx %ux%u target %u\n",
             (unsigned long long)id, (unsigned long long)pool, (unsigned long long)gva, w, h, type,
             (unsigned long long)tex, (unsigned long long)t->gpu, t->width, t->height, t->target);
     }
+    return 0;
 }
 static void reg_texture(CPU* RESTRICT c, const NvnFn* f) { /* (pool, id, texture, view) */
     u64 pool = c->x[0], id = c->x[1] & 0xFFFFFFFFu, tex = c->x[2];
+    u32 tic[8];
+    int ok;
     nvn_guest(c, f);
     pm_lock(&g_lk);
     if (id < IDS) g_tex_id[id] = tex;
-    tic_check(pool, id, tex);
+    ok = tic_check(pool, id, tex, tic);
     {
         TexRec* t = tex_slot(tex, 0);
-        if (t && t->live) vk_nvn_tex_registered(t->gpu);
+        if (t && t->live) vk_nvn_tex_registered(t->gpu, ok ? tic : NULL);
     }
     pm_unlock(&g_lk);
 }
@@ -543,7 +550,7 @@ static void reg_image(CPU* RESTRICT c, const NvnFn* f) { /* (pool, id, texture, 
     nvn_guest(c, f);
     pm_lock(&g_lk);
     if (id < IDS) g_img_id[id] = tex;
-    tic_check(pool, id, tex);
+    tic_check(pool, id, tex, NULL);
     pm_unlock(&g_lk);
 }
 static void reg_sampler(CPU* RESTRICT c, const NvnFn* f) { /* (pool, id, sampler or builder) */
@@ -1140,7 +1147,13 @@ static ProgStage* bound_stage(int stage, int* err) { /* lock held: NULL for none
         if (p->st[i].stage == stage) return &p->st[i];
     return NULL; /* bound for a stage it has no shader for: the stage is off */
 }
-static void draw_pipeline(const HostCmd* h) { /* lock held: a draw command, its first argument the primitive */
+static void draw_pipeline_body(const HostCmd* h);
+static void draw_pipeline(const HostCmd* h) {
+    u64 t0 = plat_ns();
+    draw_pipeline_body(h);
+    vk_nvn_time_add(RPT_CMD_DRAW, plat_ns() - t0);
+}
+static void draw_pipeline_body(const HostCmd* h) { /* lock held: a draw command, its first argument the primitive */
     u32 primitive = (u32)h->a[0];
     static const int gfx[5] = {ST_VS, ST_TCS, ST_TES, ST_GS, ST_FS};
     NvnPipeDesc d;
@@ -1237,7 +1250,13 @@ static void draw_pipeline(const HostCmd* h) { /* lock held: a draw command, its 
     g_fr_made += (u64)made;
     if (g_replaying) replay_draw(h, &d, st);
 }
-static void dispatch_pipeline(const HostCmd* h, int indirect) { /* lock held: DispatchCompute(Indirect) */
+static void dispatch_pipeline_body(const HostCmd* h, int indirect);
+static void dispatch_pipeline(const HostCmd* h, int indirect) {
+    u64 t0 = plat_ns();
+    dispatch_pipeline_body(h, indirect);
+    vk_nvn_time_add(RPT_CMD_DISPATCH, plat_ns() - t0);
+}
+static void dispatch_pipeline_body(const HostCmd* h, int indirect) { /* lock held: DispatchCompute(Indirect) */
     int err, made = 0;
     char why[64];
     ProgStage* s = bound_stage(ST_CS, &err);
@@ -1378,6 +1397,28 @@ void nvn_capture_frame(const char* prefix) {
 }
 static void present(CPU* RESTRICT c, const NvnFn* f) { /* nvnQueuePresentTexture(queue, window, index) */
     u32 index = (u32)c->x[2];
+    { /* SNX_NVN_DRS_LOG=1 (Bayonetta 3 v1.2.0 addresses): what picks the game's scene size, logged when it changes.
+         G = *(0xa4a14a8): the step at G+0x4a34 (set by placed volumes, main+0x64f188), their priority, and the
+         scene settings' bias at G+0xd610. diagnostics/bench-20261112/README.md */
+        static int on = -1;
+        static u32 last[5];
+        if (on < 0) on = getenv("SNX_NVN_DRS_LOG") && atoi(getenv("SNX_NVN_DRS_LOG"));
+        if (on) {
+            u64 g;
+            memcpy(&g, GP(0xa4a14a8), 8);
+            if (g >= AS_BASE && g + 0xd700 <= AS_END) {
+                u32 now[5];
+                memcpy(now, GP(g + 0xd604), 20);    /* d604, d608, d60c, d610 (level), d614 */
+                memcpy(&now[0], GP(g + 0x4a34), 4); /* the step the level comes from */
+                memcpy(&now[1], GP(0xa4c7088), 4);  /* the priority of the volume that set it */
+                if (memcmp(now, last, sizeof now)) {
+                    memcpy(last, now, sizeof now);
+                    LOG_LIMIT(400, "drs-level: present %llu: bias %d, on %u, flags %x, step %d, priority %d\n",
+                              (unsigned long long)g_frames + 1, (int)now[3], now[2], now[4], (int)now[0], (int)now[1]);
+                }
+            }
+        }
+    }
     pm_lock(&g_lk);
     if (g_live) { /* every 600 presents its picture, and the renderer's of the same buffer */
         const TexRec* t = index < g_nwin_tex && tex_known(g_win_tex[index]) ? tex_slot(g_win_tex[index], 0) : NULL;
@@ -1558,7 +1599,13 @@ static void ds_dynamic(const HostCmd* h, const u8* blob) { /* lock held */
 }
 
 /* every resource reference in a submitted list, and its state objects decoded */
+static void check_list_body(CPU* RESTRICT c, const CmdList* l);
 static void check_list(CPU* RESTRICT c, const CmdList* l) {
+    u64 t0 = plat_ns();
+    check_list_body(c, l);
+    vk_nvn_time_add(RPT_LISTS, plat_ns() - t0);
+}
+static void check_list_body(CPU* RESTRICT c, const CmdList* l) {
     static const struct {
         const char* name;
         int kind;

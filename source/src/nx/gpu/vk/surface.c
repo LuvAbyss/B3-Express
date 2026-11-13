@@ -634,6 +634,7 @@ int vk_rt_drawn_in(u64 lo, u64 hi, Surf** out, int max) {
 
 /* a surface's image and views go when the frame being recorded is done (descriptors in it may name them) */
 static void surf_free(Surf* s) {
+    if (s->prefetched == 1) g_vk_prefetch_kept -= s->size;
     if (s->astc_pending) { /* the batch's copies into it before it goes */
         vk_render_end();
         vk_astc_flush(vk_cmd());
@@ -656,6 +657,13 @@ static void surf_free(Surf* s) {
     free(s);
 }
 void vk_surf_evict(u32 before) {
+    static u64 kept_max = ~0ull;
+    if (kept_max == ~0ull) {
+        const char* e = getenv("SNX_NVN_PREFETCH_MB");
+        /* unset: an eighth of the video memory the process may use, 1 GiB at most (512 MiB on a 4 GB card) */
+        kept_max = e ? (u64)atoi(e) << 20 : vk_mem_budget() / 8;
+        if (!e && kept_max > 1024ull << 20) kept_max = 1024ull << 20;
+    }
     /* A storage image keeps a Surf pointer until its result reaches guest memory. */
     vk_gfx_image_land();
     /* render targets too, parked or not: one not drawn, sampled or presented for as long goes with its contents
@@ -663,7 +671,8 @@ void vk_surf_evict(u32 before) {
     for (int k = 0; k < SURFH; k++)
         for (Surf** pp = &g_surfh[k]; *pp;) {
             Surf* s = *pp;
-            if ((i32)((u32)s->last_used - before) >= 0) {
+            /* made ahead of a first draw that hasn't come: kept for it while those fit SNX_NVN_PREFETCH_MB */
+            if ((i32)((u32)s->last_used - before) >= 0 || (s->prefetched == 1 && g_vk_prefetch_kept <= kept_max)) {
                 pp = &s->next;
                 continue;
             }

@@ -247,11 +247,14 @@ static u8* ring_alloc(Frame* f, Ring* r, u64 size, u64 align, VkBufferUsageFlags
                                   .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
         VmaAllocationCreateInfo aci = {.flags = flags | VMA_ALLOCATION_CREATE_MAPPED_BIT, .usage = where};
         VmaAllocationInfo info;
+        u64 t0 = plat_ns();
         if (!VK_OK(vmaCreateBuffer(g_vk.vma, &bci, &aci, &r->buf, &r->mem, &info))) {
             r->buf = VK_NULL_HANDLE;
             r->cap = 0;
             return NULL;
         }
+        LOG_LIMIT(64, "vulkan: a staging ring of frame slot %d grew to %llu MiB (%.1f ms)\n", (int)(f - g_fr),
+                  (unsigned long long)(cap >> 20), (double)(plat_ns() - t0) / 1e6);
         vk_mem_tag(r->mem, VKM_STAGE);
         r->ptr = info.pMappedData;
         r->cap = cap;
