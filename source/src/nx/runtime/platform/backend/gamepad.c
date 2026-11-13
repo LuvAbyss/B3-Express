@@ -17,8 +17,9 @@ static SDL_Gamepad* g_pads[SNX_GAMEPADS];
 static char g_names[SNX_GAMEPADS][64]; /* theirs, for the game's menu, which the renderer draws on its thread */
 static int g_labels[SNX_GAMEPADS][4], g_symmetric[SNX_GAMEPADS]; /* and how its button map screen draws them */
 static unsigned g_held;                                          /* the controls held, a bit each, as last polled */
-static int g_prompts;   /* button_prompts: 0 auto, 1 Switch, 2 PlayStation, 3 Xbox */
-static int g_used = -1; /* the slot of the pad last used (a button, or a stick past half), -1 none yet */
+static int g_prompts;   /* button_prompts: 0 auto, 1 Switch, 2 PlayStation, 3 Xbox, 4 keyboard and mouse */
+static int g_used = -1; /* the slot of the pad last used (a button, or a stick past half), -1 none yet, -2 the keyboard
+                           or the mouse (gamepad_kbm_used) */
 #define UNSET SNX_PAD_UNSET
 static SnxGamepadConfig g_cfg = {
     0,
@@ -59,8 +60,9 @@ const IniOpt g_gamepad_ini[] = {
     {"gamepad_swap_ab", "0", "1 = a controller's A and B swapped: 0 = where the console's are (A right, B bottom)",
      INI_INT, 0, &g_cfg.swap_ab, 0, 1, NULL, "Swap A/B", "Off|On", 0, 0},
     {"button_prompts", "0",
-     "The buttons the game's prompts show: 0 = as the controller last used, 1 = Switch, 2 = PlayStation, 3 = Xbox",
-     INI_INT, 0, &g_prompts, 0, 3, NULL, "Button prompts", "Auto|Switch|PlayStation|Xbox", 0, 0},
+     "The buttons the game's prompts show: 0 = as the controller, or the keyboard and mouse, last used, 1 = Switch,\n"
+     "2 = PlayStation, 3 = Xbox, 4 = the keys and mouse buttons of [Keyboard and mouse]",
+     INI_INT, 0, &g_prompts, 0, 4, NULL, "Button prompts", "Auto|Switch|PlayStation|Xbox|Keyboard", 0, 0},
     {"gamepad_deadzone", "20", "The sticks' dead zone, in percent of their travel", INI_INT, 0, &g_cfg.deadzone, 0, 90,
      NULL, "Stick dead zone", "#%", 5, 0},
     {"gamepad_rumble", "100", "How strongly the controllers vibrate when the game asks, in percent: 0 = never", INI_INT,
@@ -557,15 +559,17 @@ void gamepad_rumble_slot(int slot, u32 left, u32 right) {
     SDL_RumbleGamepad(g_pads[slot], (Uint16)lo, (Uint16)hi, 100);
 }
 
+void gamepad_kbm_used(void) { __atomic_store_n(&g_used, -2, __ATOMIC_RELAXED); }
 int gamepad_prompts(int* by_letter) {
     int want = __atomic_load_n(&g_prompts, __ATOMIC_RELAXED), slot = __atomic_load_n(&g_used, __ATOMIC_RELAXED), i;
     const SnxPlayerConfig* p = &g_players[0];
     *by_letter = p->swap_ab >= 0 ? p->swap_ab : g_cfg.swap_ab;
     if (want) return want;
+    if (slot == -2) return 4;
     if (slot < 0 || !g_pads[slot]) /* none used yet, or it went: the first one connected */
         for (slot = -1, i = 0; i < SNX_GAMEPADS && slot < 0; i++)
             if (g_pads[i]) slot = i;
-    if (slot < 0) return 1;
+    if (slot < 0) return 4; /* no controller at all: the player has the keyboard and the mouse */
     switch (gamepad_slot_type(slot)) {
         case SDL_GAMEPAD_TYPE_PS3:
         case SDL_GAMEPAD_TYPE_PS4:

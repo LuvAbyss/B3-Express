@@ -12,12 +12,16 @@
 
    Face buttons: by position (gamepad_swap_ab=0, the default) Switch A, the right button, shows Circle / Xbox B; by printed
    letter (gamepad_swap_ab=1) A is the bottom button, and the pictures of where a button sits (four dots) swap too.
-   Witch Time's keyboard set and its BC3 atlas (ui_core_gb) aren't ported: our keyboard keeps the Switch set. */
+   The keyboard and mouse set (family 4) is ours, drawn with Witch Time's key cap and mouse pictures: each of the ten
+   cells shows its control's first key or mouse button from [Keyboard and mouse] (backend_kbm_prompt), and is painted
+   again when a key changes. The sticks' and the D-pad's cells stay the Switch's. Witch Time's own keyboard set and its
+   BC3 atlas (ui_core_gb) aren't ported. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "nx/gpu/gpu.h"
 #include "nx/gpu/vk/prompts.h"
+#include "nx/runtime/platform/backend.h"
 #include "nx/runtime/platform/gamepad.h"
 #include "nx/runtime/platform/log.h"
 #if defined(__GNUC__)
@@ -134,7 +138,7 @@ static void cell_draw(uint8_t* mem, Cell c, const uint8_t* s) {
             vk_prompts_astc_block(rgba + (y * bw * 4 + x) * 4, bw * 4, block_at(mem, c.x + x, c.y + y));
 }
 
-/* mem: a copy of the game's atlas, block linear. family: 2 PlayStation, 3 Xbox */
+/* mem: a copy of the game's atlas, block linear. family: 2 PlayStation, 3 Xbox, 4 the keyboard and mouse */
 void vk_prompts_paint(uint8_t* mem, int family, int by_letter) {
     typedef void Face(uint8_t*);
     uint8_t* s = malloc(S * S);
@@ -153,6 +157,20 @@ void vk_prompts_paint(uint8_t* mem, int family, int by_letter) {
         PIC(R1, bumper(s, "R1"));
         PIC(L2, trigger(s, "L2"));
         PIC(R2, trigger(s, "R2"));
+    } else if (family == 4) { /* each control's first key or mouse button; one without a key keeps the Switch's */
+        static const struct {
+            Cell cell;
+            int bit; /* HidNpadButton's */
+        } KEY[] = {{A, 0}, {B, 1}, {X, 2}, {Y, 3}, {L1, 6}, {R1, 7}, {L2, 8}, {R2, 9}, {PLUS, 10}, {MINUS, 11}};
+        for (size_t i = 0; i < sizeof KEY / sizeof *KEY; i++) {
+            char t[5];
+            int kind = backend_kbm_prompt(KEY[i].bit, t);
+            if (kind == 1)
+                PIC(KEY[i].cell, keycap(s, t));
+            else if (kind)
+                PIC(KEY[i].cell, mouse(s, kind - 1));
+        }
+        by_letter = 0; /* the pictures of where a button sits stay the Switch's */
     } else {
         if (!by_letter) { /* the game's letters are already Xbox's: by position they trade places */
             cell_swap(mem, A, B);
@@ -174,8 +192,21 @@ void vk_prompts_paint(uint8_t* mem, int family, int by_letter) {
 /* ---- the atlas in use. Both entry points run under vk_lock (the texture cache, the present) */
 static u64 g_gva;                  /* the atlas's GPU address, 0 = none known */
 static uint8_t* g_shown;           /* which of the sets below guest memory holds */
-static uint8_t* g_pic[4];          /* by family; [1] the game's own */
-static int g_pic_sig[4], g_family; /* a set's by_letter + 1 when painted; the family shown */
+static uint8_t* g_pic[5];          /* by family; [1] the game's own */
+static int g_pic_sig[5], g_family; /* what a set was painted for (by_letter + 1, the keys); the family shown */
+
+/* the keyboard set's signature: its ten pictures, so that a key changed in the menu paints the set again */
+static int kbm_sig(void) {
+    static const int BIT[] = {0, 1, 2, 3, 6, 7, 8, 9, 10, 11};
+    u64 h = 0xcbf29ce484222325ull;
+    for (size_t i = 0; i < sizeof BIT / sizeof *BIT; i++) {
+        char t[5] = {0};
+        int kind = backend_kbm_prompt(BIT[i], t);
+        for (int j = 0; j < 5; j++) h = (h ^ (uint8_t)t[j]) * 0x100000001b3ull;
+        h = (h ^ (u64)kind) * 0x100000001b3ull;
+    }
+    return (int)(h & 0x3fffffff) + 1;
+}
 
 static u64 fnv(const uint8_t* p, size_t n) {
     u64 h = 0xcbf29ce484222325ull;
@@ -202,8 +233,8 @@ void vk_prompts_texture(u64 gva, const VkFmt* f, u32 w, u32 h, u32 bh_log2) {
 void vk_prompts_frame(void) {
     if (!g_gva) return;
     int by_letter = 0, family = gamepad_prompts(&by_letter);
-    if (family < 1 || family > 3) family = 1;
-    int sig = family == 1 ? 0 : by_letter + 1;
+    if (family < 1 || family > 4) family = 1;
+    int sig = family == 1 ? 0 : family == 4 ? kbm_sig() : by_letter + 1;
     if (family == g_family && sig == g_pic_sig[family]) return;
     uint8_t* mem = gmem_ptr(g_gva, ATLAS_SIZE);
     if (!mem || memcmp(mem, g_shown, ATLAS_SIZE)) { /* not what we left there: the game has reused the memory */
@@ -224,6 +255,7 @@ void vk_prompts_frame(void) {
     LOG("button prompts: %s%s\n",
         family == 1   ? "Switch"
         : family == 2 ? "PlayStation"
-                      : "Xbox",
-        family > 1 && by_letter ? ", face buttons by printed letter" : "");
+        : family == 3 ? "Xbox"
+                      : "keyboard and mouse",
+        (family == 2 || family == 3) && by_letter ? ", face buttons by printed letter" : "");
 }

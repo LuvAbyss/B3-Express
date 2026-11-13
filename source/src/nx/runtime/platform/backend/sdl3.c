@@ -255,6 +255,43 @@ static u64 kbm_bits(int code) {
             if (g_kbm_bind[a][i] == code) b |= 1ull << KBM_ACT[a].bit;
     return b;
 }
+/* backend.h: the picture of a control's first key, for the game's prompts */
+int backend_kbm_prompt(int bit, char text[5]) {
+    static const struct {
+        int code;
+        const char* text;
+    } SHORT[] = {{SDL_SCANCODE_SPACE, "SPC"},      {SDL_SCANCODE_RETURN, "ENT"},      {SDL_SCANCODE_KP_ENTER, "ENT"},
+                 {SDL_SCANCODE_LSHIFT, "SHFT"},    {SDL_SCANCODE_RSHIFT, "RSHF"},     {SDL_SCANCODE_LCTRL, "CTRL"},
+                 {SDL_SCANCODE_RCTRL, "RCTL"},     {SDL_SCANCODE_LALT, "ALT"},        {SDL_SCANCODE_RALT, "RALT"},
+                 {SDL_SCANCODE_BACKSPACE, "BKSP"}, {SDL_SCANCODE_TAB, "TAB"},         {SDL_SCANCODE_ESCAPE, "ESC"},
+                 {SDL_SCANCODE_CAPSLOCK, "CAPS"},  {SDL_SCANCODE_DELETE, "DEL"},      {SDL_SCANCODE_INSERT, "INS"},
+                 {SDL_SCANCODE_HOME, "HOME"},      {SDL_SCANCODE_END, "END"},         {SDL_SCANCODE_PAGEUP, "PGUP"},
+                 {SDL_SCANCODE_PAGEDOWN, "PGDN"},  {SDL_SCANCODE_UP, "UP"},           {SDL_SCANCODE_DOWN, "DOWN"},
+                 {SDL_SCANCODE_LEFT, "LEFT"},      {SDL_SCANCODE_RIGHT, "RGHT"},      {SDL_SCANCODE_COMMA, "COMA"},
+                 {SDL_SCANCODE_PERIOD, "DOT"},     {SDL_SCANCODE_SLASH, "SLSH"},      {SDL_SCANCODE_SEMICOLON, "SEMI"},
+                 {SDL_SCANCODE_APOSTROPHE, "QUOT"}, {SDL_SCANCODE_LEFTBRACKET, "LBRK"}, {SDL_SCANCODE_RIGHTBRACKET, "RBRK"},
+                 {SDL_SCANCODE_MINUS, "MNUS"},     {SDL_SCANCODE_EQUALS, "EQL"},      {SDL_SCANCODE_GRAVE, "TICK"},
+                 {SDL_SCANCODE_BACKSLASH, "BSLH"}, {KBM_MOUSE + SDL_BUTTON_X1, "M4"}, {KBM_MOUSE + SDL_BUTTON_X2, "M5"}};
+    const char* name = "";
+    int a, code = 0, n = 0;
+    size_t i;
+    text[0] = 0;
+    for (a = 0; a < KBM_ACTS; a++)
+        if (KBM_ACT[a].bit == bit) code = g_kbm_bind[a][0];
+    if (!code) return 0;
+    if (code == KBM_MOUSE + SDL_BUTTON_LEFT) return 2;
+    if (code == KBM_MOUSE + SDL_BUTTON_RIGHT) return 3;
+    if (code == KBM_MOUSE + SDL_BUTTON_MIDDLE || code == KBM_WHEEL || code == KBM_WHEEL + 1) return 4;
+    if (code < KBM_MOUSE) name = SDL_GetScancodeName((SDL_Scancode)code);
+    for (i = 0; i < sizeof SHORT / sizeof *SHORT; i++)
+        if (SHORT[i].code == code) name = SHORT[i].text;
+    for (; *name && n < 4; name++) { /* the prompts' letters are A to Z and the digits: "Keypad 1" is KEYP */
+        char c = *name >= 'a' && *name <= 'z' ? (char)(*name - 32) : *name;
+        if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) text[n++] = c;
+    }
+    text[n] = 0;
+    return n ? 1 : 0;
+}
 static void mouse_hold(int on) {
     if (!g_win || g_mouse_held_win == on) return;
     if (!SDL_SetWindowRelativeMouseMode(g_win, on != 0) && on) {
@@ -1109,9 +1146,11 @@ static int kbm_mouse_event(const SDL_Event* e) {
     }
     if (e->button.which == SDL_TOUCH_MOUSEID) return 0;
     if (g_mouse_held_win) {
-        if (e->type == SDL_EVENT_MOUSE_BUTTON_DOWN)
-            g_mouse_buttons |= kbm_bits(KBM_MOUSE + e->button.button);
-        else
+        if (e->type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+            u64 bits = kbm_bits(KBM_MOUSE + e->button.button);
+            g_mouse_buttons |= bits;
+            if (bits) gamepad_kbm_used();
+        } else
             g_mouse_buttons &= ~kbm_bits(KBM_MOUSE + e->button.button);
         return 1;
     }
@@ -1196,7 +1235,11 @@ void video_poll(void) {
                 if (!e.key.repeat && !(e.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI))) hotkey(e.key.key);
                 /* a repeat doesn't press again: a key held as the menu closed (which cleared keys_held) stays from
                    the game until it is let go */
-                if (!e.key.repeat) keys_held |= keymap(e.key.scancode);
+                if (!e.key.repeat) {
+                    u64 bits = keymap(e.key.scancode);
+                    keys_held |= bits;
+                    if (bits) gamepad_kbm_used(); /* the prompts show keys from here on */
+                }
                 break;
             case SDL_EVENT_KEY_UP: keys_held &= ~keymap(e.key.scancode); break;
             case SDL_EVENT_WINDOW_FOCUS_GAINED: audio_focus(1); break;
