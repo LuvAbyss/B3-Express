@@ -301,6 +301,25 @@ for bad in ({'anisotropy': '3'}, {'deadzone': '99'}, {'rumble': '-1'}, {'lod_bia
 custom = 'docked=1\r\nresolution=1.7\r\nfsr=0\r\nfullscreen=1\r\nvsync=1\r\ngamepad_swap_ab=0\r\n'  # set by hand: kept
 assert L.ini_get(L.options_apply(custom, L.options_read(custom)), 'resolution') == '1.7'
 
+# keyboard and mouse: a file from before the section gets it whole, before [Network]; the keys read back as lists
+assert o['mouse_camera'] is True and o['mouse_sensitivity'] == '100' and o['keys']['key_x'] == ['Mouse Left', 'C'], o
+assert '[Keyboard and mouse]\r\nmouse_camera=1\r\n' in again and again.count('key_zr=Left Shift, 3\r\n') == 1, repr(again)
+net = L.kbm_ensure('[Display]\nfullscreen=1\n\n[Network]\nnetwork=0\n')
+assert net.index('[Keyboard and mouse]') < net.index('[Network]') and net.endswith('[Network]\nnetwork=0\n'), repr(net)
+assert L.kbm_ensure(net) == net  # once
+k2 = dict(o['keys'], key_x=['Mouse Left'], key_zr=['Space', 'Mouse 4', '='], key_b=[])
+t = L.options_apply(again, dict(o, mouse_camera=False, mouse_invert_y=True, mouse_sensitivity='150', keys=k2))
+assert L.ini_get(t, 'key_zr') == 'Space, Mouse 4, =' and L.ini_get(t, 'key_b') == '' and L.ini_get(t, 'mouse_camera') == '0'
+assert L.options_read(t)['keys'] == k2 and L.options_read(t)['mouse_sensitivity'] == '150', L.options_read(t)
+for bad in ({'mouse_sensitivity': '5'}, {'mouse_sensitivity': 'x'}, {'keys': dict(k2, key_x=['A,B'])},
+            {'keys': dict(k2, key_x=['A', 'B', 'C', 'D'])}, {'keys': dict(k2, key_x=['A\nlog=2'])},
+            {'keys': {'key_x': ['A']}}, {'keys': dict(k2, key_x=[' A'])}):
+    try:
+        L.options_apply(again, dict(o, **bad))
+        raise SystemExit(f'{bad} must be refused')
+    except ValueError:
+        pass
+
 # save backups: made, listed newest first, restored with the current save backed up first, nothing outside the folder
 import zipfile
 L.SAVE = L.DATA / 'save'

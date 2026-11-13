@@ -222,7 +222,8 @@ class Api:
     def options(self):
         self._text = self._read_ini()
         return {'values': L.options_read(self._text), 'quality_help': L.QUALITY_HELP, 'fade_help': L.FADE_HELP,
-                'screens': [n for n, _ in L.SCREENS], 'has_file': L.INI.is_file()}
+                'screens': [n for n, _ in L.SCREENS], 'has_file': L.INI.is_file(),
+                'controls': [list(row) for row in L.KBM_KEYS]}
 
     def save_options(self, values):
         try:

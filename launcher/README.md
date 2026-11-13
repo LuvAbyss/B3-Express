@@ -11,7 +11,8 @@ without WebView2 the old window opens instead, with the same logic.
   and the last session's average FPS, 1% low and frame time.
 - **Options:** window size and quality, fullscreen, shadows, texture filtering, texture detail, highest model detail,
   film grain, object fade, button prompts, A/B swap,
-  dead zone, vibration, muting. Saved in the game's `Bayo3_120.ini`, which its own menu also uses, every comment kept.
+  dead zone, vibration, muting, and the keyboard and mouse: the mouse as the camera with its sensitivity, and the
+  keys and mouse buttons of every control, changed by clicking one and pressing the new key. Saved in the game's `Bayo3_120.ini`, which its own menu also uses, every comment kept.
   The first version of that file stays beside it as `Bayo3_120.ini.before-launcher`.
 - **Saves:** back up the game's save folder to `backups/`, and restore one (the current save is backed up first).
 - **Mods:** add a mod from its folder or its `.zip` (yuzu's and Ryujinx's `<name>/romfs/` layout, Atmosphère's

@@ -436,6 +436,44 @@ ASPECTS = ('0', '1.6', '2.3333', '3.5556')  # aspect_ratio the Options page offe
 LOD_BIASES = ('0', '-0.5', '-1')  # texture_lod_bias the Options page offers: the game's, sharper, sharpest
 
 
+# The keyboard's and mouse's controls, as the runtime's [Keyboard and mouse] section has them: the key, what the
+# Options page calls it, and the keys it starts with. A value is up to three names between commas: a key by SDL's
+# name for its position on a US layout, or Mouse Left, Mouse Right, Mouse Middle, Mouse 4, Mouse 5, Wheel Up, Wheel Down
+KBM_KEYS = (('key_move_up', 'Move forward', 'W'), ('key_move_down', 'Move back', 'S'),
+            ('key_move_left', 'Move left', 'A'), ('key_move_right', 'Move right', 'D'),
+            ('key_walk', 'Walk (hold)', 'Left Alt'),
+            ('key_x', 'X: punch', 'Mouse Left, C'), ('key_a', 'A: kick, confirm', 'Mouse Right, X'),
+            ('key_y', 'Y: shoot', 'F, V'), ('key_b', 'B: jump, back', 'Space, Z'),
+            ('key_zr', 'ZR: dodge', 'Left Shift, 3'), ('key_zl', 'ZL: summon demon', 'Left Ctrl, 1'),
+            ('key_l', 'L', 'Q'), ('key_r', 'R', 'E'),
+            ('key_lstick', 'Left stick press', 'T'), ('key_rstick', 'Right stick press', 'Mouse Middle, R'),
+            ('key_plus', 'Plus: pause', 'Return'), ('key_minus', 'Minus', 'Backspace, Tab'),
+            ('key_up', 'D-Pad up', 'Up'), ('key_down', 'D-Pad down', 'Down'),
+            ('key_left', 'D-Pad left', 'Left'), ('key_right', 'D-Pad right', 'Right'),
+            ('key_look_up', 'Camera up (key)', 'I'), ('key_look_down', 'Camera down (key)', 'K'),
+            ('key_look_left', 'Camera left (key)', 'J'), ('key_look_right', 'Camera right (key)', 'L'))
+KBM_FIRST = (('mouse_camera', '1'), ('mouse_sensitivity', '100'), ('mouse_invert_y', '0'))
+
+
+def kbm_names(value):
+    """A control's keys as a list of names, from its value in the settings file"""
+    return [n.strip() for n in value.split(',') if n.strip()]
+
+
+def kbm_ensure(text):
+    """The settings file's text with the [Keyboard and mouse] section, which a file from before 0.2.7 lacks until the
+    game has run once: added whole, before [Network] when that is there, with the keys the game starts with"""
+    if re.search(r'^mouse_camera=', text, re.M):
+        return text
+    nl = '\r\n' if '\r\n' in text else '\n'
+    lines = ['[Keyboard and mouse]'] + [f'{k}={v}' for k, v in KBM_FIRST] + [f'{k}={d}' for k, _, d in KBM_KEYS]
+    block = nl.join(lines) + nl
+    m = re.search(r'^\[Network\]', text, re.M)
+    if m:
+        return text[:m.start()] + block + nl + text[m.start():]
+    return text + ('' if text.endswith('\n') or not text else nl) + nl + block
+
+
 def launcher_version():
     """The package's version (VERSION, written by make-release.py), 'dev' when run from the repository"""
     try:
@@ -454,7 +492,11 @@ def options_read(text):
             'aspect': ini_get(text, 'aspect_ratio', '0'), 'hud': ini_get(text, 'hud_area', '0'),
             'fade': dict((v, n) for n, v in FADES).get(ini_get(text, 'dither', '3'), FADES[3][0]),
             'prompts': dict((v, n) for n, v in PROMPTS).get(ini_get(text, 'button_prompts', '0'), PROMPTS[0][0]),
-            'deadzone': ini_get(text, 'gamepad_deadzone', '20'), 'rumble': ini_get(text, 'gamepad_rumble', '100')}
+            'deadzone': ini_get(text, 'gamepad_deadzone', '20'), 'rumble': ini_get(text, 'gamepad_rumble', '100'),
+            'mouse_camera': ini_get(text, 'mouse_camera', '1') == '1',
+            'mouse_invert_y': ini_get(text, 'mouse_invert_y', '0') == '1',
+            'mouse_sensitivity': ini_get(text, 'mouse_sensitivity', '100'),
+            'keys': {k: kbm_names(ini_get(text, k, d)) for k, _, d in KBM_KEYS}}
 
 
 def options_apply(text, o):
@@ -479,7 +521,21 @@ def options_apply(text, o):
     text = ini_set(text, 'dither', dict(FADES)[o['fade']], 'resolution')
     text = ini_set(text, 'gamepad_deadzone', o['deadzone'], 'gamepad_swap_ab')
     text = ini_set(text, 'gamepad_rumble', o['rumble'], 'gamepad_deadzone')
-    return ini_set(text, 'button_prompts', dict(PROMPTS)[o['prompts']], 'gamepad_swap_ab')
+    text = ini_set(text, 'button_prompts', dict(PROMPTS)[o['prompts']], 'gamepad_swap_ab')
+    sens, keys = str(o['mouse_sensitivity']), o['keys']
+    if not sens.isdigit() or not 10 <= int(sens) <= 500 or set(keys) != {k for k, _, _ in KBM_KEYS}:
+        raise ValueError('a keyboard or mouse option has a value the launcher doesn\'t offer')
+    for names in keys.values():  # a name is one key: a comma or a line end in it would make it several, or a setting
+        if len(names) > 3 or any(not n or n != n.strip() or len(n) > 16 or re.search(r'[,\x00-\x1f]', n)
+                                 for n in names):
+            raise ValueError('a control has a key the launcher doesn\'t offer')
+    text = kbm_ensure(text)
+    text = ini_set(text, 'mouse_camera', '1' if o['mouse_camera'] else '0', 'mouse_camera')
+    text = ini_set(text, 'mouse_sensitivity', sens, 'mouse_camera')
+    text = ini_set(text, 'mouse_invert_y', '1' if o['mouse_invert_y'] else '0', 'mouse_sensitivity')
+    for k, _, _ in KBM_KEYS:
+        text = ini_set(text, k, ', '.join(keys[k]), 'mouse_invert_y')
+    return text
 
 
 def write_ini(text):

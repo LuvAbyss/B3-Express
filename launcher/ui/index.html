@@ -113,6 +113,20 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
 .savebar { position: sticky; bottom: 0; display: flex; align-items: center; gap: 14px; padding: 14px 0 0; background: linear-gradient(transparent, var(--night) 30%); }
 .status { font-size: 14px; color: var(--muted); }
 .status.ok { color: var(--ok); }
+.card.wide { grid-column: 1 / -1; }
+.binds { columns: 2; column-gap: 28px; }
+.bind { break-inside: avoid; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 5px 0; border-bottom: 1px solid var(--line); min-width: 0; }
+.bind > span { font-size: 14px; font-weight: 600; min-width: 0; }
+.bind .keys { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.keycap { display: inline-flex; align-items: center; gap: 6px; background: var(--raise); border: 1px solid var(--line); border-radius: 7px; padding: 5px 9px; font: 500 12px/1.2 var(--mono); color: var(--text); cursor: pointer; }
+.keycap:hover, .keycap:focus-visible { border-color: var(--violet); }
+.keycap.add { color: var(--muted); border-style: dashed; }
+.keycap .x { color: var(--muted); font-weight: 700; padding: 0 2px; }
+.keycap .x:hover { color: var(--bad); }
+.catch { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; background: rgba(14, 11, 21, .88); }
+.catch > div { background: var(--panel); border: 1px solid var(--violet); border-radius: 14px; padding: 28px 36px; text-align: center; max-width: 420px; }
+.catch b { display: block; font-size: 18px; margin-bottom: 8px; }
+@media (max-width: 900px) { .binds { columns: 1; } }
 
 /* ---- lists (saves, mods) */
 .list { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
@@ -297,6 +311,27 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
           </div>
           <h2 style="margin-top:8px">Sound</h2>
           <div class="switch"><label for="o-mute">Mute when the game isn't the active window</label><input type="checkbox" id="o-mute" data-o="mute_unfocused"></div>
+        </div>
+        <div class="card wide">
+          <h2>Keyboard and mouse</h2>
+          <div class="sections">
+            <div class="card" style="padding:0;border:0;background:none">
+              <div class="switch"><label for="o-mouse">Mouse turns the camera<span class="hint" style="display:block;font-weight:400">Click in the game's window to give it the mouse. Esc or Alt+Tab gives it back.</span></label><input type="checkbox" id="o-mouse" data-o="mouse_camera"></div>
+              <div class="switch"><label for="o-invert">Invert mouse up and down</label><input type="checkbox" id="o-invert" data-o="mouse_invert_y"></div>
+            </div>
+            <div class="card" style="padding:0;border:0;background:none">
+              <div class="field">
+                <label for="o-sens">Mouse sensitivity</label>
+                <select id="o-sens" data-o="mouse_sensitivity"><option value="25">25%</option><option value="50">50%</option><option value="75">75%</option><option value="100">100%</option><option value="125">125%</option><option value="150">150%</option><option value="200">200%</option><option value="250">250%</option><option value="300">300%</option><option value="400">400%</option></select>
+              </div>
+            </div>
+          </div>
+          <div class="field">
+            <span class="lab">Controls</span>
+            <p class="hint">Click a key to change it, the dashed box to add one (three at most), the cross to take one away. Mouse buttons and the wheel work while the game has the mouse. Esc opens the game's menu and F1 to F12 are its own keys, so they can't be used.</p>
+            <div class="binds" id="binds"></div>
+          </div>
+          <div class="row"><button class="secondary" type="button" id="keys-reset">Back to the first keys</button><span class="status" id="keys-s" role="status"></span></div>
         </div>
       </div>
       <div class="savebar"><button class="primary" type="button" id="save" disabled>Save options</button><span class="status" id="save-s" role="status">No changes</span></div>
@@ -490,6 +525,9 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
       for (const n of screens) { const o = document.createElement('option'); o.textContent = n; sel.appendChild(o); }
       sel.value = opts.screen;
       for (const s of ['quality', 'fade', 'prompts']) setSeg(s, opts[s]);
+      controls = r.controls; drawBinds(); $('#keys-s').textContent = '';
+      const sens = $('#o-sens');
+      if (![...sens.options].some(o => o.value === opts.mouse_sensitivity)) { const o = document.createElement('option'); o.value = opts.mouse_sensitivity; o.textContent = opts.mouse_sensitivity + '%'; sens.appendChild(o); }
       $$('[data-o]').forEach(e => e.type === 'checkbox' ? e.checked = !!opts[e.dataset.o] : e.value = opts[e.dataset.o]);
       $('#save').disabled = true; $('#save-s').textContent = r.has_file ? 'No changes' : 'The game makes its settings file the first time it runs.'; $('#save-s').className = 'status';
     });
@@ -506,6 +544,80 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
     $('#save-s').textContent = err || 'Saved. They apply the next time the game starts.';
     $('#save-s').className = err ? 'status' : 'status ok'; if (!err) $('#save').disabled = true;
   });
+
+  /* ---- Options: keyboard and mouse. A control's keys are the names the game reads (SDL's, by the key's position) */
+  const KEY_NAMES = { Space: 'Space', Enter: 'Return', Tab: 'Tab', Backspace: 'Backspace', ShiftLeft: 'Left Shift', ShiftRight: 'Right Shift',
+    ControlLeft: 'Left Ctrl', ControlRight: 'Right Ctrl', AltLeft: 'Left Alt', AltRight: 'Right Alt', CapsLock: 'CapsLock',
+    ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']',
+    Semicolon: ';', Quote: "'", Backquote: '`', Period: '.', Slash: '/', Backslash: '\\', Insert: 'Insert', Home: 'Home', End: 'End',
+    PageUp: 'PageUp', PageDown: 'PageDown', Delete: 'Delete', NumpadEnter: 'Keypad Enter', NumpadAdd: 'Keypad +', NumpadSubtract: 'Keypad -',
+    NumpadMultiply: 'Keypad *', NumpadDivide: 'Keypad /', NumpadDecimal: 'Keypad .' };
+  const MOUSE_NAMES = ['Mouse Left', 'Mouse Middle', 'Mouse Right', 'Mouse 4', 'Mouse 5'];
+  function keyName(e) {  /* the game's name for a key event, or '' for one it can't take (Esc, F keys, the comma: it parts the names) */
+    const c = e.code;
+    if (/^Key[A-Z]$/.test(c)) return c.slice(3);
+    if (/^Digit[0-9]$/.test(c)) return c.slice(5);
+    if (/^Numpad[0-9]$/.test(c)) return 'Keypad ' + c.slice(6);
+    return KEY_NAMES[c] || '';
+  }
+  let controls = [], catching = null;
+  function drawBinds() {
+    const box = $('#binds'); box.innerHTML = '';
+    for (const [key, label] of controls) {
+      const row = document.createElement('div'); row.className = 'bind';
+      const name = document.createElement('span'); name.textContent = label; row.appendChild(name);
+      const keys = document.createElement('div'); keys.className = 'keys';
+      (opts.keys[key] || []).forEach((k, i) => {
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'keycap'; b.title = 'Change this key';
+        b.append(k); b.onclick = () => catchKey(key, i, label);
+        const x = document.createElement('span'); x.className = 'x'; x.textContent = '×'; x.title = 'Take this key away'; x.setAttribute('role', 'button');
+        x.onclick = ev => { ev.stopPropagation(); opts.keys[key].splice(i, 1); drawBinds(); dirty(); };
+        b.appendChild(x); keys.appendChild(b);
+      });
+      if ((opts.keys[key] || []).length < 3) {
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'keycap add'; b.textContent = '+ key'; b.title = 'Add a key';
+        b.onclick = () => catchKey(key, -1, label); keys.appendChild(b);
+      }
+      row.appendChild(keys); box.appendChild(row);
+    }
+  }
+  function setKey(key, at, name) {
+    let from = '';
+    for (const [k, label] of controls) {  /* a key plays one control: taken from the one that had it */
+      const i = (opts.keys[k] || []).indexOf(name);
+      if (i >= 0 && !(k === key && i === at)) { opts.keys[k].splice(i, 1); if (k === key && i < at) at--; if (k !== key) from = label; }
+    }
+    if (at < 0) opts.keys[key].push(name); else opts.keys[key][at] = name;
+    $('#keys-s').textContent = from ? name + ' was taken from ' + from + '.' : '';
+    drawBinds(); dirty();
+  }
+  function catchKey(key, at, label) {
+    if (catching) return;
+    const veil = document.createElement('div'); veil.className = 'catch'; veil.tabIndex = -1;
+    veil.innerHTML = '<div><b></b><span class="hint">Press a key, click a mouse button or turn the wheel. Esc leaves it as it is.</span></div>';
+    veil.querySelector('b').textContent = label;
+    const done = name => {
+      removeEventListener('keydown', onKey, true); veil.remove(); catching = null;
+      if (name) setKey(key, at, name);
+    };
+    const onKey = e => {
+      e.preventDefault(); e.stopPropagation();
+      if (e.code === 'Escape') return done('');
+      if (e.repeat) return;
+      const n = keyName(e);
+      if (n) done(n); else veil.querySelector('span').textContent = 'That key can\'t be used. Press another, or Esc.';
+    };
+    veil.addEventListener('mousedown', e => { e.preventDefault(); if (MOUSE_NAMES[e.button]) done(MOUSE_NAMES[e.button]); });
+    veil.addEventListener('contextmenu', e => e.preventDefault());
+    veil.addEventListener('wheel', e => { e.preventDefault(); if (e.deltaY) done(e.deltaY < 0 ? 'Wheel Up' : 'Wheel Down'); }, { passive: false });
+    addEventListener('keydown', onKey, true);
+    catching = veil; document.body.appendChild(veil); veil.focus();
+  }
+  $('#keys-reset').onclick = () => {
+    if (!opts) return;
+    for (const [key, , first] of controls) opts.keys[key] = first.split(',').map(s => s.trim()).filter(Boolean);
+    $('#keys-s').textContent = 'The first keys are back. Save options to keep them.'; drawBinds(); dirty();
+  };
 
   /* ---- Saves */
   function loadBackups() {
