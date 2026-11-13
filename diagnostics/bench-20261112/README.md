@@ -264,3 +264,29 @@ log why, start empty, exit 0 and leave a good 248 MB file. Warm (`prtw`, 2 fight
 exit in the first (the cache grew 7 KB), 13 frames over 33 ms, 3 and 2 hitches, no slow library. Fresh cache
 (`prtp`): written at the end of preparation and at each fight's exit, loaded by the next run, 12 and 13 frames
 over 33 ms, 3 hitches each. The isolated copy's own build and cache are back.
+
+## The three hitches left are the game reading text in menus (2026-11-13, runs `bench-tail1`, `bench-tail2`)
+
+The profiler's spike report now also covers the time after a frame's last window (`SNX_NVN_SPIKE_MS`, with the
+`profile` option; `BENCH_PROFILE=1 BENCH_SNX="SNX_NVN_SPIKE_MS=40;SNX_PROF_CALLERS=1" bench.py label=folder`), shows
+24 places a thread and leaves out threads that only waited. Three profiled warm fights, exit 0, saves unchanged:
+
+| Frame | After the last window | Draws | On screen | The one busy thread |
+|---|---|---|---|---|
+| 949 | 61-63 ms | 19 | a black screen between the main menu and the chapter map, before the loading spinner | sdk `__floatscan`, `strtod_l`, `strcmp`, `strcasecmp`, `strtok_r`, `stpncpy`, `strchrnul`, `__addtf3`, main `8c24ff8`, `9326340` |
+| 1085-1104 | 50-51 ms | 45 | the loading spinner on black, two frames before the chapter map fades in | main `881bd3c`, `88183e4`, `8ccc728`, `8ccd05c`, `8cd7660`, `82ceca0` |
+| 4623 | 61-76 ms | 113 | "The witch hunts are over" back to the verse | the same sdk text functions as 949, main `9326620`, `8c24ff8` |
+
+- In each, one game thread runs game code for the whole time and every other thread waits: no runtime function, no
+  driver, no lock. About half its samples fall in the code module outside any listed function start.
+- 949 and 4623 are the game turning text into numbers and names (`strtok_r`, `strcasecmp`, `strtod` with its
+  128-bit `__addtf3`): a table read as text at a menu or a restart. It is the game's own work on its own thread, and
+  the console does the same there.
+- None is in play: the contact sheet (`shots-20261113/fix-whole-route.png`, a picture every 100 frames) has the
+  chapter map at 900, the box at 1100 and the white game-over card at 4600. A warm fight has no hitch of 50 ms
+  while the player fights.
+- Not done: who calls `strtod` (which table), and what the unlisted half of the samples is. Worth it only if a
+  player reports the pause at a restart.
+- Pictures of the very frames (2026-11-13 evening, runs `bench-demoB`..`D` with `RUN_SHOT_FROM`/`TO`, and `bench-demoA`
+  with `SNX_NVN_SLOW_MS=1` for every frame's time): 949 is black before and after, 1090 is the spinner, 4624 is the still
+  game-over card. The rows above are corrected from them: the contact sheet's every-100-frames pictures had misled.
