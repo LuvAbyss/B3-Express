@@ -47,6 +47,8 @@ It checks the version, copies the game files, then compiles the game code for yo
 
 On the **Graphics** page, pick your screen size, then a quality. **Smooth 60** is recommended. On **Controller** you can swap A and B, and set the dead zone and vibration.
 
+No controller? The keyboard and mouse work too. Click in the game's window and the mouse turns the camera; W A S D move, the left and right mouse buttons punch and kick, Space jumps, Left Shift dodges and Esc opens the game's menu. The **Options** page lists every key under **Keyboard and mouse**: click one and press the key you want instead.
+
 ## Step 5: Play
 
 Press **Play**. The first Play prepares shaders, which takes about 3 minutes and shows a percentage. Later launches skip most of that.

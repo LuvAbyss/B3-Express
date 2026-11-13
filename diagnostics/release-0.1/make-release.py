@@ -4,12 +4,12 @@ import shutil
 import zipfile
 from pathlib import Path
 
-VERSION = '0.2.6'
+VERSION = '0.2.7'
 root = Path.cwd()
 name = f'B3-Express-{VERSION}-windows-x64'
 out = root / 'release' / name
-exe = root / 'diagnostics/release-0.1/Bayo3_120-0.2.6-release.exe'  # built from 79701ae (chapter 14 fixes, gallery speed)
-assert hashlib.sha256(exe.read_bytes()).hexdigest().startswith('14fcdaf3')
+exe = root / 'diagnostics/release-0.1/Bayo3_120-0.2.7-release.exe'  # built from 28b7a94 (keyboard and mouse, hitch fixes), the exe the user played
+assert hashlib.sha256(exe.read_bytes()).hexdigest().startswith('ba16fbe6')
 assert not (root / 'release' / (name + '.zip')).exists(), 'this version is already packaged: raise VERSION'
 if out.exists():
     shutil.rmtree(out)
