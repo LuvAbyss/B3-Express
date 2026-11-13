@@ -1,4 +1,4 @@
-﻿# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Bayonetta 3 launcher. Settings live in the game's INI, so this and the game's own menu always agree."""
 import hashlib
 import json
@@ -281,7 +281,7 @@ def prep_mode(text):
 
 
 # the game's button_prompts values, as the Controller page names them
-PROMPTS = (('Auto', '0'), ('Switch', '1'), ('PlayStation', '2'), ('Xbox', '3'))
+PROMPTS = (('Auto', '0'), ('Switch', '1'), ('PlayStation', '2'), ('Xbox', '3'), ('Keyboard', '4'))
 
 
 def check_game(data=DATA):

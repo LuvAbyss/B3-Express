@@ -287,6 +287,7 @@ o2 = dict(o, screen='3840 x 2160', quality='Balanced', shadows=False, fade='Off'
 t = L.options_apply(GAME_INI, o2)  # Balanced on 1080p is stored as native, the same as Sharp: a bigger screen
 assert L.options_read(t) == o2, (L.options_read(t), o2)
 assert L.ini_get(t, 'dither') == '1' and L.ini_get(t, 'button_prompts') == '3' and L.ini_get(t, 'shadows') == '0'
+assert L.ini_get(L.options_apply(t, dict(o2, prompts='Keyboard')), 'button_prompts') == '4'
 assert L.ini_get(t, 'aspect_ratio') == '2.3333'
 # wider than 16:9 the scene is drawn wider (prepared shaders for scaling); 16:10 and 16:9 aren't
 assert L.scaled_mode('resolution=1\r\naspect_ratio=2.3333\r\n') and not L.scaled_mode('resolution=1\r\naspect_ratio=1.6\r\n')
