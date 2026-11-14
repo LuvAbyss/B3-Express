@@ -75,6 +75,7 @@ Heavy cutscenes can dip below 60, and the sound may slip slightly when they do. 
 | What you see | What to do |
 |---|---|
 | The launcher doesn't open | Unzip the whole folder again. `launcher\python` must be there |
+| Install says B3-Express's own file is missing | Your game folder is fine. `Bayo3_120\Bayo3_120.exe` of the package is gone: unzip the whole package again, and if it disappears again, allow it in your antivirus |
 | Install refuses your folder | The folder must hold `exefs` and `romfs` directly, at v1.2.0 |
 | Install says there's no room | Free up about 20 GB on that drive |
 | The compile stops | Close other heavy programs and press the button again |

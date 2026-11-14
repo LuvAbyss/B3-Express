@@ -31,9 +31,9 @@ launcher = out / 'launcher'
 launcher.mkdir()
 for f in ('bayonetta_launcher.py', 'web_launcher.py', 'theme.py', 'code-hints.txt', 'code-tablecalls.txt', 'code-insnhooks.txt', 'README.md', 'ATTRIBUTION.md', 'LICENSE'):
     shutil.copyfile(root / 'launcher' / f, launcher / f)
-shutil.copytree(root / 'launcher/ui', launcher / 'ui', ignore=shutil.ignore_patterns('prototype.html'))
+shutil.copytree(root / 'launcher/ui', launcher / 'ui', ignore=shutil.ignore_patterns('prototype.html', '.omc'))
 (out / 'VERSION').write_text(VERSION + '\n', encoding='ascii')  # the launcher's update check reads it
-shutil.copytree(root / 'launcher/python', launcher / 'python', ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+shutil.copytree(root / 'launcher/python', launcher / 'python', ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.omc'))
 
 BANNED = ('_code.dll', '.abi', '.hints', '.ini', '.log', '.nso', '.nca', '.nsp', '.xci', '.keys', '.ppm', '.snxs', '.bnk', '.webm')
 names = [p.relative_to(out).as_posix() for p in out.rglob('*') if p.is_file()]

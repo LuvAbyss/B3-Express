@@ -1258,7 +1258,8 @@ class Launcher(LauncherTheme):
         if self.installing:
             return
         if not (GAME / (NAME + '.exe')).is_file():
-            self.install_status.set(f'The game\'s program isn\'t in {GAME}. Install needs the whole package.')
+            self.install_status.set(f'B3-Express\'s own file {GAME / (NAME + ".exe")} is missing. Unzip the whole package '
+                                    'again. If it goes missing again, your antivirus removed it.')
             return
         if game_running():
             self.install_status.set('Close the game first.')

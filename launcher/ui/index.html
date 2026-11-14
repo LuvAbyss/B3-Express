@@ -466,7 +466,7 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
       $('#folder').hidden = compileOnly;
       go.textContent = compileOnly ? 'Compile' : 'Install';
       go.disabled = !st.program || (!compileOnly && !folder);
-      if (!st.program) { $('#note').hidden = false; $('#note').textContent = 'The game\'s program is missing from this folder. Unzip the whole package again.'; }
+      if (!st.program) { $('#note').hidden = false; $('#note').textContent = 'Your game folder isn\'t the problem. B3-Express\'s own file is missing: ' + st.program_path + '. Unzip the whole B3-Express package again. If the file goes missing again, your antivirus removed it: allow it there.'; }
     } else if (step === 'prepare') {
       $('#folder').hidden = true;
       $('#headline').textContent = st.stale ? 'Your graphics driver changed' : 'One more step';

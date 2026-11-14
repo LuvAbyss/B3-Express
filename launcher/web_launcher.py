@@ -76,7 +76,7 @@ class Api:
                 'job': self._job.view() if self._job else None, 'note': self._exit_note, 'gpu': self._gpu,
                 'version': L.launcher_version(), 'last': L.session_stats(L.GAME / (L.NAME + '.log')),
                 'codemods': files and L.CODE.is_file() and L.STAMP.is_file() and L.code_mods_changed(),
-                'program': (L.GAME / (L.NAME + '.exe')).is_file()}
+                'program': (L.GAME / (L.NAME + '.exe')).is_file(), 'program_path': str(L.GAME / (L.NAME + '.exe'))}
 
     def _busy(self):
         return self._job is not None and not self._job.done
@@ -102,7 +102,8 @@ class Api:
         if self._busy():
             return 'Something is already running.'
         if not (L.GAME / (L.NAME + '.exe')).is_file():
-            return f'The game\'s program isn\'t in {L.GAME}. Install needs the whole package.'
+            return (f'B3-Express\'s own file {L.GAME / (L.NAME + ".exe")} is missing. Unzip the whole package again. '
+                    'If it goes missing again, your antivirus removed it.')
         if L.game_running():
             return 'Close the game first.'
         if L.game_running('scarletnx'):
