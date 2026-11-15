@@ -320,9 +320,9 @@ static int create_device(void) {
     g_shader_stage_point_size = want->shaderTessellationAndGeometryPointSize != 0;
     g_shader_geometry = want->geometryShader != 0;
     g_shader_tessellation = want->tessellationShader != 0;
-    const char* ext[9];
+    const char* ext[10];
     u32 next = 0;
-    int has_shader_clock = 0, has_budget = 0, has_gpl = 0, has_lib = 0;
+    int has_shader_clock = 0, has_budget = 0, has_gpl = 0, has_lib = 0, has_eds3 = 0;
     if (!g_opt_headless) ext[next++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     {
         u32 n = 0;
@@ -337,6 +337,7 @@ static int create_device(void) {
             if (!strcmp(e[i].extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) has_budget = 1;
             if (!strcmp(e[i].extensionName, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME)) has_gpl = 1;
             if (!strcmp(e[i].extensionName, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME)) has_lib = 1;
+            if (!strcmp(e[i].extensionName, VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME)) has_eds3 = 1;
             /* a portability driver's subset must be enabled when it has one (MoltenVK) */
             if (!strcmp(e[i].extensionName, "VK_KHR_portability_subset")) ext[next++] = "VK_KHR_portability_subset";
         }
@@ -350,6 +351,8 @@ static int create_device(void) {
                                                          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CLOCK_FEATURES_KHR};
     VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT fgpl = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT feds3 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
     VkPhysicalDeviceVulkan12Features q12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
     VkPhysicalDeviceVulkan11Features q11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
                                             .pNext = &q12};
@@ -371,6 +374,13 @@ static int create_device(void) {
         *tail = &fgpl;
         tail = &fgpl.pNext;
     }
+    /* AMD's driver compiles depth clamp into the vertex code: set at the draw, one pipeline does for both, and nothing
+       is compiled twice. NVIDIA's ignores it there, and its path stays as measured */
+    has_eds3 = has_eds3 && g_vk.props.vendorID != 0x10DE;
+    if (has_eds3) {
+        *tail = &feds3;
+        tail = &feds3.pNext;
+    }
     if (has_shader_clock) *tail = &qclock;
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &f2);
     if (has_gpl) { /* without fast linking a link can compile, and libraries gain nothing */
@@ -383,6 +393,7 @@ static int create_device(void) {
     g_shader_clock_scopes =
         has_shader_clock ? (qclock.shaderSubgroupClock ? 1 : 0) | (qclock.shaderDeviceClock ? 2 : 0) : 0;
     g_vk.has_divisor = g_vk.has_divisor && fdiv.vertexAttributeInstanceRateDivisor;
+    g_vk.has_dyn_clamp = has_eds3 && feds3.extendedDynamicState3DepthClampEnable && want->depthClamp;
     g_vk.has_border_color = g_vk.has_border_color && fbc.customBorderColors && fbc.customBorderColorWithoutFormat;
     if (g_vk.has_border_color) { /* how many samplers may have a custom border color: as few as 32 */
         VkPhysicalDeviceCustomBorderColorPropertiesEXT cbp = {
@@ -463,6 +474,14 @@ static int create_device(void) {
         ext[next++] = VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME;
         ext[next++] = VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME;
     }
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT eeds3 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT,
+        .extendedDynamicState3DepthClampEnable = VK_TRUE};
+    if (g_vk.has_dyn_clamp) {
+        eeds3.pNext = chain;
+        chain = &eeds3;
+        ext[next++] = VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME;
+    }
     VkDeviceCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                               .pNext = chain,
                               .queueCreateInfoCount = g_vk.compute_family == g_vk.gfx_family ? 1 : 2,
@@ -482,6 +501,9 @@ static int create_device(void) {
                                   .instance = g_vk.instance,
                                   .vulkanApiVersion = VK_API_VERSION_1_3,
                                   .pVulkanFunctions = &vf};
+    /* AMD's driver takes about 0.13 ms a MiB to allocate memory: VMA's 256 MiB block was 33 ms on the frame whose
+       image needed a new one (a render target in the middle of a fight). NVIDIA's keeps VMA's size */
+    if (g_vk.props.vendorID != 0x10DE) vai.preferredLargeHeapBlockSize = 32ull << 20;
     if (!VK_OK(vmaCreateAllocator(&vai, &g_vk.vma))) return 0;
     LOG("vulkan: %s, Vulkan %u.%u.%u, driver %08x, graphics queue family %u, compute %u%s\n", g_vk.props.deviceName,
         VK_API_VERSION_MAJOR(g_vk.props.apiVersion), VK_API_VERSION_MINOR(g_vk.props.apiVersion),

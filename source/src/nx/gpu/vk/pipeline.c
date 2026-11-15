@@ -579,6 +579,32 @@ typedef struct Lib {
 } Lib;
 static Lib* g_libh[LIBH];
 static PMutex g_lib_lk = PMUTEX_INIT;
+/* The draws' shader modules (vk_nvn_shader's, never destroyed) by their code: a library is keyed by its SPIR-V's hash,
+   so one shader preparation made from the same code is the draw's. Other modules are keyed by their handle */
+#define MODH 16384u
+static struct {
+    VkShaderModule m;
+    u64 id;
+} g_modid[MODH];
+static u32 mod_slot(VkShaderModule m) {
+    u64 h = (u64)(size_t)m * 0x9E3779B97F4A7C15ull;
+    return (u32)(h >> 40) & (MODH - 1);
+}
+u64 vk_spirv_id(const u32* spv, size_t words) { return vk_hash(spv, (u64)words * 4) | 2; /* never 0 or 1 */ }
+void vk_module_note(VkShaderModule m, u64 id) {
+    u32 i, n;
+    pm_lock(&g_lib_lk);
+    for (i = mod_slot(m), n = 0; n < MODH && g_modid[i].m && g_modid[i].m != m; n++) i = (i + 1) & (MODH - 1);
+    if (n < MODH) g_modid[i].m = m, g_modid[i].id = id;
+    pm_unlock(&g_lib_lk);
+}
+static VkShaderModule mod_key(VkShaderModule m) { /* lock held */
+    u32 i, n;
+    if (!m) return m;
+    for (i = mod_slot(m), n = 0; n < MODH && g_modid[i].m; n++, i = (i + 1) & (MODH - 1))
+        if (g_modid[i].m == m) return (VkShaderModule)(size_t)g_modid[i].id;
+    return m;
+}
 static VkLibStats g_libs;
 void vk_pipeline_lib_stats(VkLibStats* s) {
     pm_lock(&g_lib_lk);
@@ -592,9 +618,8 @@ static VkPipeline lib_compile(u32 part, const VkGraphicsPipelineCreateInfo* gi) 
         VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT,
         VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT,
         VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT};
-    VkGraphicsPipelineLibraryCreateInfoEXT li = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT,
-                                                 .pNext = gi->pNext,
-                                                 .flags = flags[part]};
+    VkGraphicsPipelineLibraryCreateInfoEXT li = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT, .pNext = gi->pNext, .flags = flags[part]};
     VkGraphicsPipelineCreateInfo c = *gi;
     VkPipeline p = VK_NULL_HANDLE;
     c.pNext = &li;
@@ -641,7 +666,9 @@ static VkPipeline lib_get(u32 part, const PipeKey* m, const VkGraphicsPipelineCr
     return l->p;
 }
 
-static VkPipeline pipe_create(const PipeKey* k, int prep) {
+/* prep: 0 a draw's pipeline; 1 only the stage's library, made and dropped, for the driver's cache; 2 the same kept in
+   the library table under id, the hash of its code, for the draw that uses it */
+static VkPipeline pipe_create(const PipeKey* k, int prep, u64 id) {
     VkPipelineShaderStageCreateInfo st[5];
     VkShaderModule modules[5];
     static const VkShaderStageFlagBits bits[5] = {VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT,
@@ -760,11 +787,15 @@ static VkPipeline pipe_create(const PipeKey* k, int prep) {
                             VK_DYNAMIC_STATE_STENCIL_WRITE_MASK,
                             VK_DYNAMIC_STATE_STENCIL_REFERENCE,
                             VK_DYNAMIC_STATE_DEPTH_BOUNDS,
+                            VK_DYNAMIC_STATE_DEPTH_CLAMP_ENABLE_EXT,
                             VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE};
+    u32 ndyn = sizeof dyn / sizeof dyn[0];
+    if (!g_vk.has_dyn_clamp)
+        dyn[ndyn - 2] = dyn[ndyn - 1], ndyn--; /* depth clamp in the pipeline: the stride moves up */
     /* the stride is set by vkCmdBindVertexBuffers2, which a draw without vertex buffers never calls: a pipeline without
        bindings leaves it out (it is last) */
     VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-                                           .dynamicStateCount = sizeof dyn / sizeof dyn[0] - (k->nbind ? 0 : 1),
+                                           .dynamicStateCount = ndyn - (k->nbind ? 0 : 1),
                                            .pDynamicStates = dyn};
     VkFormat cf[8];
     for (u32 i = 0; i < k->ncolor; i++) cf[i] = (VkFormat)k->color[i];
@@ -790,26 +821,32 @@ static VkPipeline pipe_create(const PipeKey* k, int prep) {
     VkPipeline p = VK_NULL_HANDLE;
     if (g_vk.has_gpl) {
         VkPipelineDynamicStateCreateInfo dy2 = dy; /* the stride belongs to vertex input */
-        VkGraphicsPipelineCreateInfo base = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-                                             .pDynamicState = &dy2,
-                                             .layout = g_vk_playout};
+        VkGraphicsPipelineCreateInfo base = {
+            .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pDynamicState = &dy2, .layout = g_vk_playout};
         VkGraphicsPipelineCreateInfo c = base;
         VkPipeline libs[LIB_PARTS];
         PipeKey m;
         u64 t0;
-        dy2.dynamicStateCount = sizeof dyn / sizeof dyn[0] - 1;
+        dy2.dynamicStateCount = ndyn - 1;
         if (prep) { /* only the stage's library, as a pipeline's would be made */
             c.stageCount = 1;
             c.pNext = &ri;
+            memset(&m, 0, sizeof m); /* the key the draw's lib_get below makes for it */
             if (k->vs) {
                 c.pStages = st;
                 c.pViewportState = &vp;
                 c.pRasterizationState = &rs;
+                m.vs = (VkShaderModule)(size_t)id;
+                m.polygon = k->polygon;
+                m.depth_clamp = k->depth_clamp;
+                if (prep == 2) return lib_get(LIB_PR, &m, &c);
                 p = lib_compile(LIB_PR, &c);
             } else {
                 c.pStages = &st[nst - 1];
                 c.pMultisampleState = &ms;
                 c.pDepthStencilState = &ds;
+                m.fs = (VkShaderModule)(size_t)id;
+                if (prep == 2) return lib_get(LIB_FS, &m, &c);
                 p = lib_compile(LIB_FS, &c);
             }
             if (p) vkDestroyPipeline(g_vk.dev, p, NULL);
@@ -827,10 +864,12 @@ static VkPipeline pipe_create(const PipeKey* k, int prep) {
         libs[LIB_VI] = lib_get(LIB_VI, &m, &c);
 
         memset(&m, 0, sizeof m);
-        m.vs = k->vs;
-        m.tcs = k->tcs;
-        m.tes = k->tes;
-        m.gs = k->gs;
+        pm_lock(&g_lib_lk);
+        m.vs = mod_key(k->vs);
+        m.tcs = mod_key(k->tcs);
+        m.tes = mod_key(k->tes);
+        m.gs = mod_key(k->gs);
+        pm_unlock(&g_lib_lk);
         m.patch = k->patch;
         m.polygon = k->polygon;
         m.depth_clamp = k->depth_clamp;
@@ -844,7 +883,9 @@ static VkPipeline pipe_create(const PipeKey* k, int prep) {
         libs[LIB_PR] = lib_get(LIB_PR, &m, &c);
 
         memset(&m, 0, sizeof m);
-        m.fs = k->fs;
+        pm_lock(&g_lib_lk);
+        m.fs = mod_key(k->fs);
+        pm_unlock(&g_lib_lk);
         c = base;
         c.pNext = &ri;
         c.stageCount = 1;
@@ -867,12 +908,10 @@ static VkPipeline pipe_create(const PipeKey* k, int prep) {
         libs[LIB_FO] = lib_get(LIB_FO, &m, &c);
 
         if (!libs[0] || !libs[1] || !libs[2] || !libs[3]) return VK_NULL_HANDLE;
-        VkPipelineLibraryCreateInfoKHR pl = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR,
-                                             .libraryCount = LIB_PARTS,
-                                             .pLibraries = libs};
-        VkGraphicsPipelineCreateInfo link = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-                                             .pNext = &pl,
-                                             .layout = g_vk_playout};
+        VkPipelineLibraryCreateInfoKHR pl = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR, .libraryCount = LIB_PARTS, .pLibraries = libs};
+        VkGraphicsPipelineCreateInfo link = {
+            .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &pl, .layout = g_vk_playout};
         t0 = plat_ns();
         VK_OK(vkCreateGraphicsPipelines(g_vk.dev, g_pcache, 1, &link, NULL, &p));
         t0 = plat_ns() - t0;
@@ -895,7 +934,7 @@ VkPipeline vk_pipeline_get(const PipeKey* k) {
     Pipe* p = calloc(1, sizeof *p);
     p->k = *k;
     p->h = h;
-    p->p = pipe_create(k, 0);
+    p->p = pipe_create(k, 0, 0);
     pcache_note();
     p->next = g_pipeh[b];
     g_pipeh[b] = p;
@@ -903,7 +942,7 @@ VkPipeline vk_pipeline_get(const PipeKey* k) {
 }
 
 /* a pipeline made outside vk_lock and outside the table: its caller keeps it (the driver synchronizes the cache) */
-void vk_pipeline_prep(VkShaderModule m, int vertex) {
+void vk_pipeline_prep(VkShaderModule m, int vertex, u64 keep) {
     PipeKey k;
     memset(&k, 0, sizeof k);
     if (vertex)
@@ -912,8 +951,15 @@ void vk_pipeline_prep(VkShaderModule m, int vertex) {
         k.fs = m;
     k.topo_class = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     k.polygon = VK_POLYGON_MODE_FILL;
-    pipe_create(&k, 1);
+    pipe_create(&k, keep ? 2 : 1, keep);
+    if (vertex && g_vk.feat.depthClamp && !g_vk.has_dyn_clamp && vk_lib_cache_slow()) { /* 40-76 ms each unprepared */
+        k.depth_clamp = 1;
+        pipe_create(&k, keep ? 2 : 1, keep);
+    }
 }
+/* AMD's driver compiles depth clamp into the vertex library and takes about 1.5 ms for a library its cache has, where
+   NVIDIA's ignores depth clamp there and takes 0.25 (RX 6700 XT and RTX 3080, 2026-11-14) */
+int vk_lib_cache_slow(void) { return g_vk.props.vendorID != 0x10DE; }
 const char* vk_pipeline_cache_dir(void) { return g_cache_dir; }
 void vk_pipeline_mark_dirty(void) { pcache_note(); }
 int vk_cpu_threads(void) {
@@ -932,7 +978,7 @@ void vk_thread_low(void) {
 #endif
 }
 VkPipeline vk_pipeline_make(const PipeKey* k) {
-    VkPipeline p = pipe_create(k, 0);
+    VkPipeline p = pipe_create(k, 0, 0);
     pcache_note();
     return p;
 }

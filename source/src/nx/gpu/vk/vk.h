@@ -60,6 +60,7 @@ typedef struct {
     /* optional features that were enabled */
     VkPhysicalDeviceFeatures feat;
     int has_divisor;      /* VK_EXT_vertex_attribute_divisor: instance divisors above 1 */
+    int has_dyn_clamp;    /* VK_EXT_extended_dynamic_state3: depth clamp set at the draw, not in the pipeline */
     int has_border_color; /* VK_EXT_custom_border_color */
     u32 border_color_max; /* maxCustomBorderColorSamplers: past it, samplers take the nearest built-in color */
     int has_mirror_clamp; /* samplerMirrorClampToEdge: VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE */
@@ -101,7 +102,7 @@ enum { VKM_NONE, VKM_TARGET, VKM_SURF, VKM_ASTC, VKM_BC, VKM_TEX, VKM_COPY, VKM_
 void vk_mem_tag(VmaAllocation a, int kind);
 void vk_mem_untag(VmaAllocation a);
 u64 vk_mem_budget(void); /* the video memory the process may use now, as the driver reports it */
-void vk_mem_log(void); /* one line: video memory by kind, and the process's use against its budget */
+void vk_mem_log(void);   /* one line: video memory by kind, and the process's use against its budget */
 
 /* cmd.c */
 void vk_cmd_init(void);
@@ -513,8 +514,12 @@ typedef struct {
     u64 n[4], ns[4], max[4], links, link_ns, link_max;
 } VkLibStats;
 void vk_pipeline_lib_stats(VkLibStats* s);
-/* a vertex (or else fragment) module compiled as its library into the pipeline cache, and the library destroyed */
-void vk_pipeline_prep(VkShaderModule m, int vertex);
+/* a vertex (or else fragment) module compiled as its library into the pipeline cache */
+/* keep: 0 the library is made for the driver's cache and dropped, else kept under that code hash (vk_spirv_id) */
+void vk_pipeline_prep(VkShaderModule m, int vertex, u64 keep);
+int vk_lib_cache_slow(void); /* not NVIDIA: vertex stages prepared with depth clamp too, and libraries kept */
+u64 vk_spirv_id(const u32* spv, size_t words);
+void vk_module_note(VkShaderModule m, u64 id); /* a module that lives for the whole run, by its code */
 const char* vk_pipeline_cache_dir(void);
 void vk_pipeline_mark_dirty(void); /* the next save writes the cache */
 int vk_cpu_threads(void);

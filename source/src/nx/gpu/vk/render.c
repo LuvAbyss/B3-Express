@@ -183,6 +183,7 @@ static void plain_state(VkCommandBuffer cb, VkRect2D sc) {
     vkCmdSetLineWidth(cb, 1.0f);
     vkCmdSetDepthBiasEnable(cb, VK_FALSE);
     vkCmdSetDepthBias(cb, 0, 0, 0);
+    if (g_vk.has_dyn_clamp) vkCmdSetDepthClampEnableEXT(cb, VK_FALSE);
     float bc[4] = {0, 0, 0, 0};
     vkCmdSetBlendConstants(cb, bc);
     vkCmdSetDepthTestEnable(cb, VK_FALSE);
@@ -1556,7 +1557,7 @@ retry:
     memset(&k, 0, sizeof k);
     k.vs = vs->mod;
     k.fs = fs ? fs->mod : VK_NULL_HANDLE;
-    k.depth_clamp = g_vk.feat.depthClamp && vk_render_depth_clamp(r);
+    k.depth_clamp = g_vk.feat.depthClamp && !g_vk.has_dyn_clamp && vk_render_depth_clamp(r);
     VkPrimitiveTopology topo;
     switch (topology) {
         case 0: topo = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; break;
@@ -1945,6 +1946,7 @@ retry:
     }
     if (!g_vk.feat.depthClamp && vk_render_depth_clamp(r))
         LOG_LIMIT(1, "vulkan: depth clamp requested but unavailable on this device\n");
+    if (g_vk.has_dyn_clamp) vkCmdSetDepthClampEnableEXT(cb, vk_render_depth_clamp(r) != 0);
     {
         float bc[4];
         memcpy(bc, &r[0x4C7], 16);

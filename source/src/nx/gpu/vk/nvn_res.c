@@ -37,6 +37,17 @@ static int rp_scaling(void) { return g_vk_scale != 1.0f || rp_fsr_on() || rp_xst
 /* what prepared shaders are for, beside the driver: the scaling (FragCoord in the game's pixels) and dither=N, which
    change pixel stages. 0 and 1 with dither=0, as before it existed. The launcher reads it back (shaders_ready) */
 static int prep_mode(void) { return rp_scaling() + 2 * g_opt_dither; }
+/* a play run on a driver whose cached libraries are slow to make (vk_lib_cache_slow): the workers make each stage's library
+   again and keep it for the draw, which then only links. The preparation pass itself only fills the driver's cache */
+static int g_prep_run;
+static int prep_keep(void) { return !g_prep_run && vk_lib_cache_slow(); }
+/* the driver the prepared stages are for, "c" after it when vertex stages are prepared with depth clamp too: the
+   launcher compares it as text, so a pass made before that is done again */
+static const char* prep_gpu(void) {
+    static char id[16];
+    snprintf(id, sizeof id, "%08x%s", g_vk.props.driverVersion, vk_lib_cache_slow() ? "c" : "");
+    return id;
+}
 
 /* c7 (the video memory copies, below): the GPU's blocks of a range land in guest memory before the CPU reads it */
 static void own_land_range(int p, u64 off, u64 size);
@@ -326,7 +337,7 @@ static u32 grain_word(int stage, const u8* code, u32 window) {
     return 0;
 }
 /* the stage's SPIR-V for key, the caller to free it. Under vk_lock: the translator's state is shared */
-static u32* stage_spirv(int stage, const u8* code, u32 window, int compute_stub, u64 cb1_gva, u32 cb1_size,
+static u32* stage_spirv(int stage, const u8* code, u32 window, int compute_stub, const u8* cb1, u32 cb1_size,
                         const u32* cs_local, u32 shared, const NvnStageKey* key, ShaderInfo* out, size_t* words,
                         u32** cut, size_t* cut_words) {
     static u8 framed[0x10000 + 80];
@@ -365,7 +376,7 @@ static u32* stage_spirv(int stage, const u8* code, u32 window, int compute_stub,
             si.tex_sint_mask = key->tex_sint;
         }
     }
-    g_cb1 = cb1_size && cb1_size <= 0x10000 ? gmem_ptr_untracked(cb1_gva, cb1_size) : NULL;
+    g_cb1 = cb1_size && cb1_size <= 0x10000 ? cb1 : NULL;
     g_cb1_size = g_cb1 ? cb1_size : 0;
     /* the instance id from BaseInstance: NVN's indirect draws carry their base instance on the GPU */
     g_shader_instance_base_builtin = g_vk.has_shader_draw_parameters;
@@ -413,8 +424,9 @@ int vk_nvn_shader(int stage, u64 code_gva, u32 window, int compute_stub, u64 cb1
         return -1;
     }
     vk_lock();
-    spv = stage_spirv(stage, code, window, compute_stub, cb1_gva, cb1_size, cs_local, shared, key, &si, &words, &cut,
-                      &cut_words);
+    spv = stage_spirv(stage, code, window, compute_stub,
+                      cb1_size && cb1_size <= 0x10000 ? gmem_ptr_untracked(cb1_gva, cb1_size) : NULL, cb1_size,
+                      cs_local, shared, key, &si, &words, &cut, &cut_words);
     if (!spv)
         snprintf(why, why_size, "%s", si.first_unsupported[0] ? si.first_unsupported : "not translated");
     else if (g_nmod == MODULES)
@@ -427,6 +439,7 @@ int vk_nvn_shader(int stage, u64 code_gva, u32 window, int compute_stub, u64 cb1
             for (w = 0; w < words; w++) h = (h ^ spv[w]) * 16777619u;
             g_mod[g_nmod].si = si;
             g_mod[g_nmod].spv_hash = h;
+            vk_module_note(g_mod[g_nmod].mod, vk_spirv_id(spv, words));
             g_mod[g_nmod].cut = VK_NULL_HANDLE;
             if (cut) {
                 VkShaderModuleCreateInfo ci = {
@@ -458,7 +471,10 @@ int vk_nvn_shader(int stage, u64 code_gva, u32 window, int compute_stub, u64 cb1
 #define PREP_VS_CLIP 0xFFu
 typedef struct {
     int stage;
-    u64 code, cb, hash;
+    u8* mem; /* its code, then its constant buffer 1: copied when the game gives the stage, freed by the worker. The
+                game reuses that memory right after (5% of the stages were gone before a worker's turn, the fight's
+                full-screen vertex stage among them, and compiled at their first draw in every run) */
+    u64 hash;
     u32 window, cb_size;
     u32 cs_local[3], shared; /* a compute stage's workgroup size and shared memory, which its SPIR-V holds */
 } PrepJob;
@@ -466,14 +482,21 @@ static PrepJob* g_prq;
 static u32 g_prq_in, g_prq_out, g_prep_heavy;
 static u64* g_prseen; /* this run's and earlier runs' hashes */
 static PMutex g_prq_lk = PMUTEX_INIT;
-static int g_prep_on = -1, g_prep_started, g_prep_run, g_prep_busy;
-static u64 g_prep_quiet; /* a pass: when the last stage arrived or was finished */
+static int g_prep_on = -1, g_prep_started, g_prep_busy;
+static u64 g_prep_quiet;   /* a pass: when the last stage arrived or was finished */
+static const u64* g_prold; /* the stages earlier runs prepared, set before the workers start */
+static u32 g_prold_n;
+static int prep_old(u64 h) {
+    u32 i;
+    for (i = 0; i < g_prold_n; i++)
+        if (g_prold[i] == h) return 1;
+    return 0;
+}
 static FILE* g_prf;
-static u64 g_pr_set, g_pr_done, g_pr_gone, g_pr_ns, g_pr_paused;
-#define PREP_GONE ~0ull       /* a set entry taken out: probes go past it */
+static u64 g_pr_set, g_pr_done, g_pr_ns, g_pr_paused;
 static int prep_seen(u64 h) { /* adds it: 1 when it was there. Lock held */
     u32 i = (u32)h & (PREP_SET - 1), n;
-    if (!h || h == PREP_GONE) h = 1;
+    if (!h) h = 1;
     for (n = 0; n < PREP_SET; n++, i = (i + 1) & (PREP_SET - 1)) {
         if (g_prseen[i] == h) return 1;
         if (!g_prseen[i]) {
@@ -483,19 +506,8 @@ static int prep_seen(u64 h) { /* adds it: 1 when it was there. Lock held */
     }
     return 1;
 }
-/* takes h out of the set, for a stage whose memory the game reused before a worker got to it: when the game gives the
-   same stage again, it is queued again instead of passed over as done. Lock held */
-static void prep_forget(u64 h) {
-    u32 i = (u32)h & (PREP_SET - 1), n;
-    if (!h || h == PREP_GONE) h = 1;
-    for (n = 0; n < PREP_SET && g_prseen[i]; n++, i = (i + 1) & (PREP_SET - 1))
-        if (g_prseen[i] == h) {
-            g_prseen[i] = PREP_GONE;
-            return;
-        }
-}
 /* a stage's identity: its code, its constant buffer 1 (cb, NULL for none), and for compute its workgroup size and
-   shared memory. The worker checks it again, against what the game may have overwritten since */
+   shared memory */
 static u64 prep_hash(int stage, const u8* code, u32 window, const u8* cb, u32 cb_size, const u32* cs_local,
                      u32 shared) {
     u64 h = vk_hash(code, window) ^ (u64)stage * 0x9E3779B97F4A7C15ull;
@@ -506,6 +518,7 @@ static u64 prep_hash(int stage, const u8* code, u32 window, const u8* cb, u32 cb
 void vk_nvn_prep_add(int stage, u64 code_gva, u32 window, u64 cb1_gva, u32 cb1_size, const u32* cs_local, u32 shared) {
     const u8* code = window <= 0x10000 ? gmem_ptr_untracked(code_gva, window) : NULL;
     const u8* cb = cb1_size && cb1_size <= 0x10000 ? gmem_ptr_untracked(cb1_gva, cb1_size) : NULL;
+    u8* mem;
     u64 h;
     if (g_prep_on < 0) {
         const char* e = getenv("SNX_NVN_PREP");
@@ -520,11 +533,13 @@ void vk_nvn_prep_add(int stage, u64 code_gva, u32 window, u64 cb1_gva, u32 cb1_s
     }
     g_pr_set++;
     g_prep_quiet = plat_ns();
-    if (g_prq && g_prseen && !prep_seen(h) && g_prq_in - g_prq_out < PREP_QUEUE) {
+    if (g_prq && g_prseen && !prep_seen(h) && g_prq_in - g_prq_out < PREP_QUEUE &&
+        (mem = malloc((size_t)window + (cb ? cb1_size : 0)))) {
         PrepJob* j = &g_prq[g_prq_in++ % PREP_QUEUE];
+        memcpy(mem, code, window);
+        if (cb) memcpy(mem + window, cb, cb1_size);
         j->stage = stage;
-        j->code = code_gva;
-        j->cb = cb ? cb1_gva : 0;
+        j->mem = mem;
         j->window = window;
         j->cb_size = cb ? cb1_size : 0;
         j->hash = h;
@@ -536,14 +551,14 @@ void vk_nvn_prep_add(int stage, u64 code_gva, u32 window, u64 cb1_gva, u32 cb1_s
     pm_unlock(&g_prq_lk);
 }
 /* j's stage for key: compiled into the cache. Its input mask comes back for the vertex stage's second key */
-static int prep_key(const PrepJob* j, const u8* code, const NvnStageKey* key, u32* in_mask) {
+static int prep_key(const PrepJob* j, const NvnStageKey* key, u32* in_mask) {
     ShaderInfo si;
     size_t words = 0;
     u32* spv;
     VkShaderModule m = VK_NULL_HANDLE;
     vk_lock();
     /* compute code comes without a program header, as cmdlist.c records it: framed as vk_nvn_shader frames it */
-    spv = stage_spirv(j->stage, code, j->window, j->stage == ST_CS, j->cb, j->cb_size,
+    spv = stage_spirv(j->stage, j->mem, j->window, j->stage == ST_CS, j->mem + j->window, j->cb_size,
                       j->stage == ST_CS ? j->cs_local : NULL, j->shared, key, &si, &words, NULL, NULL);
     vk_unlock();
     if (!spv) return 0;
@@ -573,7 +588,7 @@ static int prep_key(const PrepJob* j, const u8* code, const NvnStageKey* key, u3
             if (vkCreateComputePipelines(g_vk.dev, vk_pipeline_cache(), 1, &ci, NULL, &p) == VK_SUCCESS)
                 vkDestroyPipeline(g_vk.dev, p, NULL);
         } else {
-            vk_pipeline_prep(m, j->stage == ST_VS);
+            vk_pipeline_prep(m, j->stage == ST_VS, prep_keep() ? vk_spirv_id(spv, words) : 0);
         }
         vkDestroyShaderModule(g_vk.dev, m, NULL);
     }
@@ -586,9 +601,9 @@ static void prep_worker(void* arg) {
     for (;;) {
         PrepJob j;
         NvnStageKey key;
-        const u8* code;
         u32 in_mask = 0;
         u64 t0;
+        int old;
         if (__atomic_load_n(&g_prep_heavy, __ATOMIC_RELAXED)) {
             __atomic_add_fetch(&g_pr_paused, 1, __ATOMIC_RELAXED);
             plat_sleep_ns(50000000);
@@ -603,30 +618,28 @@ static void prep_worker(void* arg) {
         j = g_prq[g_prq_out++ % PREP_QUEUE];
         g_prep_busy++;
         pm_unlock(&g_prq_lk);
-        code = gmem_ptr_untracked(j.code, j.window);
-        /* the game may have freed the program since: only what is still the same bytes */
-        if (!code || prep_hash(j.stage, code, j.window, j.cb ? gmem_ptr_untracked(j.cb, j.cb_size) : NULL, j.cb_size,
-                               j.cs_local, j.shared) != j.hash) {
+        old = prep_keep() && prep_old(j.hash);
+        if (old && j.stage == ST_CS) { /* a compute pipeline isn't kept: an earlier run's preparation does for it */
             pm_lock(&g_prq_lk);
-            g_pr_gone++;
             g_prep_busy--;
-            prep_forget(j.hash);
             pm_unlock(&g_prq_lk);
+            free(j.mem);
             continue;
         }
         t0 = plat_ns();
         memset(&key, 0, sizeof key);
         if (j.stage == ST_VS) key.clip = PREP_VS_CLIP;
-        if (prep_key(&j, code, &key, &in_mask) && j.stage == ST_VS && (in_mask & 4)) {
+        if (prep_key(&j, &key, &in_mask) && j.stage == ST_VS && (in_mask & 4)) {
             key.int_mask = 4; /* skinned draws read attribute 2 as integers */
-            prep_key(&j, code, &key, &in_mask);
+            prep_key(&j, &key, &in_mask);
         }
+        free(j.mem);
         pm_lock(&g_prq_lk);
         g_pr_done++;
         g_prep_busy--;
         g_pr_ns += plat_ns() - t0;
         g_prep_quiet = plat_ns();
-        if (g_prf) {
+        if (g_prf && !old) {
             fwrite(&j.hash, sizeof j.hash, 1, g_prf);
             if (!(g_pr_done & 255)) {
                 fflush(g_prf);
@@ -656,14 +669,18 @@ static void prep_frame(u32 draws) {
                 fclose(f);
             }
         }
-        /* the game gives its stages over its first half minute: done once none came or finished for 20 s */
-        if (g_prq_in == g_prq_out && !g_prep_busy && plat_ns() - g_prep_quiet > 20000000000ull) {
+        /* done once no stage came or finished for 20 s, or for 5 s after the game's programs came: Bayonetta 3 gives
+           5,795 of its 5,797 stages in one burst as it loads them and the last two 0.7 s later (2026-11-15), and a
+           stage missed here is still compiled by a play run's workers. Before the burst the wait stays long: a slow
+           disk stretches the time until it */
+        if (g_prq_in == g_prq_out && !g_prep_busy &&
+            plat_ns() - g_prep_quiet > (g_pr_set >= 1000 ? 5000000000ull : 20000000000ull)) {
             if (g_prf) fflush(g_prf);
             LOG("nvn-live: shader preparation finished: %llu stages\n", (unsigned long long)g_pr_done);
             snprintf(path, sizeof path, "%s/prepared.txt", vk_pipeline_cache_dir());
             f = fopen(path, "w");
             if (f) {
-                fprintf(f, "%08x %d\n", g_vk.props.driverVersion, prep_mode());
+                fprintf(f, "%s %d\n", prep_gpu(), prep_mode());
                 fclose(f);
             }
             vk_pipeline_mark_dirty();
@@ -689,11 +706,10 @@ static void prep_frame(u32 draws) {
         snprintf(path, sizeof path, "%s/gpu.txt", vk_pipeline_cache_dir());
         f = fopen(path, "w");
         if (f) { /* for the launcher: what this run's shaders are for */
-            fprintf(f, "%08x %d\n", g_vk.props.driverVersion, prep_mode());
+            fprintf(f, "%s %d\n", prep_gpu(), prep_mode());
             fclose(f);
         }
-        snprintf(path, sizeof path, "%s/prepared_%08x_%d.bin", vk_pipeline_cache_dir(), g_vk.props.driverVersion,
-                 prep_mode());
+        snprintf(path, sizeof path, "%s/prepared_%s_%d.bin", vk_pipeline_cache_dir(), prep_gpu(), prep_mode());
         pm_lock(&g_prq_lk);
         f = fopen(path, "rb");
         if (f) { /* stages done by earlier runs: what the queue holds of them goes without a compile */
@@ -701,21 +717,28 @@ static void prep_frame(u32 draws) {
             static u64 old[PREP_SET / 2];
             while (n < PREP_SET / 2 && fread(&h, sizeof h, 1, f) == 1) old[n++] = h;
             fclose(f);
-            if (g_prseen) {
+            g_prold = old;
+            g_prold_n = n;
+            /* kept: every stage again, its library from the driver's cache (prep_worker skips their compute only) */
+            if (g_prseen && !prep_keep()) {
                 /* queue first: the set holds these already, so they are told apart by a second look through old */
                 for (k = g_prq_out; k != g_prq_in; k++) {
                     u32 m;
                     int known = 0;
                     h = g_prq[k % PREP_QUEUE].hash;
                     for (m = 0; m < n && !known; m++) known = old[m] == h;
-                    if (!known) g_prq[(g_prq_out + kept++) % PREP_QUEUE] = g_prq[k % PREP_QUEUE];
+                    if (known)
+                        free(g_prq[k % PREP_QUEUE].mem);
+                    else
+                        g_prq[(g_prq_out + kept++) % PREP_QUEUE] = g_prq[k % PREP_QUEUE];
                 }
                 g_prq_in = g_prq_out + kept;
                 for (k = 0; k < n; k++) prep_seen(old[k]);
             }
         }
         g_prf = fopen(path, "ab");
-        LOG("nvn-live: shader preparation: %u stages to do on %d workers, %s\n", g_prq_in - g_prq_out, workers, path);
+        LOG("nvn-live: shader preparation: %u stages to do on %d workers, %s%s\n", g_prq_in - g_prq_out, workers, path,
+            prep_keep() ? ", libraries kept for the draws" : "");
         pm_unlock(&g_prq_lk);
         for (i = 0; i < workers; i++)
             if (plat_thread(prep_worker, NULL, (size_t)1 << 20)) break;
@@ -1034,7 +1057,7 @@ static int pipe_key(const NvnPipeDesc* d, PipeKey* k, u32* bstream, char* why, u
                  : d->polygon == 0           ? VK_POLYGON_MODE_POINT
                  : d->polygon == 1           ? VK_POLYGON_MODE_LINE
                                              : VK_POLYGON_MODE_FILL;
-    k->depth_clamp = g_vk.feat.depthClamp && d->depth_clamp;
+    k->depth_clamp = g_vk.feat.depthClamp && !g_vk.has_dyn_clamp && d->depth_clamp; /* else rp_dynamic sets it */
     /* vertex input */
     for (i = 0; i < 32; i++) {
         u32 nf, st, b;
@@ -2042,6 +2065,7 @@ typedef struct {
     float f[8];
     u32 db;       /* the depth bounds test on */
     float dbr[2]; /* its range */
+    u32 dc;       /* depth clamp, when it is dynamic (g_vk.has_dyn_clamp) */
 } RpDyn;
 static struct {
     int valid;
@@ -2393,7 +2417,11 @@ static int rp_target_vk(const NvnTarget* t, VkFormat f, int scale) {
                       : 0),
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
     VmaAllocationCreateInfo aci = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    u64 made0 = plat_ns();
     if (vmaCreateImage(g_vk.vma, &ii, &aci, &r->img, &r->mem, NULL) != VK_SUCCESS) return -1;
+    if (plat_ns() - made0 > 5000000)
+        LOG_LIMIT(40, "nvn-live: a target image took %.1f ms to make: %ux%u, %u layers, format %d, frame %llu\n",
+                  (double)(plat_ns() - made0) / 1e6, r->sw, r->sh, r->layers, (int)f, (unsigned long long)g_rp.frame);
     vk_mem_tag(r->mem, VKM_TARGET);
     r->storage = (ii.usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0;
     rp_end_rendering();
@@ -2603,7 +2631,7 @@ static struct {
 } g_mir[IMPORTS];
 static VmaAllocation g_mar; /* the arena blocks are bound from, and what is left of it */
 static VmaAllocationInfo g_mar_info;
-static u64 g_mar_left, g_mir_bind_ns, g_mir_bound;
+static u64 g_mar_left, g_mir_bind_ns, g_mir_bound, g_mir_ranges;
 static VkMemoryRequirements g_mar_req;
 static u8 g_mir_window;
 static u64 g_mir_at; /* the offset in its pool of the range the watch is walking */
@@ -2826,6 +2854,73 @@ static void mir_bind(void) {
     g_nmb = 0;
     g_mir_bind_ns += plat_ns() - t0;
 }
+/* The blocks a window copies from its queue (rp_mirror_window) don't wait for their bind: the wait is for the GPU to
+   reach the bind behind the frames it has queued, 25 ms on the frame a fight starts on an RX 6700 XT. Their binds are
+   submitted together, the blocks stay queued and read from the pool, and the window that finds the fence signaled
+   copies them. bound[] is 2 for these until then. One batch at a time. Under vk_lock */
+static struct {
+    u32 pool, blk;
+    VkSparseMemoryBind b;
+} g_ml[(MIR_BUDGET >> MIR_SHIFT) + 1];
+static u32 g_nml;
+static VkFence g_ml_fence; /* the batch is submitted */
+static void mir_bind_done(void) {
+    u32 k;
+    for (k = 0; k < g_nml; k++) g_mir[g_ml[k].pool].bound[g_ml[k].blk] = 1;
+    g_mir_bound += g_nml;
+    g_nml = 0;
+    vkDestroyFence(g_vk.dev, g_ml_fence, NULL);
+    g_ml_fence = VK_NULL_HANDLE;
+}
+static void mir_bind_poll(void) {
+    if (g_ml_fence && vkGetFenceStatus(g_vk.dev, g_ml_fence) == VK_SUCCESS) mir_bind_done();
+}
+static void mir_bind_later(void) {
+    VkSparseBufferMemoryBindInfo info[IMPORTS];
+    static VkSparseMemoryBind binds[sizeof g_ml / sizeof g_ml[0]];
+    VkBindSparseInfo bsi = {.sType = VK_STRUCTURE_TYPE_BIND_SPARSE_INFO, .pBufferBinds = info};
+    VkFenceCreateInfo fci = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkResult r;
+    u64 t0;
+    u32 n = 0, k;
+    int i;
+    if (g_ml_fence || !g_nml) return;
+    t0 = plat_ns();
+    for (i = 0; i < g_nimport; i++) {
+        u32 first = n;
+        for (k = 0; k < g_nml; k++) {
+            const VkSparseMemoryBind* b = &g_ml[k].b;
+            if (g_ml[k].pool != (u32)i) continue;
+            /* blocks side by side in the pool and in the arena are one range: the driver's cost is per range */
+            if (n > first && binds[n - 1].memory == b->memory &&
+                binds[n - 1].resourceOffset + binds[n - 1].size == b->resourceOffset &&
+                binds[n - 1].memoryOffset + binds[n - 1].size == b->memoryOffset)
+                binds[n - 1].size += b->size;
+            else
+                binds[n++] = *b;
+        }
+        if (n > first)
+            info[bsi.bufferBindCount++] = (VkSparseBufferMemoryBindInfo){g_mir[i].buf, n - first, binds + first};
+    }
+    if (vkCreateFence(g_vk.dev, &fci, NULL, &g_ml_fence) != VK_SUCCESS)
+        fatal("nvn: binding video memory to a pool copy failed\n");
+    vk_queue_lock();
+    g_mir_ranges += n;
+    r = vkQueueBindSparse(g_vk.gfx, 1, &bsi, g_ml_fence);
+    vk_queue_unlock();
+    if (r != VK_SUCCESS) fatal("nvn: binding video memory to a pool copy failed\n");
+    g_mir_bind_ns += plat_ns() - t0;
+}
+/* a block that must be copied now is in that batch: waited for */
+static void mir_bind_flush(void) {
+    u64 t0 = plat_ns();
+    mir_bind_later();
+    if (!g_ml_fence) return;
+    if (vkWaitForFences(g_vk.dev, 1, &g_ml_fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+        fatal("nvn: binding video memory to a pool copy failed\n");
+    mir_bind_done();
+    g_mir_bind_ns += plat_ns() - t0;
+}
 static void mir_cpu_at(int arg, u64 off, u64 n) { mir_cpu_wrote(arg >> 8, g_mir_at + off, n); }
 
 /* ---- c7: storage buffers the GPU writes, in video memory (MIR_GPU). Ported from Witch Time's compute buffers ---- */
@@ -2846,6 +2941,7 @@ static int mir_fill_block(int p, u64 b) {
         g_mir[p].chunk[off / MIR_CHUNK] = 1;
         vk_written_since(GP(g_import[p].cpu + at), n, vk_ww_now());
     }
+    if (g_mir[p].size && g_mir[p].bound[b] == 2) mir_bind_flush();
     if (g_mir[p].size && !g_mir[p].bound[b]) {
         VkDeviceMemory mem;
         u64 at, whole = 1ull << MIR_SHIFT;
@@ -3179,6 +3275,7 @@ static void rp_mirror_window(void) {
     g_land_why = 0;
     own_land_now(); /* those that couldn't be patched: merged, its words stay */
     own_idle();
+    mir_bind_poll();
     for (k = 0; k < g_nmq; k++) {
         u32 p = g_mq[k].pool, b = g_mq[k].blk;
         u64 off = (u64)b << MIR_SHIFT, size = 1ull << MIR_SHIFT;
@@ -3188,24 +3285,29 @@ static void rp_mirror_window(void) {
             continue;
         }
         if (off + size > g_import[p].size) size = g_import[p].size - off;
-        if (!g_mir[p].chunk[off / MIR_CHUNK]) { /* its first block: the watch starts on it, before the copy */
-            u64 at = off / MIR_CHUNK * MIR_CHUNK, n = MIR_CHUNK;
-            if (at + n > g_import[p].size) n = g_import[p].size - at;
-            g_mir[p].chunk[off / MIR_CHUNK] = 1;
-            vk_written_since(GP(g_import[p].cpu + at), n, vk_ww_now());
-        }
-        if (g_mir[p].size && !g_mir[p].bound[b]) {
+        if (g_mir[p].size && g_mir[p].bound[b] != 1) { /* no memory yet: asked for, and copied once it is there */
             VkDeviceMemory mem;
             u64 at, whole = 1ull << MIR_SHIFT;
+            g_mq[kept++] = g_mq[k];
+            if (g_mir[p].bound[b] || g_ml_fence || g_nml == sizeof g_ml / sizeof g_ml[0]) continue;
             if (!mir_page(&mem, &at)) { /* no room: the block stays in the pool */
+                kept--;
                 g_mir[p].st[b] = MIR_NONE;
                 g_mir[p].hot[b] = 255;
                 continue;
             }
             if (off + whole > g_mir[p].size) whole = g_mir[p].size - off;
-            g_mir[p].bound[b] = 1;
-            g_mb[g_nmb].pool = p;
-            g_mb[g_nmb++].b = (VkSparseMemoryBind){off, whole, mem, at, 0};
+            g_mir[p].bound[b] = 2;
+            g_ml[g_nml].pool = p;
+            g_ml[g_nml].blk = b;
+            g_ml[g_nml++].b = (VkSparseMemoryBind){off, whole, mem, at, 0};
+            continue;
+        }
+        if (!g_mir[p].chunk[off / MIR_CHUNK]) { /* its first block: the watch starts on it, before the copy */
+            u64 at = off / MIR_CHUNK * MIR_CHUNK, n = MIR_CHUNK;
+            if (at + n > g_import[p].size) n = g_import[p].size - at;
+            g_mir[p].chunk[off / MIR_CHUNK] = 1;
+            vk_written_since(GP(g_import[p].cpu + at), n, vk_ww_now());
         }
         {
             VkBufferCopy r = {off, off, size};
@@ -3218,7 +3320,8 @@ static void rp_mirror_window(void) {
         copied = 1;
     }
     g_nmq = kept;
-    mir_bind();
+    mir_bind(); /* own_land_now's and own_idle's, which copy at once */
+    mir_bind_later();
     for (i = 0; i < g_nimport; i++)
         if (g_mir[i].buf) g_mir[i].wseen = vk_ww_now(); /* after every scan of this window, the starting ones too */
     if (copied) rp_barrier();
@@ -3974,6 +4077,7 @@ static void rp_dynamic(const NvnDrawDyn* y, const NvnPipeDesc* d, u32 primitive)
         n.db = g_vk.feat.depthBounds && depth && y->depth_bounds_on;
         n.dbr[0] = n.db ? clamp01(y->depth_bounds[0]) : 0.0f;
         n.dbr[1] = n.db ? clamp01(y->depth_bounds[1]) : 1.0f;
+        n.dc = g_vk.has_dyn_clamp && d->depth_clamp;
 #define DYN_NEW(field) (all || memcmp(&n.field, &g_rpd.d.field, sizeof n.field))
         if (DYN_NEW(vp)) vkCmdSetViewportWithCount(cb, 1, &n.vp);
         if (DYN_NEW(sc)) vkCmdSetScissorWithCount(cb, 1, &n.sc);
@@ -3986,6 +4090,7 @@ static void rp_dynamic(const NvnDrawDyn* y, const NvnPipeDesc* d, u32 primitive)
         if (DYN_NEW(b[6])) vkCmdSetStencilTestEnable(cb, n.b[6]);
         if (DYN_NEW(db)) vkCmdSetDepthBoundsTestEnable(cb, n.db);
         if (DYN_NEW(dbr)) vkCmdSetDepthBounds(cb, n.dbr[0], n.dbr[1]);
+        if (g_vk.has_dyn_clamp && DYN_NEW(dc)) vkCmdSetDepthClampEnableEXT(cb, n.dc);
         for (f = 0; f < 2; f++)
             if (DYN_NEW(s[f])) {
                 VkStencilFaceFlags face = f ? VK_STENCIL_FACE_BACK_BIT : VK_STENCIL_FACE_FRONT_BIT;
@@ -4972,11 +5077,12 @@ void vk_nvn_live_stats(u64 frames) {
         }
         LOG("nvn-live: video memory copies: reads %.1f%% from them (%llu, %llu from the pools), %llu of %llu blocks there, "
             "%llu kept in the pools, %llu MiB copied, %llu blocks taken back, tracking %.2f ms a frame; bound %llu MiB, "
-            "binding %.1f ms\n",
+            "binding %.1f ms, %llu ranges asked later since the start\n",
             100.0 * (double)g_mir_hits / (double)(g_mir_hits + g_mir_miss), (unsigned long long)g_mir_hits,
             (unsigned long long)g_mir_miss, (unsigned long long)valid, (unsigned long long)blocks,
             (unsigned long long)hot, (unsigned long long)(g_mir_bytes >> 20), (unsigned long long)g_mir_taken,
-            (double)g_mir_scan_ns / 6e8, (unsigned long long)(g_mir_bound >> 4), (double)g_mir_bind_ns / 1e6);
+            (double)g_mir_scan_ns / 6e8, (unsigned long long)(g_mir_bound >> 4), (double)g_mir_bind_ns / 1e6,
+            (unsigned long long)g_mir_ranges);
         g_mir_hits = g_mir_miss = g_mir_bytes = g_mir_taken = g_mir_scan_ns = g_mir_bind_ns = 0;
         if (g_own_made || g_own_n)
             LOG("nvn-live: GPU-written storage buffers: %u blocks in video memory now (%llu MiB), %llu taken (%llu MiB "
@@ -4999,11 +5105,11 @@ void vk_nvn_live_stats(u64 frames) {
     }
     pm_lock(&g_prq_lk);
     if (g_pr_set)
-        LOG("nvn-live: shader preparation: game gave %llu stages, done %llu, %.1f ms each, gone before their turn %llu, "
-            "left %u, paused %llu times\n",
+        LOG("nvn-live: shader preparation: game gave %llu stages, done %llu, %.1f ms each, left %u, paused %llu "
+            "times\n",
             (unsigned long long)g_pr_set, (unsigned long long)g_pr_done,
-            g_pr_done ? (double)g_pr_ns / (double)g_pr_done / 1e6 : 0.0, (unsigned long long)g_pr_gone,
-            g_prq_in - g_prq_out, (unsigned long long)g_pr_paused);
+            g_pr_done ? (double)g_pr_ns / (double)g_pr_done / 1e6 : 0.0, g_prq_in - g_prq_out,
+            (unsigned long long)g_pr_paused);
     pm_unlock(&g_prq_lk);
     pm_lock(&g_pq_lk);
     if (g_ps.made || g_pw_n)
