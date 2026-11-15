@@ -10,7 +10,7 @@ B3-Express runs Bayonetta 3 v1.2.0 natively on Windows. **It contains no game fi
 - At least 4 GB of free RAM while the game code compiles
 - Bayonetta 3 updated to **v1.2.0**, extracted to a folder
 
-Tested on one PC so far: Ryzen 7 5700X3D, RTX 3080, Windows 11. Other PCs may work, and AMD GPUs haven't been tried on this build.
+Tested on one PC so far: Ryzen 7 5700X3D, Windows 11, with an RTX 3080 and later an RX 6700 XT. Other PCs may work. Intel GPUs haven't been tried.
 
 ## Step 1: Extract your game
 
@@ -45,9 +45,9 @@ It checks the version, copies the game files, then compiles the game code for yo
 
 ## Step 4: Choose your settings
 
-On the **Graphics** page, pick your screen size, then a quality. **Smooth 60** is recommended. On **Controller** you can swap A and B, and set the dead zone and vibration.
+On the **Graphics** page, pick your screen size, then a quality. **Smooth 60** is recommended. On the **Controls** page you can swap A and B, and set the dead zone and vibration.
 
-No controller? The keyboard and mouse work too. Click in the game's window and the mouse turns the camera; W A S D move, the left and right mouse buttons punch and kick, Space jumps, Left Shift dodges and Esc opens the game's menu. The **Options** page lists every key under **Keyboard and mouse**: click one and press the key you want instead.
+No controller? The keyboard and mouse work too. Click in the game's window and the mouse turns the camera; W A S D move, the left and right mouse buttons punch and kick, Space jumps, Left Shift dodges and Esc opens the game's menu. The **Controls** page lists every key under **Keyboard and mouse**: click one and press the key you want instead.
 
 ## Step 5: Play
 
@@ -86,7 +86,9 @@ The launcher's **Sessions** page shows how your last session ran. Logs are in `B
 
 ## Updating or removing
 
-Your saves are in `Bayo3_120\Bayo3_120_data\save`. Copy that folder somewhere safe before updating or removing anything. To remove B3-Express, delete its folder. Nothing is installed elsewhere.
+When a new version is out, the launcher says so at the top of its window. Press **Update now**: it downloads the new version, closes, puts the new files in and opens again. Your game files, saves, settings and mods stay, and the game code is compiled again afterwards (about 5 minutes). If your version has no such button, unzip the new version to a new folder, run Install again, and copy your save folder across.
+
+Your saves are in `Bayo3_120\Bayo3_120_data\save`. The **Saves** page backs them up; do that before updating or removing anything. To remove B3-Express, delete its folder. Nothing is installed elsewhere.
 
 ## Legal
 
