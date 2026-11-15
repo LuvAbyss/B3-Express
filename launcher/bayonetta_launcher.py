@@ -407,7 +407,37 @@ def gpu_info():
         name, memory, driver = [x.strip() for x in out.splitlines()[0].split(',')]
         return f'{name}, {int(memory) / 1024:.0f} GB, driver {driver}'
     except (OSError, subprocess.SubprocessError, ValueError, IndexError):
-        return 'No NVIDIA graphics card found. This build is only tested on NVIDIA.'
+        pass
+    try:
+        return windows_gpu()
+    except (OSError, ValueError, TypeError, ImportError):
+        return 'Graphics card not found.'
+
+
+def windows_gpu():
+    """The card with the most memory among Windows' display adapters, for the cards nvidia-smi doesn't know"""
+    import winreg
+    best = None
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                        r'SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}') as adapters:
+        for i in range(16):
+            try:
+                with winreg.OpenKey(adapters, f'{i:04d}') as k:
+                    memory = winreg.QueryValueEx(k, 'HardwareInformation.qwMemorySize')[0]
+                    if isinstance(memory, bytes):  # some drivers store it as binary
+                        memory = int.from_bytes(memory, 'little')
+                    card = (memory, winreg.QueryValueEx(k, 'DriverDesc')[0], winreg.QueryValueEx(k, 'DriverVersion')[0])
+            except OSError:
+                continue
+            best = max(best, card) if best else card
+    memory, name, driver = best  # TypeError when there is none
+    return f'{name}, {memory / 2 ** 30:.0f} GB, driver {driver}'
+
+
+def no_user(text):
+    """The text without the Windows user's name, which the paths under their folder show"""
+    home = re.escape(str(Path.home())).replace('\\\\', r'[\\/]')
+    return re.sub(home, '%USERPROFILE%', text, flags=re.I)
 
 
 def log_error(kind, value, trace):
@@ -592,6 +622,9 @@ def restore_save(name):
         return 'That backup isn\'t there any more.'
     if game_running():
         return 'Close the game first.'
+    old = DATA / 'save.old'
+    if old.exists() and not SAVE.exists():  # a restore that stopped half way left the save here
+        os.replace(old, SAVE)
     backup_save('before a restore')
     temporary = DATA / 'save.restoring'
     shutil.rmtree(temporary, ignore_errors=True)
@@ -601,11 +634,15 @@ def restore_save(name):
             if temporary.resolve() not in target.parents:
                 return 'That backup holds files outside a save folder: it was not restored.'
         z.extractall(temporary)
-    old = DATA / 'save.old'
     shutil.rmtree(old, ignore_errors=True)
     if SAVE.exists():
         os.replace(SAVE, old)
-    os.replace(temporary, SAVE)
+    try:
+        os.replace(temporary, SAVE)
+    except OSError:
+        if old.exists():
+            os.replace(old, SAVE)  # the save goes back where it was
+        raise
     shutil.rmtree(old, ignore_errors=True)
     return None
 
@@ -907,10 +944,10 @@ def make_report():
     path = REPORTS / time.strftime('report-%Y%m%d-%H%M%S.zip')
     sessions = sorted(LOGS.glob('session-*.log'))[-2:] if LOGS.is_dir() else []
     with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
-        z.writestr('system.txt', system_text())
+        z.writestr('system.txt', no_user(system_text()))
         for p in [GAME / (NAME + '.log'), GAME / (NAME + '.prev.log'), INI, LOGS / 'launcher-errors.log', LOGS / 'build-code.log', *sessions]:
             if p.is_file():
-                z.write(p, p.name)
+                z.writestr(p.name, no_user(p.read_text(encoding='utf8', errors='replace')))
     return path
 
 
@@ -931,13 +968,18 @@ def session_stats(path):
             'low': lows[len(lows) // 2], 'frame_ms': sorted(shown)[len(shown) // 2] if shown else None}
 
 
-def newer_release(current, timeout=6):
-    """(tag, page) of the latest GitHub release when it's newer than current, (None, None) when it isn't, or raises"""
+def latest_release(timeout=6):
+    """GitHub's record of the latest release, or raises"""
     import urllib.request
     request = urllib.request.Request(f'https://api.github.com/repos/{REPO}/releases/latest',
                                      headers={'User-Agent': 'B3-Express-launcher', 'Accept': 'application/vnd.github+json'})
     with urllib.request.urlopen(request, timeout=timeout) as answer:
-        release = json.loads(answer.read().decode('utf8'))
+        return json.loads(answer.read().decode('utf8'))
+
+
+def newer_release(current, release=None):
+    """(tag, page) of the latest GitHub release when it's newer than current, (None, None) when it isn't, or raises"""
+    release = release or latest_release()
     tag, page = release.get('tag_name', ''), release.get('html_url', '')
 
     def parts(v):
@@ -945,6 +987,92 @@ def newer_release(current, timeout=6):
     if current == 'dev' or not parts(tag) or parts(tag) <= parts(current):
         return None, None
     return tag, page
+
+
+UPDATE = ROOT / 'update'  # a new version's zip and its files, until they are put over this one
+
+
+def update_asset(release):
+    """The release's package for this PC: {'url', 'size', 'sha256' ('' when GitHub gives none)}, or None when it has
+    none. Only a file of this project's own release downloads is taken"""
+    for a in release.get('assets', []):
+        url = a.get('browser_download_url', '')
+        if a.get('name', '').endswith('-windows-x64.zip') and url.startswith(f'https://github.com/{REPO}/releases/download/'):
+            digest = a.get('digest') or ''
+            return {'url': url, 'size': int(a.get('size') or 0),
+                    'sha256': digest[7:].lower() if digest.startswith('sha256:') else ''}
+    return None
+
+
+def update_fetch(asset, progress=lambda pct: None):
+    """Downloads the package and unpacks it under update/. The folder to put over this one, or raises ValueError with
+    what to tell the player. Nothing of this installation is touched"""
+    import hashlib
+    import urllib.request
+    import zipfile
+    shutil.rmtree(UPDATE, ignore_errors=True)
+    UPDATE.mkdir()
+    free = shutil.disk_usage(UPDATE).free
+    if free < asset['size'] * 5:  # the zip and its files unpacked (it packs to about a third)
+        raise ValueError(f'This drive has {free / 2**20:.0f} MB free, and the update needs about {asset["size"] * 5 / 2**20:.0f} MB.')
+    packed, digest, got = UPDATE / 'package.zip', hashlib.sha256(), 0
+    request = urllib.request.Request(asset['url'], headers={'User-Agent': 'B3-Express-launcher'})
+    with urllib.request.urlopen(request, timeout=30) as answer, packed.open('wb') as out:
+        while True:
+            block = answer.read(1 << 18)
+            if not block:
+                break
+            out.write(block)
+            digest.update(block)
+            got += len(block)
+            progress(min(99, 100 * got // max(asset['size'], 1)))
+    if (asset['size'] and got != asset['size']) or (asset['sha256'] and digest.hexdigest() != asset['sha256']):
+        raise ValueError('The download came out different from the release\'s file. Try again.')
+    new = UPDATE / 'new'
+    with zipfile.ZipFile(packed) as z:
+        for member in z.namelist():
+            if new.resolve() not in (new / member).resolve().parents:
+                raise ValueError('The package holds files outside its folder: it was not used.')
+        z.extractall(new)
+    packed.unlink()
+    tops = [p for p in new.iterdir() if (p / 'VERSION').is_file() and (p / 'launcher' / 'web_launcher.py').is_file()]
+    if len(tops) != 1:
+        raise ValueError('The download isn\'t a B3-Express package.')
+    return tops[0]
+
+
+def update_script(new, pid):
+    """The batch file that puts the new version's files over this one once the launcher (pid) has closed, and starts
+    the launcher again. Files only the player has stay: the game's files, saves, settings, backups, shader cache.
+    The compiled game code's stamp goes, so the next Play compiles it again for the new program (about 5 minutes).
+    shortcut: every update compiles again, also one whose program would take the old code; skip it once the launcher
+    can read the program's ABI number"""
+    log = LOGS / 'update.log'
+    return '\r\n'.join([
+        '@echo off',
+        'chcp 65001 >nul',  # the paths below are UTF-8
+        ':wait',
+        f'tasklist /FI "PID eq {pid}" /NH 2>nul | find "{pid}" >nul',
+        'if not errorlevel 1 (ping -n 2 127.0.0.1 >nul & goto wait)',
+        f'robocopy "{new}" "{ROOT}" /E /R:30 /W:1 /NP /NFL /NDL > "{log}"',
+        'if errorlevel 8 goto failed',
+        f'del "{STAMP}" 2>nul',
+        f'rmdir /s /q "{new.parent}"',  # not update/ itself: this file runs from it
+        'goto start',
+        ':failed',  # some file could not be replaced: the release page, to unzip the new version by hand
+        f'start "" "https://github.com/{REPO}/releases/latest"',
+        ':start',
+        f'if exist "{ROOT / "B3-Express.exe"}" start "" "{ROOT / "B3-Express.exe"}"',
+        ''])
+
+
+def update_apply(new, pid=None):
+    """Starts that batch file on its own, hidden. The caller closes the launcher right after"""
+    LOGS.mkdir(exist_ok=True)
+    script = UPDATE / 'apply.cmd'
+    script.write_text(update_script(new, os.getpid() if pid is None else pid), encoding='utf8')
+    return subprocess.Popen(['cmd', '/c', str(script)], cwd=ROOT.anchor, creationflags=HIDDEN,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 class Launcher(LauncherTheme):

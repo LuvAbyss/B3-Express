@@ -57,6 +57,8 @@ class Api:
         self._child = None  # the compiler or the preparation run, which Stop ends
         self._exit_note = ''
         self._gpu = None
+        self._asset = None  # the newer release's package, once check_update found one
+        self._update = None  # its download: {'pct', 'error'}
         self._text = self._read_ini()
         threading.Thread(target=lambda: setattr(self, '_gpu', L.gpu_info()), daemon=True).start()
 
@@ -74,6 +76,7 @@ class Api:
         return {'step': step, 'files': files, 'code': code, 'prepared': prepared,
                 'stale': (cache / 'prepared.txt').is_file() and not prepared, 'running': running,
                 'job': self._job.view() if self._job else None, 'note': self._exit_note, 'gpu': self._gpu,
+                'update': self._update,
                 'version': L.launcher_version(), 'last': L.session_stats(L.GAME / (L.NAME + '.log')),
                 'codemods': files and L.CODE.is_file() and L.STAMP.is_file() and L.code_mods_changed(),
                 'program': (L.GAME / (L.NAME + '.exe')).is_file(), 'program_path': str(L.GAME / (L.NAME + '.exe'))}
@@ -328,10 +331,39 @@ class Api:
 
     def check_update(self):
         try:
-            tag, page = L.newer_release(L.launcher_version())
+            release = L.latest_release()
+            tag, page = L.newer_release(L.launcher_version(), release)
         except Exception as e:  # offline, GitHub down, rate limit: the page says so and nothing else changes
             return {'error': f'Couldn\'t reach GitHub ({type(e).__name__}).'}
-        return {'tag': tag, 'page': page}
+        self._asset = L.update_asset(release) if tag else None
+        return {'tag': tag, 'page': page, 'can': bool(self._asset),
+                'mb': round(self._asset['size'] / 2**20) if self._asset else 0}
+
+    def update(self):
+        """Downloads the new version, then closes the launcher: the files are put over this one and it starts again.
+        '' when it started, else why not"""
+        if not self._asset:
+            return 'Check for updates first.'
+        if self._busy() or (self._update and not self._update.get('error')):
+            return 'Something is already running.'
+        if L.game_running() or L.game_running('scarletnx'):
+            return 'Close the game first.'
+        self._update = {'pct': 0, 'error': ''}
+        threading.Thread(target=self._update_run, args=(self._asset,), daemon=True).start()
+        return ''
+
+    def _update_run(self, asset):
+        try:
+            new = L.update_fetch(asset, lambda pct: self._update.update(pct=pct))
+            if self._busy() or L.game_running():  # started while it downloaded
+                raise ValueError('Close the game and press Update again.')
+            self._update['pct'] = 100
+            L.update_apply(new)
+            self._window.destroy()
+        except Exception as e:
+            if not isinstance(e, ValueError):
+                L.log_error(type(e), e, e.__traceback__)
+            self._update['error'] = str(e) if isinstance(e, ValueError) else f'The update didn\'t download ({L.error_text(e)}).'
 
     def closing(self):
         child = self._child

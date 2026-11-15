@@ -9,11 +9,12 @@ without WebView2 the old window opens instead, with the same logic.
 - **Play:** one button that always does the next step: Install, then Prepare shaders (once for a graphics card and
   driver, about 3 minutes, the game sits at its title meanwhile), then Play. Progress with time left while it works,
   and the last session's average FPS, 1% low and frame time.
-- **Options:** window size and quality, fullscreen, shadows, texture filtering, texture detail, highest model detail,
-  film grain, object fade, button prompts, A/B swap,
-  dead zone, vibration, muting, and the keyboard and mouse: the mouse as the camera with its sensitivity, and the
-  keys and mouse buttons of every control, changed by clicking one and pressing the new key. Saved in the game's `Bayo3_120.ini`, which its own menu also uses, every comment kept.
-  The first version of that file stays beside it as `Bayo3_120.ini.before-launcher`.
+- **Graphics:** window size and quality, fullscreen, muting, aspect ratio and HUD position, shadows, texture
+  filtering, texture detail, highest model detail, film grain, object fade.
+- **Controls:** the controller's button prompts, A/B swap, dead zone and vibration, and the keyboard and mouse: the
+  mouse as the camera with its sensitivity, and the keys and mouse buttons of every control, changed by clicking one
+  and pressing the new key. Both pages save the game's `Bayo3_120.ini`, which its own menu also uses, every comment
+  kept. The first version of that file stays beside it as `Bayo3_120.ini.before-launcher`.
 - **Saves:** back up the game's save folder to `backups/`, and restore one (the current save is backed up first).
 - **Mods:** add a mod from its folder or its `.zip` (yuzu's and Ryujinx's `<name>/romfs/` layout, Atmosphère's
   `atmosphere/contents/<title>/romfs/`, or a bare `romfs` folder), turn mods on and off, set their order (a lower one
@@ -27,7 +28,13 @@ without WebView2 the old window opens instead, with the same logic.
   refuses code built with other patches (`Bayo3_120.patches`). Cheats aren't supported. The bug report names the
   mods on.
 - **Help:** a bug report zip in `reports/` (the game's log, the settings, the graphics card; no game files, no saves),
-  the GitHub issues page, the update check against GitHub's latest release, preparing shaders again.
+  the GitHub issues page, preparing shaders again, and updates. The launcher asks GitHub for the latest release when
+  it starts. **Update now** downloads that release's `-windows-x64.zip` into `update/`, checks its size and SHA-256
+  against GitHub's record, and unpacks it. Then the launcher closes, `update/apply.cmd` copies the new files over the
+  old ones (robocopy, its log in `logs/update.log`) and starts `B3-Express.exe` again. Files only the player has
+  stay: the game's files, saves, settings, mods, backups, the shader cache. The compiled code's stamp
+  (`Bayo3_120.abi`) is removed, so the next Play compiles the game code again for the new program. If a file can't
+  be replaced, the release page opens instead. The old window only links to the release page.
 
 Install needs your own extracted dump, a folder holding `exefs` and `romfs` with the 1.2.0 update applied. It checks
 the version against `game-files.txt` before copying anything, copies the files in, then compiles the game code on

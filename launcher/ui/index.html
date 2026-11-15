@@ -48,7 +48,8 @@ button, select, input { font: inherit; color: inherit; }
 main { display: flex; flex-direction: column; min-width: 0; }
 .update { display: flex; align-items: center; gap: 12px; padding: 10px max(24px, env(safe-area-inset-right, 0px)) 10px 24px; background: #241c10; border-bottom: 1px solid #4a3a1c; color: var(--moon); font-weight: 600; font-size: 14px; }
 .update a { color: var(--moon); }
-.update button { margin-left: auto; background: none; border: 0; color: var(--muted); cursor: pointer; }
+.update #update-close { margin-left: auto; background: none; border: 0; color: var(--muted); cursor: pointer; }
+.update #update-go { padding: 6px 14px; font-size: 13px; }
 .page { flex: 1; padding: 32px max(32px, env(safe-area-inset-right, 0px)) 40px 32px; display: flex; flex-direction: column; gap: 24px; min-width: 0; }
 h1 { font: 400 40px/1.1 var(--display); margin: 0; letter-spacing: .01em; text-wrap: balance; }
 h2 { font: 700 13px/1 var(--body); text-transform: uppercase; letter-spacing: .12em; color: var(--muted); margin: 0; }
@@ -183,7 +184,8 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
     <div class="brand"><b>B3-Express</b><span>Bayonetta 3 · v1.2.0</span></div>
     <nav class="nav" aria-label="Pages">
       <a href="#play" data-page="play"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10 8.5v7l5.5-3.5z"/></svg>Play</a>
-      <a href="#options" data-page="options"><svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>Options</a>
+      <a href="#graphics" data-page="graphics"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="12" rx="1.5"/><path d="M9 21h6M12 17v4"/></svg>Graphics</a>
+      <a href="#controls" data-page="controls"><svg viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="9" rx="4.5"/><path d="M7.5 11v3M6 12.5h3"/><circle cx="16.5" cy="12.5" r="1"/></svg>Controls</a>
       <a href="#saves" data-page="saves"><svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z"/><path d="M8 4v5h7V4M8 20v-6h8v6"/></svg>Saves</a>
       <a href="#mods" data-page="mods"><svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>Mods<span class="badge count" id="mods-badge" hidden></span></a>
       <a href="#help" data-page="help"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.3 2.4c-.5.2-.8.6-.8 1.1V14M12 17.2v.3"/></svg>Help</a>
@@ -196,7 +198,8 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
 
   <main>
     <div class="update" id="update" role="status" hidden>
-      <span id="update-t">A new version is out.</span><a href="#" id="update-link">See what's new</a>
+      <span id="update-t">A new version is out.</span>
+      <button class="primary" type="button" id="update-go" hidden>Update now</button><a href="#" id="update-link">See what's new</a>
       <button type="button" id="update-close" aria-label="Hide this notice">Later</button>
     </div>
 
@@ -242,9 +245,9 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
       <p class="hint" style="margin:0">In the game: F11 fullscreen, F2 the game's menu, F3 screenshot, F1 help.</p>
     </section>
 
-    <!-- ===== Options ===== -->
-    <section class="page" data-view="options" aria-labelledby="opt-h" hidden>
-      <div><h1 id="opt-h">Options</h1><p class="lede">Saved in the game's own settings file, which its in-game menu also uses. Changes apply the next time the game starts.</p></div>
+    <!-- ===== Graphics ===== -->
+    <section class="page" data-view="graphics" aria-labelledby="opt-h" hidden>
+      <div><h1 id="opt-h">Graphics</h1><p class="lede">Saved in the game's own settings file, which its in-game menu also uses. Changes apply the next time the game starts.</p></div>
       <div class="sections">
         <div class="card">
           <h2>Display</h2>
@@ -260,6 +263,20 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
             <p class="hint" id="o-quality-h"></p>
           </div>
           <div class="switch"><label for="o-fullscreen">Start in fullscreen</label><input type="checkbox" id="o-fullscreen" data-o="fullscreen"></div>
+          <div class="switch"><label for="o-mute">Mute when the game isn't the active window</label><input type="checkbox" id="o-mute" data-o="mute_unfocused"></div>
+          <div class="field">
+            <label for="o-aspect">Aspect ratio <span class="example">experimental</span></label>
+            <select id="o-aspect" data-o="aspect"><option value="0">16:9, as made</option><option value="1.6">16:10</option><option value="2.3333">21:9 ultrawide</option><option value="3.5556">32:9 super ultrawide</option></select>
+            <p class="hint">The game's own picture in your screen's shape: wider shows more at the sides, 16:10 more above and below. Menus can still look off at the edges.</p>
+          </div>
+          <div class="field">
+            <label for="o-hud">HUD position</label>
+            <select id="o-hud" data-o="hud"><option value="0">At the screen's edges</option><option value="1">In the middle 16:9</option></select>
+            <p class="hint">With a screen wider than 16:9: health, gauges and score at the edges as on a 16:9 screen, or kept close to the middle.</p>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Detail</h2>
           <div class="switch"><label for="o-shadows">Shadows</label><input type="checkbox" id="o-shadows" data-o="shadows"></div>
           <div class="field">
             <label for="o-anisotropy">Texture filtering</label>
@@ -271,16 +288,6 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
             <select id="o-lod-bias" data-o="lod_bias"><option value="0">As the game draws it</option><option value="-0.5">Sharper</option><option value="-1">Sharpest</option></select>
             <p class="hint">Sharper textures in the distance, at no measurable cost. Sharpest can shimmer a little on fine patterns.</p>
           </div>
-          <div class="field">
-            <label for="o-aspect">Aspect ratio <span class="example">experimental</span></label>
-            <select id="o-aspect" data-o="aspect"><option value="0">16:9, as made</option><option value="1.6">16:10</option><option value="2.3333">21:9 ultrawide</option><option value="3.5556">32:9 super ultrawide</option></select>
-            <p class="hint">The game's own picture in your screen's shape: wider shows more at the sides, 16:10 more above and below. Menus can still look off at the edges.</p>
-          </div>
-          <div class="field">
-            <label for="o-hud">HUD position</label>
-            <select id="o-hud" data-o="hud"><option value="0">At the screen's edges</option><option value="1">In the middle 16:9</option></select>
-            <p class="hint">With a screen wider than 16:9: health, gauges and score at the edges as on a 16:9 screen, or kept close to the middle.</p>
-          </div>
           <div class="switch"><label for="o-model_lod">Highest model detail<span class="hint" style="display:block;font-weight:400">Every model at its finest level, and distant ones stay drawn. Weaker graphics cards may lose some frame rate.</span></label><input type="checkbox" id="o-model_lod" data-o="model_lod"></div>
           <div class="switch"><label for="o-film_grain">Film grain<span class="hint" style="display:block;font-weight:400">The game's moving noise over the picture. Off gives a cleaner picture; the vignette stays.</span></label><input type="checkbox" id="o-film_grain" data-o="film_grain"></div>
           <div class="field">
@@ -291,7 +298,15 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
             <p class="hint" id="o-fade-h"></p>
           </div>
         </div>
-        <div class="card">
+      </div>
+      <div class="savebar"><button class="primary save" type="button" disabled>Save graphics</button><span class="status save-s" role="status">No changes</span></div>
+    </section>
+
+    <!-- ===== Controls ===== -->
+    <section class="page" data-view="controls" aria-labelledby="ctl-h" hidden>
+      <div><h1 id="ctl-h">Controls</h1><p class="lede">Your controller, and the keyboard and mouse. Saved in the game's own settings file. Changes apply the next time the game starts.</p></div>
+      <div class="sections">
+        <div class="card wide">
           <h2>Controller</h2>
           <div class="field">
             <span class="lab" id="o-prompts-l">Button prompts</span>
@@ -309,8 +324,6 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
             <label for="o-rumble">Vibration</label>
             <select id="o-rumble" data-o="rumble"><option value="0">Off</option><option value="25">25%</option><option value="50">50%</option><option value="75">75%</option><option value="100">100%</option></select>
           </div>
-          <h2 style="margin-top:8px">Sound</h2>
-          <div class="switch"><label for="o-mute">Mute when the game isn't the active window</label><input type="checkbox" id="o-mute" data-o="mute_unfocused"></div>
         </div>
         <div class="card wide">
           <h2>Keyboard and mouse</h2>
@@ -334,7 +347,7 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
           <div class="row"><button class="secondary" type="button" id="keys-reset">Back to the first keys</button><span class="status" id="keys-s" role="status"></span></div>
         </div>
       </div>
-      <div class="savebar"><button class="primary" type="button" id="save" disabled>Save options</button><span class="status" id="save-s" role="status">No changes</span></div>
+      <div class="savebar"><button class="primary save" type="button" disabled>Save controls</button><span class="status save-s" role="status">No changes</span></div>
     </section>
 
     <!-- ===== Saves ===== -->
@@ -372,8 +385,8 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
           <h2>Updates</h2>
           <div class="fact"><span>This version</span><b id="h-version">…</b></div>
           <div class="fact"><span>Newest</span><b id="h-newest">Not checked yet</b></div>
-          <div class="row"><button class="secondary" type="button" id="check">Check now</button><span class="status" id="check-s" role="status"></span></div>
-          <p class="hint">The launcher only checks and links to the release page. Updating means unzipping the new version and running Install again.</p>
+          <div class="row"><button class="primary" type="button" id="update-go2" hidden>Update now</button><button class="secondary" type="button" id="check">Check now</button><span class="status" id="check-s" role="status"></span></div>
+          <p class="hint">The launcher checks when it starts. Update now downloads the new version, closes the launcher, puts the new files in and opens it again. Your game files, saves, settings and mods stay. The game code is compiled again afterwards, about 5 minutes.</p>
           <h2 style="margin-top:8px">Shaders</h2>
           <p class="hint">Prepared shaders are kept for your graphics card and driver. Prepare them again if the game stutters more than it used to.</p>
           <div class="row"><button class="secondary" type="button" id="reprep">Prepare shaders again</button></div>
@@ -390,12 +403,13 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
   const call = (name, ...a) => api ? api[name](...a) : Promise.reject(new Error('not ready'));
 
   /* ---- pages, by the address's #name */
-  const pages = ['play', 'options', 'saves', 'mods', 'help'];
+  const pages = ['play', 'graphics', 'controls', 'saves', 'mods', 'help'];
   function route() {
     const p = pages.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'play';
     $$('[data-view]').forEach(v => v.hidden = v.dataset.view !== p);
     $$('.nav a').forEach(a => a.dataset.page === p ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
-    if (p === 'options') loadOptions();
+    /* the two pages edit one set of options: unsaved changes on one stay when going to the other */
+    if ((p === 'graphics' || p === 'controls') && (!opts || $('.save').disabled)) loadOptions();
     if (p === 'saves') loadBackups();
     if (p === 'mods') loadMods();
   }
@@ -412,7 +426,7 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
   }
   function setFact(id, text, cls) { const e = $(id); e.textContent = text; e.className = cls || ''; }
   function render(st) {
-    last = st;
+    last = st; renderUpdate(st.update);
     $('#r-version').textContent = st.version; $('#h-version').textContent = st.version;
     const gpu = st.gpu || 'Looking…';
     $('#r-gpu').textContent = gpu.split(',')[0].replace(/^NVIDIA GeForce /, ''); $('#r-gpu').title = gpu;
@@ -478,7 +492,7 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
     } else {
       $('#folder').hidden = true;
       $('#headline').textContent = 'Ready when you are.';
-      $('#what').textContent = 'Everything is prepared for your graphics card. Options and saves are on the left.';
+      $('#what').textContent = 'Everything is prepared for your graphics card. Graphics, controls and saves are on the left.';
       go.textContent = 'Play'; go.disabled = false;
     }
     const s = st.last;
@@ -529,10 +543,15 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
       const sens = $('#o-sens');
       if (![...sens.options].some(o => o.value === opts.mouse_sensitivity)) { const o = document.createElement('option'); o.value = opts.mouse_sensitivity; o.textContent = opts.mouse_sensitivity + '%'; sens.appendChild(o); }
       $$('[data-o]').forEach(e => e.type === 'checkbox' ? e.checked = !!opts[e.dataset.o] : e.value = opts[e.dataset.o]);
-      $('#save').disabled = true; $('#save-s').textContent = r.has_file ? 'No changes' : 'The game makes its settings file the first time it runs.'; $('#save-s').className = 'status';
+      saveState(true, r.has_file ? 'No changes' : 'The game makes its settings file the first time it runs.');
     });
   }
-  function dirty() { $('#save').disabled = false; $('#save-s').textContent = 'Unsaved changes'; $('#save-s').className = 'status'; }
+  /* both pages' save bars show the same: they save the same options */
+  function saveState(saved, text, ok) {
+    $$('.save').forEach(b => b.disabled = saved);
+    $$('.save-s').forEach(s => { s.textContent = text; s.className = 'status save-s' + (ok ? ' ok' : ''); });
+  }
+  function dirty() { saveState(false, 'Unsaved changes'); }
   $$('.seg').forEach(g => g.addEventListener('click', e => {
     const b = e.target.closest('button'); if (!b || !opts) return;
     opts[g.dataset.seg] = b.dataset.v; setSeg(g.dataset.seg, b.dataset.v); dirty();
@@ -540,10 +559,9 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
   $('#o-screen').addEventListener('change', e => { opts.screen = e.target.value; dirty(); });
   $$('[data-o]').forEach(e => e.addEventListener('change', () => { opts[e.dataset.o] = e.type === 'checkbox' ? e.checked : e.value; dirty(); }));
   $('#o-myscreen').onclick = () => call('my_screen').then(n => { opts.screen = n; $('#o-screen').value = n; dirty(); });
-  $('#save').onclick = () => call('save_options', opts).then(err => {
-    $('#save-s').textContent = err || 'Saved. They apply the next time the game starts.';
-    $('#save-s').className = err ? 'status' : 'status ok'; if (!err) $('#save').disabled = true;
-  });
+  $$('.save').forEach(b => b.onclick = () => call('save_options', opts).then(err => {
+    saveState(!err, err || 'Saved. They apply the next time the game starts.', !err);
+  }));
 
   /* ---- Options: keyboard and mouse. A control's keys are the names the game reads (SDL's, by the key's position) */
   const KEY_NAMES = { Space: 'Space', Enter: 'Return', Tab: 'Tab', Backspace: 'Backspace', ShiftLeft: 'Left Shift', ShiftRight: 'Right Shift',
@@ -616,7 +634,7 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
   $('#keys-reset').onclick = () => {
     if (!opts) return;
     for (const [key, , first] of controls) opts.keys[key] = first.split(',').map(s => s.trim()).filter(Boolean);
-    $('#keys-s').textContent = 'The first keys are back. Save options to keep them.'; drawBinds(); dirty();
+    $('#keys-s').textContent = 'The first keys are back. Save controls to keep them.'; drawBinds(); dirty();
   };
 
   /* ---- Saves */
@@ -759,8 +777,25 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
       if (r.error) { $('#check-s').textContent = r.error; return; }
       $('#check-s').textContent = 'Checked at ' + now;
       $('#h-newest').textContent = r.tag || 'You have the newest'; $('#h-newest').className = r.tag ? 'warn' : 'ok';
-      if (r.tag) { $('#update-t').textContent = 'B3-Express ' + r.tag.replace(/^v/, '') + ' is out.'; $('#update').hidden = false; }
+      if (r.tag) {
+        newest = 'B3-Express ' + r.tag.replace(/^v/, '') + ' is out.';
+        $('#update-t').textContent = newest; $('#update').hidden = false;
+        $('#update-go').hidden = $('#update-go2').hidden = !r.can;
+        $('#update-go').title = $('#update-go2').title = r.can ? 'Downloads ' + r.mb + ' MB, then the launcher restarts by itself' : '';
+      }
     });
+  }
+  /* the one-button update: the download's progress in the notice, then the launcher closes and comes back updated */
+  let newest = '';
+  const startUpdate = () => call('update').then(err => { if (err) { $('#update-t').textContent = newest + ' ' + err; $('#update').hidden = false; } });
+  $('#update-go').onclick = $('#update-go2').onclick = startUpdate;
+  function renderUpdate(u) {
+    if (!u) return;
+    const busy = !u.error;
+    $('#update').hidden = false;
+    $('#update-go').disabled = $('#update-go2').disabled = busy;
+    $('#update-t').textContent = u.error ? newest + ' ' + u.error
+      : u.pct < 100 ? 'Downloading the update… ' + u.pct + '%' : 'Installing the update. The launcher closes and opens again by itself.';
   }
   $('#check').onclick = () => checkUpdate(false);
   $('#update-link').onclick = e => { e.preventDefault(); call('open_link', 'releases'); };

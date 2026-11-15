@@ -257,9 +257,16 @@ try:
     L.subprocess.run = lambda *a, **k: Answer(b'NVIDIA GeForce RTX 3080, 10240, 621.01\r\n')
     assert L.gpu_info() == 'NVIDIA GeForce RTX 3080, 10 GB, driver 621.01', L.gpu_info()
     L.subprocess.run = lambda *a, **k: Answer(None)
-    assert 'No NVIDIA' in L.gpu_info()
+    real_windows_gpu = L.windows_gpu
+    L.windows_gpu = lambda: 'AMD Radeon RX 6700 XT, 12 GB, driver 32.0'  # no nvidia-smi: Windows' own record
+    assert L.gpu_info().startswith('AMD Radeon')
+    L.windows_gpu = lambda: max(None)
+    assert L.gpu_info() == 'Graphics card not found.'
+    L.windows_gpu = real_windows_gpu
 finally:
     L.subprocess.run = real_run
+_home = str(Path.home())  # a bug report doesn't carry the Windows user's name
+assert L.no_user(f'Game folder {_home}\\Games\n{_home.replace(chr(92), "/").upper()}/x') == 'Game folder %USERPROFILE%\\Games\n%USERPROFILE%/x'
 L.LOGS = Path(tempfile.mkdtemp())
 try:
     raise KeyError('x')
@@ -272,6 +279,13 @@ assert 'KeyError' in (L.LOGS / 'launcher-errors.log').read_text(encoding='utf8')
 assert L.prep_mode('resolution=1.6\nfsr=0\n') == 7
 assert L.prep_mode('resolution=1\nfsr=0\ndither=0\n') == 0 and L.prep_mode('resolution=1.6\ndither=0\n') == 1
 assert L.prep_mode('resolution=1\ndither=x\n') == 0 and L.prep_mode('resolution=1\ndither=9\n') == 6
+# the game's id after the driver ("c": AMD and others, vertex stages with depth clamp too): a pass from before is redone
+_c = Path(tempfile.mkdtemp())
+(_c / 'gpu.txt').write_text('00800161c 7\n')
+(_c / 'prepared.txt').write_text('00800161 7\n')
+assert not L.shaders_ready(_c, 7)
+(_c / 'prepared.txt').write_text('00800161c 7\n')
+assert L.shaders_ready(_c, 7)
 
 # the new window's options: what is read writes back the same, every comment kept
 GAME_INI = ('; settings\r\n[Display]\r\ndocked=1\r\nresolution=1.6\r\nfsr=1.6\r\nfullscreen=1\r\nvsync=1\r\n'
@@ -341,6 +355,22 @@ with zipfile.ZipFile(evil, 'w') as z:
     z.writestr('../escaped.bin', b'x')
 assert 'outside' in L.restore_save(evil.name) and not (L.DATA / 'escaped.bin').exists()
 assert (L.SAVE / 'slot' / 'data.bin').read_bytes() == b'chapter 3'  # a refused restore leaves the save alone
+real_replace = os.replace
+def failing_replace(a, b):  # the restored folder can't be moved into place
+    if Path(a).name == 'save.restoring':
+        raise OSError('in use')
+    real_replace(a, b)
+L.os.replace = failing_replace
+try:
+    L.restore_save(first)
+    raise SystemExit('a failed restore must say so')
+except OSError:
+    pass
+L.os.replace = real_replace
+assert (L.SAVE / 'slot' / 'data.bin').read_bytes() == b'chapter 3'  # a failed restore puts the save back
+real_replace(L.SAVE, L.DATA / 'save.old')  # an older launcher's failed restore left the save in save.old
+assert L.restore_save(first) is None and (L.SAVE / 'slot' / 'data.bin').read_bytes() == b'chapter 3'
+assert any(b[3] == 'before a restore' for b in L.backup_list())
 
 # mods: listed with the ones on first in mods.txt order, turned on and off by rewriting mods.txt whole
 data_before = L.DATA
@@ -480,4 +510,65 @@ assert L.session_stats(L.GAME / 'none.log') is None
 
 # a release is newer only by its numbers
 assert L.launcher_version() == 'dev'
+REL = {'tag_name': 'v9.9.9', 'html_url': 'page', 'assets': [
+    {'name': 'notes.txt', 'browser_download_url': f'https://github.com/{L.REPO}/releases/download/v9.9.9/notes.txt'},
+    {'name': 'B3-Express-9.9.9-windows-x64.zip', 'size': 0, 'digest': 'sha256:AB',
+     'browser_download_url': f'https://github.com/{L.REPO}/releases/download/v9.9.9/B3-Express-9.9.9-windows-x64.zip'}]}
+assert L.newer_release('0.2.7', REL) == ('v9.9.9', 'page') and L.newer_release('9.9.9', REL) == (None, None)
+assert L.newer_release('dev', REL) == (None, None)
+assert L.update_asset(REL)['url'].endswith('x64.zip') and L.update_asset(REL)['sha256'] == 'ab'
+assert L.update_asset({'assets': [{'name': 'B3-Express-9-windows-x64.zip', 'browser_download_url': 'https://example.com/x.zip'}]}) is None
+
+# the one-button update: the package downloaded and checked, then put over the old files once the launcher has closed
+import hashlib, io, urllib.request
+L.ROOT = Path(tempfile.mkdtemp())  # a package: its own files, and the player's
+L.UPDATE, L.LOGS, L.STAMP = L.ROOT / 'update', L.ROOT / 'logs', L.ROOT / 'Bayo3_120' / 'Bayo3_120.abi'
+for name, text in (('VERSION', '0.2.7'), ('launcher/web_launcher.py', 'old'), ('Bayo3_120/Bayo3_120.abi', '8'),
+                   ('Bayo3_120/Bayo3_120_data/save/slot.bin', 'my save'), ('Bayo3_120/Bayo3_120.ini', 'mine')):
+    (L.ROOT / name).parent.mkdir(parents=True, exist_ok=True)
+    (L.ROOT / name).write_text(text)
+
+
+def package(files):
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, 'w') as z:
+        for name, text in files.items():
+            z.writestr(name, text)
+    return data.getvalue()
+
+
+def served(data):  # what urlopen gives for the download
+    urllib.request.urlopen = lambda request, timeout=0: io.BytesIO(data)
+    return {'url': 'https://x', 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+
+
+real_urlopen = urllib.request.urlopen
+try:
+    for bad, why in ((package({'../out.txt': 'x'}), 'outside'), (package({'readme.txt': 'x'}), 'package')):
+        try:
+            L.update_fetch(served(bad))
+            raise SystemExit('a bad package must be refused')
+        except ValueError as e:
+            assert why in str(e), e
+    assert not (L.ROOT / 'out.txt').exists()
+    try:
+        L.update_fetch(dict(served(package({'a': 'b'})), sha256='00'))
+        raise SystemExit('a download that differs from the release must be refused')
+    except ValueError as e:
+        assert 'different' in str(e)
+    seen = []
+    new = L.update_fetch(served(package({'B3-Express-9.9.9-windows-x64/VERSION': '9.9.9',
+                                         'B3-Express-9.9.9-windows-x64/launcher/web_launcher.py': 'new',
+                                         'B3-Express-9.9.9-windows-x64/Bayo3_120/Bayo3_120.exe': 'program'})), seen.append)
+finally:
+    urllib.request.urlopen = real_urlopen
+assert seen and (new / 'VERSION').read_text() == '9.9.9' and (L.ROOT / 'VERSION').read_text() == '0.2.7'  # nothing touched yet
+gone = L.subprocess.Popen(['cmd', '/c', 'exit'])  # stands for the launcher that has closed
+gone.wait()
+assert L.update_apply(new, gone.pid).wait(120) == 0
+assert (L.ROOT / 'VERSION').read_text() == '9.9.9' and (L.ROOT / 'launcher/web_launcher.py').read_text() == 'new'
+assert (L.ROOT / 'Bayo3_120/Bayo3_120.exe').read_text() == 'program'
+assert (L.ROOT / 'Bayo3_120/Bayo3_120_data/save/slot.bin').read_text() == 'my save'  # the player's files stay
+assert (L.ROOT / 'Bayo3_120/Bayo3_120.ini').read_text() == 'mine'
+assert not L.STAMP.exists() and not new.exists()  # the game code is compiled again for the new program
 print('launcher logic: all passed')
