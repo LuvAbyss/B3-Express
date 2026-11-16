@@ -13,6 +13,7 @@ typedef struct {
     unsigned jobs;
     int quiet;
     const char* keep_ir; /* when set, each unit's IR is saved there as .ll */
+    const char* cache;   /* when set, a folder of compiled units by the hash of their bitcode (module_llvm.c) */
 } SnxLlvmBuild;
 
 /* SNX_ABI as this build has it: the layout its modules are written with, which the runtime of the same build checks */

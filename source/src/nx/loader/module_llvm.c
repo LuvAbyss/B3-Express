@@ -6,6 +6,8 @@
 #include "common/cpu/recompiler/llvm/ir.h"
 #include "common/cpu/recompiler/llvm/link.h"
 #include "nx/loader/module_abi.h"
+#include <llvm-c/BitWriter.h>
+#include <llvm-c/blake3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +23,8 @@ typedef struct {
     unsigned char* object;
     size_t size;
     unsigned long fallbacks;
+    int cached;
+    char key[80]; /* its file in the build's cache, "" for none */
 } Unit;
 
 typedef struct {
@@ -61,6 +65,89 @@ static int save_ir(SnxIr* ir, const char* dir, const char* name) {
     return rc;
 }
 
+/* ---- the unit cache ----
+   A unit's object is a function of its IR, the LLVM that compiles it, the -O level and the target machine (the host's
+   CPU and every extension it has). A BLAKE3 hash of all that names its file, "unit-<hash>.o": a recompile after an
+   update or a code mod builds only the units whose IR changed. The file is the unit's interpreter fallback count
+   (4 bytes, little-endian), then its object */
+#define CACHE_PREFIX "unit-"
+static void unit_key(SnxIr* ir, char opt, char* key) {
+    llvm_blake3_hasher h;
+    unsigned char out[LLVM_BLAKE3_OUT_LEN];
+    unsigned version[3];
+    char* text[3];
+    LLVMMemoryBufferRef bitcode = LLVMWriteBitcodeToMemoryBuffer(ir->mod);
+    int i;
+    llvm_blake3_hasher_init(&h);
+    llvm_blake3_hasher_update(&h, "snx-unit-cache-2", 16);
+    LLVMGetVersion(&version[0], &version[1], &version[2]);
+    llvm_blake3_hasher_update(&h, version, sizeof(version));
+    llvm_blake3_hasher_update(&h, &opt, 1);
+    text[0] = LLVMGetTargetMachineTriple(ir->tm);
+    text[1] = LLVMGetTargetMachineCPU(ir->tm);
+    text[2] = LLVMGetTargetMachineFeatureString(ir->tm);
+    for (i = 0; i < 3; ++i) {
+        llvm_blake3_hasher_update(&h, text[i], strlen(text[i]) + 1);
+        LLVMDisposeMessage(text[i]);
+    }
+    llvm_blake3_hasher_update(&h, LLVMGetBufferStart(bitcode), LLVMGetBufferSize(bitcode));
+    LLVMDisposeMemoryBuffer(bitcode);
+    llvm_blake3_hasher_finalize(&h, out, sizeof(out));
+    strcpy(key, CACHE_PREFIX);
+    for (i = 0; i < 32; ++i) sprintf(key + strlen(CACHE_PREFIX) + 2 * i, "%02x", out[i]);
+    strcat(key, ".o");
+}
+/* the unit's object from the cache: 0 when it was there */
+static int cache_load(const char* dir, Unit* u) {
+    char* path = snx_path_join(dir, u->key);
+    size_t size = 0, i;
+    unsigned char* data = snx_read_file(path, &size);
+    free(path);
+    if (!data || size <= 4) {
+        free(data);
+        return -1;
+    }
+    u->fallbacks = 0;
+    for (i = 0; i < 4; ++i) u->fallbacks |= (unsigned long)data[i] << (8 * i);
+    u->size = size - 4;
+    memmove(data, data + 4, u->size);
+    u->object = data;
+    u->cached = 1;
+    return 0;
+}
+/* saved under a temporary name and renamed, so a recompile that stops halfway leaves no partial unit. A unit that
+   can't be saved is only built again next time */
+static void cache_save(const char* dir, size_t index, const Unit* u) {
+    char *path = snx_path_join(dir, u->key), *tmp = snx_format("%s.%lu.tmp", path, (unsigned long)index);
+    unsigned char* data = (unsigned char*)malloc(u->size + 4);
+    size_t i;
+    if (data) {
+        for (i = 0; i < 4; ++i) data[i] = (unsigned char)(u->fallbacks >> (8 * i));
+        memcpy(data + 4, u->object, u->size);
+        if (snx_write_file(tmp, data, u->size + 4) || snx_replace(tmp, path)) snx_remove_tree(tmp);
+        free(data);
+    }
+    free(tmp);
+    free(path);
+}
+/* after a module is built: the cache holds its units only, and no temporary files */
+static void cache_prune(const char* dir, const Unit* units, size_t count) {
+    char** names = NULL;
+    size_t n = 0, i, j;
+    if (snx_list_dir(dir, &names, &n)) return;
+    for (i = 0; i < n; ++i) {
+        int used = 0;
+        if (strncmp(names[i], CACHE_PREFIX, strlen(CACHE_PREFIX))) continue;
+        for (j = 0; j < count && !used; ++j) used = !strcmp(names[i], units[j].key);
+        if (!used) {
+            char* path = snx_path_join(dir, names[i]);
+            snx_remove_tree(path);
+            free(path);
+        }
+    }
+    snx_free_strings(names, n);
+}
+
 /* one chunk of functions, as module.c's code_NNN.c */
 static int compile_unit(Queue* q, size_t index, char* error, size_t error_size) {
     Unit* u = &q->units[index];
@@ -75,7 +162,15 @@ static int compile_unit(Queue* q, size_t index, char* error, size_t error_size) 
     u->fallbacks = ir->fallbacks;
     rc = q->build->keep_ir && save_ir(ir, q->build->keep_ir, name);
     if (rc) snprintf(error, error_size, "cannot save the IR of %s", name);
+    if (!rc && q->build->cache) {
+        unit_key(ir, q->build->opt, u->key);
+        if (!cache_load(q->build->cache, u)) {
+            snx_ir_free(ir);
+            return 0;
+        }
+    }
     if (!rc) rc = snx_ir_object(ir, q->build->opt, &u->object, &u->size, error, error_size);
+    if (!rc && q->build->cache) cache_save(q->build->cache, index, u);
     snx_ir_free(ir);
     return rc;
 }
@@ -107,7 +202,7 @@ static void worker(Queue* q) {
         if (label) {
             /* every unit: a line every few seconds or minutes, whichever the machine manages */
             sprintf(name, "code_%03lu", (unsigned long)i);
-            snx_report_unit(q->done, q->count + 1, name, label, 0, seconds); /* + the descriptor */
+            snx_report_unit(q->done, q->count + 1, name, label, q->units[i].cached, seconds); /* + the descriptor */
         }
         unlock(q);
         free(label);
@@ -461,6 +556,7 @@ int snx_build_module_llvm(SnxProgram* loaded, const SnxCodegenOptions* options, 
         printf("LLVM module: %.1f MB, %lu entries\n", (double)linked.size / 1000000.0, (unsigned long)entry_count);
         if (fallbacks) printf("LLVM: %lu instructions run through the interpreter step\n", fallbacks);
     }
+    if (build->cache) cache_prune(build->cache, q.units, q.count);
     rc = 0;
 done:
     for (i = 0; i < q.count; ++i) free(q.units[i].object);

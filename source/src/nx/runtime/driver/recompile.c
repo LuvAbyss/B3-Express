@@ -31,7 +31,8 @@ static void usage(void) {
     puts("  --interp-only          Generate fallback interpreter only\n"
          "  --runtime FILE         Deploy this runtime instead of building one\n"
          "  --keep-ir              Save the generated code (LLVM IR, libgccjit dumps) in <NAME>/<NAME>_build\n"
-         "  -q, --quiet            Suppress progress");
+         "  --cache DIR            Keep each compiled unit in DIR by the hash of its IR, and reuse it\n"
+         "  -q, --quiet           Suppress progress");
     puts("Each game is a folder of <outdir>, <NAME>/: its program <NAME>, <NAME>_code and <NAME>_data/.\n"
          "Hints: <outdir>/<NAME>/<NAME>.hints (hex PCs, one per line).");
 }
@@ -213,7 +214,8 @@ static int copy_data(const SnxProgram* p, const char* dir, int quiet) {
     return rc;
 }
 int snx_recompile(int argc, char** argv, const SnxPaths* paths) {
-    const char *input = NULL, *name = NULL, *outdir = NULL, *runtime = NULL, *target = "auto", *arg, *value;
+    const char *input = NULL, *name = NULL, *outdir = NULL, *cache = NULL, *runtime = NULL, *target = "auto", *arg,
+               *value;
     SnxBackend backend = SNX_BACKEND_LLVM;
     SnxLlvmBuild llvm;
     SnxCompileOptions compile;
@@ -280,7 +282,7 @@ int snx_recompile(int argc, char** argv, const SnxPaths* paths) {
             }
             if (strcmp(arg, "-o") && strcmp(arg, "--name") && strcmp(arg, "--out") && strcmp(arg, "--outname") &&
                 strcmp(arg, "--outdir") && strcmp(arg, "--runtime") && strcmp(arg, "--target") && strcmp(arg, "-O") &&
-                strcmp(arg, "--jobs") && strcmp(arg, "--chunk") && strcmp(arg, "--backend"))
+                strcmp(arg, "--jobs") && strcmp(arg, "--chunk") && strcmp(arg, "--backend") && strcmp(arg, "--cache"))
                 return snx_error("unknown recompiler option: %s", arg);
             if (!value) {
                 if (++i == argc) return snx_error("%s requires a value", arg);
@@ -291,6 +293,8 @@ int snx_recompile(int argc, char** argv, const SnxPaths* paths) {
                 name = value;
             else if (!strcmp(arg, "--outdir"))
                 outdir = value;
+            else if (!strcmp(arg, "--cache"))
+                cache = value;
             else if (!strcmp(arg, "--runtime"))
                 runtime = value;
             else if (!strcmp(arg, "--target"))
@@ -422,8 +426,13 @@ int snx_recompile(int argc, char** argv, const SnxPaths* paths) {
         llvm.jobs = compile.jobs;
         llvm.quiet = compile.quiet;
         llvm.keep_ir = kept;
+        llvm.cache = cache;
         i = kept && (snx_is_link(kept) || snx_mkdirs(kept));
         if (i) snx_error("cannot save the generated code in %s", kept);
+        if (!i && cache && snx_mkdirs(cache)) {
+            snx_error("cannot create the unit cache %s", cache);
+            i = 1;
+        }
         if (!i && !program.npdm.is64)
             i = snx_build_module_arm(&program, &gen, &llvm);
         else if (!i && backend == SNX_BACKEND_LLVM)
