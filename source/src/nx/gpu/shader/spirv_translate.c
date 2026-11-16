@@ -2876,6 +2876,7 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
             needs_derivatives = 1;
         if (stage == ST_FS && helper_side_effect(op->id)) needs_demote = 1;
         if (op->id == O_VOTE || op->id == O_SHFL) needs_subgroup = 1;
+        if (op->id == O_SHFL && stage == ST_FS) needs_demote = 1; /* the helper query, below */
         if (op->id == O_FSWZADD) { /* a swizzle other than a derivative's reads the lane in its quad */
             if (stage != ST_FS || !fswzadd_derivative(B(insn[i], 28, 8))) needs_subgroup = 1;
         }
@@ -4117,6 +4118,22 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                                                                  spv_emit_constant_u32(&c->emit, c->u32_type, 31)));
             u32 value = reg_read(c, a);
             u32 shuffled = spv_emit_subgroup_shuffle_u32(&c->emit, c->u32_type, value, host_lane);
+            if (stage == ST_FS) {
+                /* a helper or inactive source lane gives AMD garbage, where Maxwell's helpers ran the code: keep
+                   the lane's own value, as for an out-of-segment lane (black dots on the shop's characters) */
+                u32 live = subgroup_ballot_word(
+                    c, vec4_u32, host_lane,
+                    spv_emit_bool_not(&c->emit, c->bool_type, spv_emit_is_helper(&c->emit, c->bool_type)));
+                u32 bit = spv_emit_bitwise_and_u32(
+                    &c->emit, c->u32_type,
+                    spv_emit_shift_right_u32(
+                        &c->emit, c->u32_type, live,
+                        spv_emit_bitwise_and_u32(&c->emit, c->u32_type, host_lane,
+                                                 spv_emit_constant_u32(&c->emit, c->u32_type, 31))),
+                    spv_emit_constant_u32(&c->emit, c->u32_type, 1));
+                u32 source_live = spv_emit_i_not_equal(&c->emit, c->bool_type, bit, c->zero);
+                shuffled = spv_emit_select(&c->emit, c->u32_type, source_live, shuffled, value);
+            }
             pred_write(c, B(w, 48, 3), valid);
             reg_write(c, d, spv_emit_select(&c->emit, c->u32_type, valid, shuffled, value));
         } else if (op == O_MOV_R || op == O_MOV_C || op == O_MOV_I) {
