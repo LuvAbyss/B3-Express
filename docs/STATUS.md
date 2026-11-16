@@ -11,8 +11,24 @@ Test PC: Ryzen 7 5700X3D, RX 6700 XT since 2026-11-14 (RTX 3080 before). Numbers
 | Latest release | 0.2.8 (2026-11-15) |
 | Installed in `output/` | 0.2.8's runtime with both AMD shader fixes below (runtime `dd516ed7`, game code `799aab41`). Rollback in `diagnostics/install-20261116b/` |
 | Not pushed | the AMD shader fixes (`55a53f3`, `a43b413`) and their docs commits |
+| Not committed, not installed | the game code compile cache and compile threads below |
 
 ## Since 0.2.8
+
+### Game code compile: blocks kept between compiles (2026-11-16)
+
+| change | where |
+|---|---|
+| Each compiled block is kept in `code_cache/` beside the game, named by a hash of its LLVM bitcode, the LLVM version, `-O` and the CPU. A compile after an update or a code mod builds only the blocks that changed (`--cache`) | `module_llvm.c`, `recompile.c`, launcher |
+| The compiler uses every thread at below-normal priority, instead of all but two | launcher |
+
+| Ryzen 7 5700X3D, through the launcher | before | after |
+|---|---|---|
+| New player's compile | 207 s | 188 s |
+| Compile after an update, same generated code | 207 s | 13 s |
+| Disk used by `code_cache/` | | 331 MB |
+
+The game code comes out byte for byte the same with and without the cache. Not measured: a code mod's compile, an update that changes the generated code.
 
 ### AMD: dots and lines on characters, grid on the arena floor (fixed, the user confirmed 2026-11-16)
 
@@ -123,6 +139,7 @@ Older numbers, before 0.1.1. Not measured again on the current build.
 | AMD shader fixes on NVIDIA | not run on an NVIDIA card |
 | Chapter 14 verse 7 crash (nvmap handle reuse) | fixed 2026-11-10, waits for the user's replay of that verse |
 | New AMD player's first fight end | three shaders compile at frames 5949-5950 (34-75 ms) |
+| New AMD player's shader preparation, 104-113 s | AMD's compiler, 190-300 ms a stage: 8, 14 or 16 workers within 10 %, translating 0.7 ms, waiting for `vk_lock` 10-17 ms |
 | Intel Iris Xe device lost (issue 2) | fix released, not tested on Intel |
 | Widescreen 32:9 | a dialog's band and the character select's right edge stay short |
 | Keyboard prompts | sticks and D-pad still show the controller's |
