@@ -230,6 +230,8 @@ static int create_device(void) {
                      VK_SUBGROUP_FEATURE_ARITHMETIC_BIT)
             ? subgroup.supportedStages
             : 0;
+    g_shader_quad = (g_vk_subgroup_stages & VK_SHADER_STAGE_FRAGMENT_BIT) &&
+                    (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_QUAD_BIT);
     g_vk_preserve_infnan = p12.shaderSignedZeroInfNanPreserveFloat32 != 0;
     g_vk_preserve_infnan64 = p12.shaderSignedZeroInfNanPreserveFloat64 != 0;
     /* 32 bit alone: a device whose denorm modes can't differ per width would need 16 and 64 bit declared too */

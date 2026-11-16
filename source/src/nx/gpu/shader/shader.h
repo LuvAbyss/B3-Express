@@ -145,6 +145,8 @@ extern int g_shader_soft_ftz;
    order instead of in the dispatch loop (spirv_translate.c). 0 (SNX_SHADER_LINEAR=0, a test): every program with
    jumps uses the loop. The order of blocks and the design are Witch Time's (issue 92) */
 extern int g_shader_linear;
+/* 1 when the device runs subgroup quad operations in pixel stages (vk/device.c): SHFL then reads its quad with them */
+extern int g_shader_quad;
 /* the targets of the BRX at word index from its jump table, at most max_targets, or -1 */
 int shader_brx_targets(const u64* words, u32 index, u32 count, u32* targets, int max_targets);
 /* the program's hash, and its length in bytes in out_len */

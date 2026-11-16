@@ -1939,7 +1939,7 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
     int needs_fragcoord = 0;
     int needs_frontface = 0;
     int needs_point_coord = 0, needs_sample_id = 0, needs_coverage = 0;
-    int needs_demote = 0;
+    int needs_demote = 0, quad_shfl = 0;
     int needs_image_query = 0, needs_derivatives = 0, needs_clock = 0;
     int needs_instance = 0;
     int needs_local_id = 0, needs_group_id = 0;
@@ -2876,7 +2876,10 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
             needs_derivatives = 1;
         if (stage == ST_FS && helper_side_effect(op->id)) needs_demote = 1;
         if (op->id == O_VOTE || op->id == O_SHFL) needs_subgroup = 1;
-        if (op->id == O_SHFL && stage == ST_FS) needs_demote = 1; /* the helper query, below */
+        if (op->id == O_SHFL && stage == ST_FS) {
+            needs_demote = 1; /* the helper query, below */
+            quad_shfl = g_shader_quad;
+        }
         if (op->id == O_FSWZADD) { /* a swizzle other than a derivative's reads the lane in its quad */
             if (stage != ST_FS || !fswzadd_derivative(B(insn[i], 28, 8))) needs_subgroup = 1;
         }
@@ -3088,6 +3091,7 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
     if (needs_i64) spv_emit_capability(&c->emit, 11); /* Int64 */
     if (needs_subgroup || converge) spv_emit_subgroup_capabilities(&c->emit);
     if (converge) spv_emit_subgroup_arithmetic_capability(&c->emit);
+    if (quad_shfl) spv_emit_capability(&c->emit, 68); /* GroupNonUniformQuad */
     if (needs_gather_extended) spv_emit_image_gather_extended_capability(&c->emit);
     if (needs_image_query) spv_emit_image_query_capability(&c->emit);
     if (needs_glsl) c->glsl = spv_emit_glsl450_import(&c->emit);
@@ -4133,6 +4137,27 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                     spv_emit_constant_u32(&c->emit, c->u32_type, 1));
                 u32 source_live = spv_emit_i_not_equal(&c->emit, c->bool_type, bit, c->zero);
                 shuffled = spv_emit_select(&c->emit, c->u32_type, source_live, shuffled, value);
+            }
+            if (quad_shfl) {
+                /* a source in the lane's own quad is read with quad swaps, which run on helpers too, so a word ORed
+                   over the quad is the same in all four lanes as on Maxwell. Otherwise the helper's light list
+                   differed from its quad's, it looped apart, and its quad's derivatives broke at triangle edges
+                   (dots and lines on the costume screen's characters) */
+                u32 three = spv_emit_constant_u32(&c->emit, c->u32_type, 3);
+                u32 apart = spv_emit_bitwise_xor_u32(&c->emit, c->u32_type, source_lane, lane);
+                u32 in_quad =
+                    spv_emit_i_equal(&c->emit, c->bool_type,
+                                     spv_emit_bitwise_and_u32(&c->emit, c->u32_type, apart,
+                                                              spv_emit_constant_u32(&c->emit, c->u32_type, ~3u)),
+                                     c->zero);
+                u32 k = spv_emit_bitwise_and_u32(&c->emit, c->u32_type, apart, three);
+                u32 quad = value;
+                for (u32 dir = 0; dir < 3; dir++)
+                    quad = spv_emit_select(&c->emit, c->u32_type,
+                                           spv_emit_i_equal(&c->emit, c->bool_type, k,
+                                                            spv_emit_constant_u32(&c->emit, c->u32_type, dir + 1)),
+                                           spv_emit_subgroup_quad_swap_u32(&c->emit, c->u32_type, value, dir), quad);
+                shuffled = spv_emit_select(&c->emit, c->u32_type, in_quad, quad, shuffled);
             }
             pred_write(c, B(w, 48, 3), valid);
             reg_write(c, d, spv_emit_select(&c->emit, c->u32_type, valid, shuffled, value));
