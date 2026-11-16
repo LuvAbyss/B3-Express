@@ -24,7 +24,7 @@ without WebView2 the old window opens instead, with the same logic.
   runtime build m1 on, the page says when the installed game is older). Code patches work from build m2 on: `.ips`
   (IPS, IPS32) and `.pchtxt` (IPSwitch) files for v1.2.0 in a mod's `exefs/`, or Atmosphère's
   `exefs_patches/<name>/`. They are compiled into the game code, so turning one on or off makes the next Play
-  compile again (about 3 minutes). `Bayo3_120.codemods` records what the code was built with, and the game itself
+  compile again (the blocks the patches change, up to about 3 minutes). `Bayo3_120.codemods` records what the code was built with, and the game itself
   refuses code built with other patches (`Bayo3_120.patches`). Cheats aren't supported. The bug report names the
   mods on.
 - **Help:** a bug report zip in `reports/` (the game's log, the settings, the graphics card; no game files, no saves),
@@ -33,12 +33,13 @@ without WebView2 the old window opens instead, with the same logic.
   against GitHub's record, and unpacks it. Then the launcher closes, `update/apply.cmd` copies the new files over the
   old ones (robocopy, its log in `logs/update.log`) and starts `B3-Express.exe` again. Files only the player has
   stay: the game's files, saves, settings, mods, backups, the shader cache. The compiled code's stamp
-  (`Bayo3_120.abi`) is removed, so the next Play compiles the game code again for the new program. If a file can't
+  (`Bayo3_120.abi`) is removed, so the next Play compiles the game code again for the new program, in seconds: each compiled block is kept in
+  `code_cache/` by its code, and only blocks that changed are compiled again. If a file can't
   be replaced, the release page opens instead. The old window only links to the release page.
 
 Install needs your own extracted dump, a folder holding `exefs` and `romfs` with the 1.2.0 update applied. It checks
 the version against `game-files.txt` before copying anything, copies the files in, then compiles the game code on
-this PC, about 5 minutes. Your folder stays as it was. The launcher doesn't extract dumps and never needs keys.
+this PC, about 3 minutes. Your folder stays as it was. The launcher doesn't extract dumps and never needs keys.
 
 The game's folder is `output/Bayo3_120`, or `Bayo3_120` beside this folder in a package. `B3_GAME_DIR` picks another one, which is how the tests stay off your real install.
 

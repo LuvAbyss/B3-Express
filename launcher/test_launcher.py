@@ -71,9 +71,12 @@ assert L.prepare_progress(cache) == (25, 75)
 assert L.scaled_mode('resolution=1.6\nfsr=0\n') and not L.scaled_mode('resolution=1\nfsr=0\n')
 assert L.scaled_mode('resolution=1.2\nfsr=1.2\n') and L.scaled_mode('resolution=1\nfsr=1.2\n')
 
-assert L.build_jobs(16) == 14 and L.build_jobs(2) == 1 and L.build_jobs(1) == 1 and L.build_jobs(None) == 1
+assert L.build_jobs(16) == 16 and L.build_jobs(2) == 2 and L.build_jobs(1) == 1 and L.build_jobs(None) == 1
 assert L.block_progress('  compiled block 12/83: code_000, 0x8000000-0x805E000, 488 functions (47.1 s)') == (12, 83)
 assert L.block_progress('Copying RomFS...') is None
+assert L.block_progress('  compiled block 3/83: code_002, 0x80B69F0-0x810E844, 318 functions (cached)') == (3, 83)
+cmd = L.build_command('rt.exe', 'in', 'out', 'repo', 14)  # the cache outlives the work folder each compile clears
+assert cmd[cmd.index('--cache') + 1] == str(L.GAME / 'code_cache') and L.WORK not in L.GAME.joinpath('code_cache').parents
 a, b = folder / 'a.hints', folder / 'b.hints'
 a.write_text('80016D0\n800138c\n\nnot-hex\n')
 b.write_text('800138c\n9326220\n')
