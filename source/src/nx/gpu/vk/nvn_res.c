@@ -494,7 +494,8 @@ static int prep_old(u64 h) {
 }
 static FILE* g_prf;
 static u64 g_pr_set, g_pr_done, g_pr_ns, g_pr_paused;
-static int prep_seen(u64 h) { /* adds it: 1 when it was there. Lock held */
+static u64 g_pr_wait_ns, g_pr_spv_ns; /* of g_pr_ns: waiting for vk_lock, and translating under it */
+static int prep_seen(u64 h) {         /* adds it: 1 when it was there. Lock held */
     u32 i = (u32)h & (PREP_SET - 1), n;
     if (!h) h = 1;
     for (n = 0; n < PREP_SET; n++, i = (i + 1) & (PREP_SET - 1)) {
@@ -556,11 +557,15 @@ static int prep_key(const PrepJob* j, const NvnStageKey* key, u32* in_mask) {
     size_t words = 0;
     u32* spv;
     VkShaderModule m = VK_NULL_HANDLE;
+    u64 t0 = plat_ns(), t1;
     vk_lock();
+    t1 = plat_ns();
     /* compute code comes without a program header, as cmdlist.c records it: framed as vk_nvn_shader frames it */
     spv = stage_spirv(j->stage, j->mem, j->window, j->stage == ST_CS, j->mem + j->window, j->cb_size,
                       j->stage == ST_CS ? j->cs_local : NULL, j->shared, key, &si, &words, NULL, NULL);
     vk_unlock();
+    __atomic_add_fetch(&g_pr_wait_ns, t1 - t0, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_pr_spv_ns, plat_ns() - t1, __ATOMIC_RELAXED);
     if (!spv) return 0;
     *in_mask = si.in_mask;
     {
@@ -5105,11 +5110,13 @@ void vk_nvn_live_stats(u64 frames) {
     }
     pm_lock(&g_prq_lk);
     if (g_pr_set)
-        LOG("nvn-live: shader preparation: game gave %llu stages, done %llu, %.1f ms each, left %u, paused %llu "
-            "times\n",
+        LOG("nvn-live: shader preparation: game gave %llu stages, done %llu, %.1f ms each (%.1f waiting for vk_lock, "
+            "%.1f translating), left %u, paused %llu times\n",
             (unsigned long long)g_pr_set, (unsigned long long)g_pr_done,
-            g_pr_done ? (double)g_pr_ns / (double)g_pr_done / 1e6 : 0.0, g_prq_in - g_prq_out,
-            (unsigned long long)g_pr_paused);
+            g_pr_done ? (double)g_pr_ns / (double)g_pr_done / 1e6 : 0.0,
+            g_pr_done ? (double)__atomic_load_n(&g_pr_wait_ns, __ATOMIC_RELAXED) / (double)g_pr_done / 1e6 : 0.0,
+            g_pr_done ? (double)__atomic_load_n(&g_pr_spv_ns, __ATOMIC_RELAXED) / (double)g_pr_done / 1e6 : 0.0,
+            g_prq_in - g_prq_out, (unsigned long long)g_pr_paused);
     pm_unlock(&g_prq_lk);
     pm_lock(&g_pq_lk);
     if (g_ps.made || g_pw_n)
