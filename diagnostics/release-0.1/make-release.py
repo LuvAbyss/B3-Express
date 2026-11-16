@@ -4,12 +4,12 @@ import shutil
 import zipfile
 from pathlib import Path
 
-VERSION = '0.2.8'
+VERSION = '0.3.0'
 root = Path.cwd()
 name = f'B3-Express-{VERSION}-windows-x64'
 out = root / 'release' / name
-exe = root / 'diagnostics/release-0.1/Bayo3_120-0.2.8-release.exe'  # built from c7bb7c2 (the AMD work, keyboard prompts): benched on the RX 6700 XT, not played by hand
-assert hashlib.sha256(exe.read_bytes()).hexdigest().startswith('46190fdf')
+exe = root / 'diagnostics/release-0.1/Bayo3_120-0.3.0-release.exe'  # built from 79f7a7a (the AMD dots fix, the compile cache): the dots fix played by hand on the RX 6700 XT
+assert hashlib.sha256(exe.read_bytes()).hexdigest().startswith('73d8c4c7')
 assert not (root / 'release' / (name + '.zip')).exists(), 'this version is already packaged: raise VERSION'
 if out.exists():
     shutil.rmtree(out)

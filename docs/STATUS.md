@@ -8,12 +8,11 @@ Test PC: Ryzen 7 5700X3D, RX 6700 XT since 2026-11-14 (RTX 3080 before). Numbers
 
 | | |
 |---|---|
-| Latest release | 0.2.8 (2026-11-15) |
-| Installed in `output/` | 0.2.8's runtime with both AMD shader fixes below (runtime `dd516ed7`, game code `799aab41`). Rollback in `diagnostics/install-20261116b/` |
-| Not pushed | the AMD shader fixes (`55a53f3`, `a43b413`) and their docs commits |
-| Not committed, not installed | the game code compile cache and compile threads below |
+| Latest release | 0.3.0 (2026-11-16), packaged, not published |
+| Installed in `output/` | 0.2.8's runtime with both AMD shader fixes below (runtime `dd516ed7`, game code `799aab41`). Rollback in `diagnostics/install-20261116b/`. Not 0.3.0's runtime |
+| Not pushed | everything since 0.2.8, the 0.3.0 release commit included |
 
-## Since 0.2.8
+## In 0.3.0
 
 ### Game code compile: blocks kept between compiles (2026-11-16)
 
@@ -53,6 +52,7 @@ Not checked: an NVIDIA card, the cave floor from the user's screenshot.
 
 | version | date | what changed |
 |---|---|---|
+| 0.3.0 | 2026-11-16 | AMD dots, lines and floor grid fixed, game code compile cache (seconds after an update), compiler on every thread |
 | 0.2.8 | 2026-11-15 | AMD slow frames, shorter shader preparation, one-button update, Graphics and Controls pages, keyboard prompts, GPU name on any card, safe save restore, issue 13 message |
 | 0.2.7 | 2026-11-13 | keyboard and mouse, resolution steps without hitches, pipeline cache saved only when it grew |
 | 0.2.6 | 2026-11-11 | chapter 14 fixes (verse 7 movie crash, Kraken slab, debris, fade smear), gallery speed, F6 captures |
