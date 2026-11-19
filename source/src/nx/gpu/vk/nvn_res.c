@@ -2286,6 +2286,12 @@ static int rp_set_alloc(VkDescriptorSetLayout layout, VkDescriptorSet* set) {
 /* a frame's CPU time in its windows by kind of command (the slow frame line): render targets set, draws, dispatches,
    buffer copies and updates, clears, the mirror pass as a window opens and the submit as it closes */
 static u64 g_rpt[RPT_N];
+static u64 g_rpt_sum[RPT_N]; /* g_rpt's frames summed until the pace line averages them */
+/* a draw's parts in rp_draw_body, summed until the pace line: its pipeline, textures made ready, descriptor sets (and
+   of them the driver allocating and writing them), vertex and index buffers, and the commands */
+enum { DP_PIPE, DP_TEX, DP_SET, DP_BUF, DP_CMD, DP_SET_VK, DP_N };
+static u64 g_dp[DP_N];
+static u64 g_set_reused; /* stage sets the draw before's served, until the pace line */
 void vk_nvn_time_add(int kind, u64 ns) { g_rpt[kind] += ns; }
 static void rp_targets_body(const NvnTarget* color, u32 n, const NvnTarget* depth);
 static void rp_draw_body(const NvnPipeDesc* d, const NvnStageBind* bind, const NvnDrawDyn* y, const NvnDrawCall* call);
@@ -3645,11 +3651,14 @@ static int rp_stage_set(int mod, const NvnStageBind* b, int stage, VkDescriptorS
     u64 salign = g_vk.props.limits.minStorageBufferOffsetAlignment, sb_addr[16] = {0}, sb_size[16] = {0}, off;
     u32 i, n = 0, base = b->nvn_stage == 5 ? 0x310 : 0x110 + 0x100 * g_hw_stage[b->nvn_stage % 6];
     int nt = si->ntex > SH_MAXTEX ? SH_MAXTEX : si->ntex, slot;
+    /* the resolution scales, built here and staged at the end, where the draw before's copy serves when they match */
+    static float rs[4 * (1 + SH_MAXTEX)];
     float* rs_slots = NULL;
-    if (!rp_set_alloc(g_vk_dslayout[shader_vk_set(stage)], set)) return *why = "descriptor pools used up", 0;
+    u32 rs_size = 0;
+    u64 t_alloc;
+    if (g_rp.live) vk_cmd(); /* the frame starts before staging is taken from it (the set is allocated at the end) */
 #define WB(binding, type)                                                                                              \
     (w[n++] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,                                  \
-                                     .dstSet = *set,                                                                   \
                                      .dstBinding = (binding),                                                          \
                                      .descriptorCount = 1,                                                             \
                                      .descriptorType = (type),                                                         \
@@ -3685,12 +3694,18 @@ static int rp_stage_set(int mod, const NvnStageBind* b, int stage, VkDescriptorS
             return *why = "staging used up (written storage buffer)", 0;
         WB(SNX_VKB_SSBO + i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
     }
-    if (si->ngbuf && stage != ST_CS) { /* no page maps: every slot's table entry 0xffffffff */
-        u8* p = rp_alloc(48 * 4, &off);
-        if (!p) return *why = "staging used up", 0;
-        memset(p, 0, 48 * 4);
-        memset(p, 0xFF, 16 * 4);
-        bi[SNX_VKB_SMAP] = (VkDescriptorBufferInfo){g_rp.sbuf, off, 48 * 4};
+    if (si->ngbuf && stage != ST_CS) { /* no page maps: every slot's table entry 0xffffffff, one copy a frame */
+        static VkDescriptorBufferInfo smap;
+        static u64 smap_frame = ~0ull;
+        if (!g_rp.live || smap_frame != vk_frame_id()) {
+            u8* p = rp_alloc(48 * 4, &off);
+            if (!p) return *why = "staging used up", 0;
+            memset(p, 0, 48 * 4);
+            memset(p, 0xFF, 16 * 4);
+            smap = (VkDescriptorBufferInfo){g_rp.sbuf, off, 48 * 4};
+            smap_frame = g_rp.live ? vk_frame_id() : ~0ull;
+        }
+        bi[SNX_VKB_SMAP] = smap;
         WB(SNX_VKB_SMAP, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
     }
     for (i = 0; i < 18; i++) { /* constant buffers, the bytes the program reads */
@@ -3735,17 +3750,13 @@ static int rp_stage_set(int mod, const NvnStageBind* b, int stage, VkDescriptorS
     if (stage == ST_FS) { /* the game's pixels of this pass's, then each texture slot's image / game ratio */
         const RpTarget* pt = rp_pass_target(); /* set before the pass begins: g_rp.psx may be the last pass's */
         float px = pt ? pt->sx : 1.0f, py = pt ? pt->sy : 1.0f;
-        u32 size = rp_scaling() ? 16 * (1 + SH_MAXTEX) : 16;
-        float rs[4] = {1 / px, 1 / py, px, 0};
-        u8* p = rp_alloc(size, &off);
-        if (!p) return *why = "staging used up", 0;
-        memcpy(p, rs, 16);
-        if (size > 16) {
-            rs_slots = (float*)(p + 16);
+        rs_size = rp_scaling() ? 16 * (1 + SH_MAXTEX) : 16;
+        rs[0] = 1 / px, rs[1] = 1 / py, rs[2] = px, rs[3] = 0;
+        if (rs_size > 16) {
+            rs_slots = rs + 4;
             for (i = 0; i < 4 * SH_MAXTEX; i++) rs_slots[i] = 1;
         }
-        bi[SNX_VKB_RS] = (VkDescriptorBufferInfo){g_rp.sbuf, off, size};
-        WB(SNX_VKB_RS, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        WB(SNX_VKB_RS, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER); /* bi[SNX_VKB_RS] once rs is complete, below */
     }
 #undef WB
     for (i = 0; i < (u32)nt; i++) {
@@ -3833,7 +3844,6 @@ static int rp_stage_set(int mod, const NvnStageBind* b, int stage, VkDescriptorS
         if (!view) return *why = "no view", 0;
         ii[SNX_VKB_TEX + i] = (VkDescriptorImageInfo){g_tc[slot].smp, view, layout};
         w[n++] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                        .dstSet = *set,
                                         .dstBinding = SNX_VKB_TEX + i,
                                         .descriptorCount = 1,
                                         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -3869,13 +3879,65 @@ static int rp_stage_set(int mod, const NvnStageBind* b, int stage, VkDescriptorS
         if (!view) return *why = "image: no view", 0;
         ii[SNX_VKB_IMG + i] = (VkDescriptorImageInfo){VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL};
         w[n++] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                        .dstSet = *set,
                                         .dstBinding = SNX_VKB_IMG + i,
                                         .descriptorCount = 1,
                                         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                                         .pImageInfo = &ii[SNX_VKB_IMG + i]};
     }
-    vkUpdateDescriptorSets(g_vk.dev, n, w, 0, NULL);
+    if (rs_size) { /* staged once while the scales stay the same in the frame */
+        static float rs_last[4 * (1 + SH_MAXTEX)];
+        static VkDescriptorBufferInfo rs_bi;
+        static u64 rs_frame = ~0ull;
+        if (!g_rp.live || rs_frame != vk_frame_id() || rs_bi.range != rs_size || memcmp(rs_last, rs, rs_size)) {
+            u8* p = rp_alloc(rs_size, &off);
+            if (!p) return *why = "staging used up", 0;
+            memcpy(p, rs, rs_size);
+            memcpy(rs_last, rs, rs_size);
+            rs_bi = (VkDescriptorBufferInfo){g_rp.sbuf, off, rs_size};
+            rs_frame = g_rp.live ? vk_frame_id() : ~0ull;
+        }
+        bi[SNX_VKB_RS] = rs_bi;
+    }
+    { /* the draw before's set of this stage when every write is the same, in the same frame's pools */
+        static struct {
+            VkDescriptorSet set;
+            u64 frame;
+            u32 n, bind[SNX_VKB_END];
+            VkDescriptorBufferInfo bi[SNX_VKB_END];
+            VkDescriptorImageInfo ii[SNX_VKB_END];
+        } last[5];
+        int vs = shader_vk_set(stage) % 5,
+            same = g_rp.live && last[vs].set && last[vs].frame == vk_frame_id() && last[vs].n == n;
+        u32 q;
+        for (q = 0; q < n && same; q++) {
+            u32 bd = w[q].dstBinding;
+            same = last[vs].bind[q] == bd && (w[q].pImageInfo ? last[vs].ii[q].sampler == ii[bd].sampler &&
+                                                                    last[vs].ii[q].imageView == ii[bd].imageView &&
+                                                                    last[vs].ii[q].imageLayout == ii[bd].imageLayout
+                                                              : !memcmp(&last[vs].bi[q], &bi[bd], sizeof bi[bd]));
+        }
+        g_set_reused += same;
+        if (same) {
+            *set = last[vs].set;
+            return 1;
+        }
+        t_alloc = plat_ns();
+        if (!rp_set_alloc(g_vk_dslayout[shader_vk_set(stage)], set)) return *why = "descriptor pools used up", 0;
+        for (q = 0; q < n; q++) w[q].dstSet = *set;
+        vkUpdateDescriptorSets(g_vk.dev, n, w, 0, NULL);
+        g_dp[DP_SET_VK] += plat_ns() - t_alloc;
+        last[vs].set = g_rp.live ? *set : VK_NULL_HANDLE;
+        last[vs].frame = vk_frame_id();
+        last[vs].n = n;
+        for (q = 0; q < n; q++) {
+            u32 bd = w[q].dstBinding;
+            last[vs].bind[q] = bd;
+            if (w[q].pImageInfo)
+                last[vs].ii[q] = ii[bd];
+            else
+                last[vs].bi[q] = bi[bd];
+        }
+    }
     return 1;
 }
 /* Live frames record into the renderer's command buffer: what a stage's textures need (an upload, a layout change)
@@ -4236,7 +4298,11 @@ static void rp_draw_body(const NvnPipeDesc* d, const NvnStageBind* bind, const N
     g_rp.draws++;
     g_rp.fr_draws++;
     rp_chunk();
-    p = pipe_get(d, &made);
+    {
+        u64 tp = plat_ns();
+        p = pipe_get(d, &made);
+        g_dp[DP_PIPE] += plat_ns() - tp;
+    }
     if (p && __atomic_load_n(&p->pending, __ATOMIC_ACQUIRE)) {
         u64 t0 = plat_ns(), waited;
         u32 ahead = pipe_front(p);
@@ -4297,12 +4363,22 @@ static void rp_draw_body(const NvnPipeDesc* d, const NvnStageBind* bind, const N
     if (call->kind == 3 && !g_vk.has_indirect_count) RSKIP("indirect count unavailable");
     g_rp.fs_src = -1;
     g_rp.movie = 0;
-    if (g_rp.live)
+    {
+        u64 tp = plat_ns(), tq;
+        if (g_rp.live)
+            for (s = 0; s < 5; s++)
+                if (d->mod[s] >= 0) rp_tex_ready(d->mod[s], &bind[s]);
+        tq = plat_ns();
+        g_dp[DP_TEX] += tq - tp;
+        if (rp_final_draw(y, call)) rp_fsr_begin();
         for (s = 0; s < 5; s++)
-            if (d->mod[s] >= 0) rp_tex_ready(d->mod[s], &bind[s]);
-    if (rp_final_draw(y, call)) rp_fsr_begin();
-    for (s = 0; s < 5; s++)
-        if (d->mod[s] >= 0 && !rp_stage_set(d->mod[s], &bind[s], st_of[s], &set[s], &why)) RSKIP(why);
+            if (d->mod[s] >= 0 && !rp_stage_set(d->mod[s], &bind[s], st_of[s], &set[s], &why)) {
+                g_dp[DP_SET] += plat_ns() - tq;
+                RSKIP(why);
+            }
+        g_dp[DP_SET] += plat_ns() - tq;
+    }
+    u64 t_buf = plat_ns();
     if (g_pt.open && d->mod[4] >= 0) g_pt.mod = d->mod[4];
     for (b = 0; b < p->nbind; b++) {
         u32 st = p->bstream[b];
@@ -4358,6 +4434,8 @@ static void rp_draw_body(const NvnPipeDesc* d, const NvnStageBind* bind, const N
                 RSKIP("draw count outside the pools");
         }
     }
+    u64 t_cmd = plat_ns();
+    g_dp[DP_BUF] += t_cmd - t_buf;
     rp_begin();
     if (g_rpd.pipe != p->p) vkCmdBindPipeline(g_rp.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p->p);
     for (s = 0; s < 5; s++)
@@ -4401,6 +4479,7 @@ static void rp_draw_body(const NvnPipeDesc* d, const NvnStageBind* bind, const N
     g_rp.drawn++;
     g_rp.kinds[call->kind & 3]++;
     if (g_rp.fsr_win) rp_fsr_end();
+    g_dp[DP_CMD] += plat_ns() - t_cmd;
 }
 static void rp_dispatch_body(int mod, const NvnStageBind* b, u32 x, u32 y, u32 z, u64 indirect) {
     VkDescriptorSet set;
@@ -4799,6 +4878,7 @@ void vk_nvn_live_window(int open) {
         vk_nvn_frame(); /* the renderer's textures may have changed since the last list: looked up again */
         g_rp.cb = vk_cmd();
         g_rp_win = 1;
+        vk_ww_window(1);
         for (k = 0; k < RP_SHOW; k++)
             if (g_rps[k].s.img && g_rps[k].s.layout != VK_IMAGE_LAYOUT_GENERAL)
                 vk_surf_use(g_rp.cb, &g_rps[k].s, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
@@ -4815,6 +4895,7 @@ void vk_nvn_live_window(int open) {
         rp_ts_write(0);
     } else {
         g_rp_win = 0;
+        vk_ww_window(0);
         rp_end_rendering();
         rp_barrier();
         pt_mark(PT_BETWEEN, 0, 0, 0);
@@ -4942,6 +5023,7 @@ void vk_nvn_live_present(u64 gpu, u64 cpu, const char* out, int all) {
                     (double)g_rpt[RPT_SUBMIT] / 1e6, (double)g_rpt[RPT_LISTS] / 1e6, (double)g_rpt[RPT_CMD_DRAW] / 1e6,
                     (double)g_rpt[RPT_CMD_DISPATCH] / 1e6);
             memset(g_vk_tex_ns, 0, sizeof g_vk_tex_ns);
+            for (i = 0; i < RPT_N; i++) g_rpt_sum[i] += g_rpt[i];
             memset(g_rpt, 0, sizeof g_rpt);
         }
         {
@@ -5166,6 +5248,21 @@ void vk_nvn_live_stats(u64 frames) {
             (double)g_rp.p_after / n / 1e6, (double)(slept - g_rp.p_slept) / n / 1e6, (unsigned long long)g_rp.p_over,
             (unsigned long long)g_rp.p_at60, (unsigned long long)(restarts - g_rp.p_restarts),
             (unsigned long long)g_rp.p_busy, (unsigned long long)g_rp.p_at30);
+        LOG("nvn-live: recording, a frame on average: lists %.2f ms, of which draw setup %.2f (the draws' own %.2f) and "
+            "dispatch setup %.2f; targets %.2f, copies %.2f, clears %.2f, mirror %.2f, submit %.2f\n",
+            (double)g_rpt_sum[RPT_LISTS] / n / 1e6, (double)g_rpt_sum[RPT_CMD_DRAW] / n / 1e6,
+            (double)g_rpt_sum[RPT_DRAW] / n / 1e6, (double)g_rpt_sum[RPT_CMD_DISPATCH] / n / 1e6,
+            (double)g_rpt_sum[RPT_TARGETS] / n / 1e6, (double)g_rpt_sum[RPT_COPY] / n / 1e6,
+            (double)g_rpt_sum[RPT_CLEAR] / n / 1e6, (double)g_rpt_sum[RPT_MIRROR] / n / 1e6,
+            (double)g_rpt_sum[RPT_SUBMIT] / n / 1e6);
+        LOG("nvn-live: a frame's draws on average: pipeline %.2f ms, textures ready %.2f, descriptor sets %.2f (the "
+            "driver allocating and writing them %.2f; the draw before's set served %.0f), buffers %.2f, commands %.2f\n",
+            (double)g_dp[DP_PIPE] / n / 1e6, (double)g_dp[DP_TEX] / n / 1e6, (double)g_dp[DP_SET] / n / 1e6,
+            (double)g_dp[DP_SET_VK] / n / 1e6, (double)g_set_reused / n, (double)g_dp[DP_BUF] / n / 1e6,
+            (double)g_dp[DP_CMD] / n / 1e6);
+        memset(g_dp, 0, sizeof g_dp);
+        g_set_reused = 0;
+        memset(g_rpt_sum, 0, sizeof g_rpt_sum);
         g_rp.p_slept = slept;
         g_rp.p_restarts = restarts;
         g_rp.p_frames = g_rp.p_over = g_rp.p_win = g_rp.p_lock = g_rp.p_before = g_rp.p_after = g_rp.p_busy = 0;

@@ -10,6 +10,7 @@
 #include "nx/runtime/platform/log.h"
 #include "nx/runtime/platform/plat.h"
 #include "nx/loader/patch.h"
+#include "nx/runtime/cheats.h"
 #include <stdlib.h>
 #include <lz4.h>
 #include <stdio.h>
@@ -172,6 +173,59 @@ static u64 built_digest(void) {
     return (u64)hi << 32 | lo;
 }
 
+/* A mod's cheats (mods/<mod>/cheats/<build id>.txt, those its enabled.txt names), before its exefs/ files as the
+   recompiler applies them: their writes into code that every run makes patched in, and the programs kept to run on
+   every frame (cheats.c) */
+static int load_cheats(const char* mod, SnxPatchStats* stats, unsigned* files) {
+    char dir[600], path[900], error[300];
+    u32 nfiles;
+    u64 on_size = 0, size;
+    char** list;
+    char* on;
+    snprintf(dir, sizeof dir, "mods/%s/cheats", mod);
+    if (!(list = fs_list_files(dir, &nfiles))) return 0;
+    snprintf(path, sizeof path, "%s/enabled.txt", dir);
+    on = (char*)fs_read_file(path, &on_size);
+    for (u32 j = 0; j < nfiles; j++) {
+        SnxCheatProgram cheats;
+        u8* data;
+        int used = 0;
+        if (!snx_patch_cheat_kind(list[j])) continue;
+        snprintf(path, sizeof path, "%s/%s", dir, list[j]);
+        if (!(data = fs_read_file(path, &size))) continue;
+        if (snx_cheat_parse((const char*)data, (size_t)size, on, (size_t)on_size, &cheats, error, sizeof error)) {
+            WARN("cheats: %s: %s: %s\n", mod, list[j], error);
+            free(data);
+            free(on);
+            free(list);
+            return -1;
+        }
+        free(data);
+        for (u32 k = 0; k < g_mod->nmods && !used; k++) {
+            const SnxModInfo* mi = &g_mod->mods[k];
+            SnxPatchTarget target = {GP(mi->base), (size_t)mi->size, mi->build_id, mi->text_off, mi->text_size};
+            int got = mi->is_nro ? 0 : snx_patch_cheats(list[j], &cheats, &target, stats, error, sizeof error);
+            if (got < 0) {
+                WARN("cheats: %s: %s\n", mod, error);
+                snx_cheat_free(&cheats);
+                free(on);
+                free(list);
+                return -1;
+            }
+            if (got > 0) {
+                LOG("cheats: %s: %s: %u on, %u master codes, %zu fixed writes, for %s\n", mod, list[j], cheats.cheats,
+                    cheats.masters, snx_cheat_fixed(&cheats, NULL, 0), mi->name);
+                if (cheats.n) ++*files;
+                used = cheats_add(&cheats, mi->base, mi->base + mi->text_off, mi->text_size);
+            }
+        }
+        if (!used) snx_cheat_free(&cheats);
+    }
+    free(on);
+    free(list);
+    return 0;
+}
+
 /* The code-patch mods on (patch.h) applied to the loaded modules, in the recompiler's order: mods.txt's mods, each
    mod's exefs/ files by name, each file to every module it names. -1 when a patch is malformed, or when the game code
    was built with other patches, which would run code that doesn't match its data */
@@ -195,6 +249,10 @@ static int apply_patches(void) {
         char dir[600];
         u32 nfiles;
         char** list;
+        if (load_cheats(names[i], &stats, &files)) {
+            free(text);
+            return -1;
+        }
         snprintf(dir, sizeof dir, "mods/%s/exefs", names[i]);
         list = fs_list_files(dir, &nfiles);
         for (u32 j = 0; j < nfiles; j++) {

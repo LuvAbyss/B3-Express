@@ -7,6 +7,7 @@
 #include "nx/memory/mem.h"
 #include "nx/runtime/platform/log.h"
 #include "nx/loader/patch.h"
+#include "nx/runtime/cheats.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,6 +33,11 @@ char g_datadir[1024];
     } while (0)
 
 char g_exedir[1024], g_exename[256] = "snx-test-runtime-patches";
+/* the cheats the loader keeps to run (runtime/cheats.c): none here */
+int cheats_add(SnxCheatProgram* p, u64 main, u64 text, u64 text_size) {
+    (void)p, (void)main, (void)text, (void)text_size;
+    return 0;
+}
 void logf_(int level, const char* fmt, ...) {
     (void)level;
     (void)fmt;

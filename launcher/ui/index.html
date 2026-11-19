@@ -151,6 +151,10 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
 .mod .order button:disabled { opacity: .25; cursor: default; }
 .mod .w { font-size: 13px; color: var(--warn); margin-top: 4px; }
 .mod .switch { gap: 10px; font-size: 13px; color: var(--muted); }
+.mod .cheats { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px 16px; margin-top: 10px; }
+.mod .cheats label { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; cursor: pointer; }
+.mod .cheats input { margin-top: 2px; accent-color: var(--violet); }
+.mod.off .cheats { opacity: .5; }
 .notice.info { border-left-color: var(--violet); }
 @media (max-width: 680px) { .mod { grid-template-columns: auto minmax(0, 1fr); } .mod > .switch, .mod > .rm { grid-column: 2; justify-self: start; } }
 
@@ -262,6 +266,7 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
             </div>
             <p class="hint" id="o-quality-h"></p>
           </div>
+          <div class="switch"><label for="o-fps90">90 FPS <span class="example">experimental</span><span class="hint" style="display:block;font-weight:400">Play, menus and cutscenes at 90 frames a second instead of the console's 60. Needs a strong PC and a screen of 90 Hz or more; heavy fights can still dip.</span></label><input type="checkbox" id="o-fps90" data-o="fps90"></div>
           <div class="switch"><label for="o-fullscreen">Start in fullscreen</label><input type="checkbox" id="o-fullscreen" data-o="fullscreen"></div>
           <div class="switch"><label for="o-mute">Mute when the game isn't the active window</label><input type="checkbox" id="o-mute" data-o="mute_unfocused"></div>
           <div class="field">
@@ -366,7 +371,7 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
       <div class="row"><button class="primary" type="button" id="mod-folder" style="padding:12px 22px;font-size:15px">Add a mod folder</button><button class="secondary" type="button" id="mod-zip">Add a mod zip</button><button class="ghost" type="button" id="mod-open">Open the mods folder</button></div>
       <div class="status" id="mods-s" role="status" aria-live="polite"></div>
       <div class="list" id="mods"></div>
-      <p class="hint">Two kinds of mods work, as made for yuzu, Ryujinx or Atmosphère: ones that replace game files (a <span style="font-family:var(--mono)">romfs</span> folder) and code patches for v1.2.0 (<span style="font-family:var(--mono)">.ips</span> or <span style="font-family:var(--mono)">.pchtxt</span> in <span style="font-family:var(--mono)">exefs</span> or <span style="font-family:var(--mono)">exefs_patches</span>). Turning code patches on or off compiles the parts of the game code they change again at the next Play, up to about 3 minutes. Cheats don't work yet. Where two mods change the same file, the one lower in the list wins. Back up your save before trying a new mod.</p>
+      <p class="hint">Two kinds of mods work, as made for yuzu, Ryujinx or Atmosphère: ones that replace game files (a <span style="font-family:var(--mono)">romfs</span> folder) and code patches for v1.2.0 (<span style="font-family:var(--mono)">.ips</span> or <span style="font-family:var(--mono)">.pchtxt</span> in <span style="font-family:var(--mono)">exefs</span> or <span style="font-family:var(--mono)">exefs_patches</span>). Turning code patches on or off compiles the parts of the game code they change again at the next Play, up to about 3 minutes. Cheats work too, in Atmosphère's format (<span style="font-family:var(--mono)">cheats/B47CC79B88B7091E.txt</span>): tick the ones you want under their mod. They all start off. Where two mods change the same file, the one lower in the list wins. Back up your save before trying a new mod.</p>
     </section>
 
     <!-- ===== Help ===== -->
@@ -473,7 +478,7 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
       const compileOnly = st.files && !st.code;
       $('#headline').textContent = st.codemods ? 'Code mods changed' : compileOnly ? 'Compile the game code' : 'Install Bayonetta 3';
       $('#what').textContent = st.codemods
-        ? 'Code patches were turned on or off on the Mods page. The game code is compiled again with the ones on now: the parts the patches change, up to about 3 minutes.'
+        ? 'Code patches or cheats were turned on or off on the Mods page. The game code is compiled again with the ones on now: the parts the patches change, up to about 3 minutes.'
         : compileOnly
         ? 'Your game files are here. The game code is compiled for this PC from them: about 3 minutes the first time, seconds after an update.'
         : 'Choose your extracted copy of the game: the folder that holds both exefs and romfs, updated to v1.2.0. The launcher checks it, copies it and compiles the game code for this PC. Your folder stays as it is.';
@@ -714,12 +719,23 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
       if (m.replaces) parts.push('replaces ' + plural(m.replaces, 'game file', 'game files'));
       if (m.adds) parts.push('adds ' + m.adds);
       if (m.patches.length) parts.push(plural(m.patches.length, 'code patch', 'code patches'));
-      el.querySelector('.s').textContent = m.usable ? parts.join(' · ') : 'No romfs folder or code patches inside';
+      if (m.cheats.length) parts.push(m.cheats.filter(c => c.on).length + ' of ' + plural(m.cheats.length, 'cheat', 'cheats') + ' on');
+      el.querySelector('.s').textContent = m.usable ? parts.join(' · ') : 'No romfs folder, code patches or cheats inside';
       const warns = [];
-      if (!m.usable) warns.push('The game can only use a romfs folder or code patches (.ips, .pchtxt), so this one can\'t be turned on.');
+      if (!m.usable) warns.push('The game can only use a romfs folder, code patches (.ips, .pchtxt) or cheats (cheats/<build id>.txt), so this one can\'t be turned on.');
       for (const [later, n] of Object.entries(m.hidden_by)) warns.push(plural(n, 'file is', 'files are') + ' replaced by ' + later + ', lower in the list.');
       if (m.case) warns.push(plural(m.case, 'file differs', 'files differ') + ' from the game\'s names only in capital letters. The game won\'t use ' + (m.case === 1 ? 'it' : 'them') + '.');
       for (const w of warns) { const d = document.createElement('div'); d.className = 'w'; d.textContent = w; el.children[1].appendChild(d); }
+      if (m.cheats.length) {
+        const list = document.createElement('div'); list.className = 'cheats';
+        m.cheats.forEach(c => {
+          const l = document.createElement('label'), box = document.createElement('input'), t = document.createElement('span');
+          box.type = 'checkbox'; box.checked = c.on; t.textContent = c.name;
+          box.onchange = () => { c.on = box.checked; saveCheats(m, c); };
+          l.append(box, t); list.appendChild(l);
+        });
+        el.children[1].appendChild(list);
+      }
       const sw = el.querySelector('input'), label = el.querySelector('.switch span');
       sw.checked = m.on; sw.disabled = !m.usable; label.textContent = m.on ? 'On' : 'Off';
       sw.setAttribute('aria-label', 'Turn ' + m.name + (m.on ? ' off' : ' on'));
@@ -734,7 +750,14 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
     m.on = wanted;
     const lastOn = mods.findLastIndex(x => x.on);
     if (wanted) mods.splice(lastOn + 1, 0, m); else mods.push(m);
-    saveMods(m.name + (wanted ? ' is on.' : ' is off.') + (m.patches.length ? ' It has code patches, so the next Play compiles the game code again first.' : ''));
+    saveMods(m.name + (wanted ? ' is on.' : ' is off.') + (m.patches.length || m.cheats.some(c => c.on) ? ' It changes game code, so the next Play compiles the game code again first.' : ''));
+  }
+  function saveCheats(m, c) {
+    const on = m.cheats.filter(x => x.on).map(x => x.name);
+    return call('cheats_save', m.name, on).then(err => {
+      modsSay(err || c.name + (c.on ? ' is on.' : ' is off.') + (m.on ? ' The next Play compiles the game code again first, usually in seconds.' : ' It works once ' + m.name + ' is on.'), !err);
+      return loadMods();
+    });
   }
   function move(m, by) {
     const on = mods.filter(x => x.on), i = on.indexOf(m), j = i + by;

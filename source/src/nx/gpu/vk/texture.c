@@ -725,7 +725,7 @@ texture_from_memory:
            write tracking can prove its memory is unchanged without hashing all its texels. */
         if (invalidated || t->checked != g_vk_present) {
             u32 wnow = vk_ww_now();
-            int wr = vk_written_since(gmem_ptr(gva, t->size), t->size, t->wseen);
+            int wr = vk_tex_written_since(gmem_ptr(gva, t->size), t->size, t->wseen);
             t->tex_inval_gen = g_tex_inval_gen;
             if (wr >= 0) {
                 t->checked = g_vk_present;

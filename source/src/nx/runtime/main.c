@@ -348,7 +348,7 @@ static void write_threads(u64 second) {
 }
 
 static void frontend_loop(void) {
-    const u64 period = 1000000000u / VI_REFRESH_HZ;
+    const u64 period = 1000000000u / g_vi_hz;
     u64 tick = 0, next = plat_ns(), now, changed = next;
     int frames = 0, stalls = 0;
     while (!g_quit) {
@@ -364,7 +364,7 @@ static void frontend_loop(void) {
             save_hints();
             if (g_renderer->save) save_in_background();
         }
-        if (tick % 900 == 0) write_threads(tick / VI_REFRESH_HZ);
+        if (tick % 900 == 0) write_threads(tick / g_vi_hz);
         now = plat_ns();
         shown = __atomic_load_n(&g_frames, __ATOMIC_RELAXED);
         if (shown != frames) {

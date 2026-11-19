@@ -51,11 +51,11 @@ static struct {
     PMutex lock;
     KShmem *shm, *xpad_shm, *six_shm, *joysix_shm;
     KEvent* style_ev[HID_ENTRIES];
-    u64 samp;    /* the sampling number of the latest states */
-    u64 last_ns; /* when they were taken */
+    u64 samp;                            /* the sampling number of the latest states */
+    u64 last_ns;                         /* when they were taken */
     u32 supported_styles, supported_ids; /* the game's: styles, and Npads by entry index */
     i64 hold, handheld_mode, comm_mode;
-    i64 header_hold; /* the hold type the single Joy-Cons' headers were written for */
+    i64 header_hold;        /* the hold type the single Joy-Cons' headers were written for */
     PadState pad[HID_PADS]; /* the frontend's players, as the last update saw them */
     int split[HID_PADS];    /* a combined pair split: 1 + the Npad its other half is, 0 when it isn't */
     int keep_right[HID_PADS];
@@ -73,7 +73,9 @@ static int hid_entry(u32 npad_id) {
     return -1;
 }
 static u32 hid_npad_id(int e) { return e < 8 ? (u32)e : e == 8 ? 0x20u : 0x10u; }
-static u8* hid_npad(int e) { return kshmem_ptr(hid.shm) + HO_HidSharedMemory_npad + (u64)e * HS_HidNpadSharedMemoryEntry; }
+static u8* hid_npad(int e) {
+    return kshmem_ptr(hid.shm) + HO_HidSharedMemory_npad + (u64)e * HS_HidNpadSharedMemoryEntry;
+}
 static int hid_connected(int p) { return p == 0 || hid.pad[p].connected; } /* player 1 is the keyboard's too */
 static int hid_single(int p) { return hid.pad[p].kind == SNX_PAD_JOY_LEFT || hid.pad[p].kind == SNX_PAD_JOY_RIGHT; }
 /* the player merged into p's Npad, -1 for none; and the one whose Npad p's Joy-Con is merged into */
@@ -117,15 +119,15 @@ static u32 hid_style_of(int e, const HidSource* s) {
     int i;
     if (!((hid.supported_ids >> e) & 1)) return 0;
     switch (s->kind) {
-    case SRC_PAD:
-        for (i = 0; i < 3; i++)
-            if (prefer[hid.pad[s->p].kind][i] & ok) return prefer[hid.pad[s->p].kind][i];
-        return 0;
-    case SRC_LEFT_HALF: return ok & STYLE_JOY_LEFT;
-    case SRC_RIGHT_HALF: return ok & STYLE_JOY_RIGHT;
-    case SRC_MERGED: return ok & STYLE_JOY_DUAL;
-    case SRC_HANDHELD: return ok & STYLE_HANDHELD;
-    default: return 0;
+        case SRC_PAD:
+            for (i = 0; i < 3; i++)
+                if (prefer[hid.pad[s->p].kind][i] & ok) return prefer[hid.pad[s->p].kind][i];
+            return 0;
+        case SRC_LEFT_HALF: return ok & STYLE_JOY_LEFT;
+        case SRC_RIGHT_HALF: return ok & STYLE_JOY_RIGHT;
+        case SRC_MERGED: return ok & STYLE_JOY_DUAL;
+        case SRC_HANDHELD: return ok & STYLE_HANDHELD;
+        default: return 0;
     }
 }
 
@@ -153,32 +155,32 @@ static void hid_write_header(int e, u32 style) {
         }
     /* DeviceType bits, NpadSystemProperties (vertical 11, horizontal 12, plus 13, minus 14, d-pad 15), the footer */
     switch (style) {
-    case STYLE_FULL_KEY:
-        device = 1u << 0;
-        props = 1u << 11 | 1u << 13 | 1u << 14;
-        footer = 12; /* SwitchProController */
-        break;
-    case STYLE_HANDHELD:
-        device = 1u << 2 | 1u << 3;
-        props = 1u << 11 | 1u << 13 | 1u << 14 | 1u << 15;
-        footer = 4; /* HandheldJoyConLeftJoyConRight */
-        break;
-    case STYLE_JOY_DUAL:
-        device = 1u << 4 | 1u << 5;
-        props = 1u << 11 | 1u << 13 | 1u << 14 | 1u << 15;
-        footer = 5;
-        break;
-    case STYLE_JOY_LEFT: /* held as the game holds a single Joy-Con, as the sticks are turned (hid_npad_state) */
-        device = 1u << 4;
-        props = (vertical ? 1u << 11 : 1u << 12) | 1u << 14;
-        footer = vertical ? 9 : 8; /* JoyLeftVertical, JoyLeftHorizontal */
-        break;
-    case STYLE_JOY_RIGHT:
-        device = 1u << 5;
-        props = (vertical ? 1u << 11 : 1u << 12) | 1u << 13;
-        footer = vertical ? 11 : 10;
-        break;
-    default: break;
+        case STYLE_FULL_KEY:
+            device = 1u << 0;
+            props = 1u << 11 | 1u << 13 | 1u << 14;
+            footer = 12; /* SwitchProController */
+            break;
+        case STYLE_HANDHELD:
+            device = 1u << 2 | 1u << 3;
+            props = 1u << 11 | 1u << 13 | 1u << 14 | 1u << 15;
+            footer = 4; /* HandheldJoyConLeftJoyConRight */
+            break;
+        case STYLE_JOY_DUAL:
+            device = 1u << 4 | 1u << 5;
+            props = 1u << 11 | 1u << 13 | 1u << 14 | 1u << 15;
+            footer = 5;
+            break;
+        case STYLE_JOY_LEFT: /* held as the game holds a single Joy-Con, as the sticks are turned (hid_npad_state) */
+            device = 1u << 4;
+            props = (vertical ? 1u << 11 : 1u << 12) | 1u << 14;
+            footer = vertical ? 9 : 8; /* JoyLeftVertical, JoyLeftHorizontal */
+            break;
+        case STYLE_JOY_RIGHT:
+            device = 1u << 5;
+            props = (vertical ? 1u << 11 : 1u << 12) | 1u << 13;
+            footer = vertical ? 11 : 10;
+            break;
+        default: break;
     }
     w32(n + HO_HidNpadInternalState_device_type, device);
     memcpy(n + HO_HidNpadInternalState_system_properties, &props, 8);
@@ -202,9 +204,8 @@ static void hid_validate(void) {
                 !((hid.supported_ids >> d) & 1) || !((hid.supported_ids >> p) & 1))
                 hid.split[p] = 0;
         }
-        if ((q = hid_partner(p)) >= 0 &&
-            (!hid_connected(p) || !hid_connected(q) || !hid_single(p) || !hid_single(q) ||
-             hid.pad[p].kind == hid.pad[q].kind))
+        if ((q = hid_partner(p)) >= 0 && (!hid_connected(p) || !hid_connected(q) || !hid_single(p) || !hid_single(q) ||
+                                          hid.pad[p].kind == hid.pad[q].kind))
             hid.merged[p] = 0;
     }
 }
@@ -275,6 +276,11 @@ static u64 stick_buttons(i32 x, i32 y, int shift) {
     return b;
 }
 
+u64 hid_held(void) {
+    const PadState* a = &hid.pad[0];
+    return a->buttons | stick_buttons(a->lx, a->ly, 16) | stick_buttons(a->rx, a->ry, 20);
+}
+
 /* an Npad's NpadCommonState (HS_HidNpadCommonState bytes) from its source, in its style */
 static void hid_npad_state(const HidSource* s, u32 style, u8* out) {
     const PadState* a = &hid.pad[s->p];
@@ -285,48 +291,48 @@ static void hid_npad_state(const HidSource* s, u32 style, u8* out) {
     memset(out, 0, HS_HidNpadCommonState);
     if (!style) return;
     switch (s->kind) {
-    case SRC_PAD:
-    case SRC_HANDHELD:
-        buttons = a->buttons;
-        st[0] = a->lx, st[1] = a->ly, st[2] = a->rx, st[3] = a->ry;
-        if (style == STYLE_JOY_LEFT) {
-            st[2] = st[3] = 0;
-            if (!horizontal) stick_upright(&st[0], &st[1], 1);
-        } else if (style == STYLE_JOY_RIGHT) {
-            st[0] = st[1] = 0;
-            if (!horizontal) stick_upright(&st[2], &st[3], 0);
-        } else if (style == STYLE_JOY_DUAL && a->kind == SNX_PAD_JOY_LEFT)
+        case SRC_PAD:
+        case SRC_HANDHELD:
+            buttons = a->buttons;
+            st[0] = a->lx, st[1] = a->ly, st[2] = a->rx, st[3] = a->ry;
+            if (style == STYLE_JOY_LEFT) {
+                st[2] = st[3] = 0;
+                if (!horizontal) stick_upright(&st[0], &st[1], 1);
+            } else if (style == STYLE_JOY_RIGHT) {
+                st[0] = st[1] = 0;
+                if (!horizontal) stick_upright(&st[2], &st[3], 0);
+            } else if (style == STYLE_JOY_DUAL && a->kind == SNX_PAD_JOY_LEFT)
+                stick_upright(&st[0], &st[1], 1);
+            else if (style == STYLE_JOY_DUAL && a->kind == SNX_PAD_JOY_RIGHT)
+                stick_upright(&st[2], &st[3], 0);
+            break;
+        case SRC_LEFT_HALF:
+            buttons = a->buttons & BUTTONS_LEFT;
+            st[0] = a->lx, st[1] = a->ly;
+            if (horizontal) stick_sideways(&st[0], &st[1], 1);
+            break;
+        case SRC_RIGHT_HALF:
+            buttons = a->buttons & BUTTONS_RIGHT;
+            st[2] = a->rx, st[3] = a->ry;
+            if (horizontal) stick_sideways(&st[2], &st[3], 0);
+            break;
+        case SRC_MERGED:
+            buttons = hid.pad[s->p].buttons | hid.pad[s->q].buttons;
+            st[0] = hid.pad[s->p].lx, st[1] = hid.pad[s->p].ly;
+            st[2] = hid.pad[s->q].rx, st[3] = hid.pad[s->q].ry;
             stick_upright(&st[0], &st[1], 1);
-        else if (style == STYLE_JOY_DUAL && a->kind == SNX_PAD_JOY_RIGHT)
             stick_upright(&st[2], &st[3], 0);
-        break;
-    case SRC_LEFT_HALF:
-        buttons = a->buttons & BUTTONS_LEFT;
-        st[0] = a->lx, st[1] = a->ly;
-        if (horizontal) stick_sideways(&st[0], &st[1], 1);
-        break;
-    case SRC_RIGHT_HALF:
-        buttons = a->buttons & BUTTONS_RIGHT;
-        st[2] = a->rx, st[3] = a->ry;
-        if (horizontal) stick_sideways(&st[2], &st[3], 0);
-        break;
-    case SRC_MERGED:
-        buttons = hid.pad[s->p].buttons | hid.pad[s->q].buttons;
-        st[0] = hid.pad[s->p].lx, st[1] = hid.pad[s->p].ly;
-        st[2] = hid.pad[s->q].rx, st[3] = hid.pad[s->q].ry;
-        stick_upright(&st[0], &st[1], 1);
-        stick_upright(&st[2], &st[3], 0);
-        break;
-    default: return;
+            break;
+        default: return;
     }
     buttons |= stick_buttons(st[0], st[1], 16) | stick_buttons(st[2], st[3], 20);
     /* NpadAttribute: connected, wired, and each Joy-Con's */
     switch (style) {
-    case STYLE_HANDHELD: attr = 0x3f; break;
-    case STYLE_JOY_DUAL: attr = 1 | 4 | 16; break;
-    case STYLE_JOY_LEFT: attr = 1 | 4; break;
-    case STYLE_JOY_RIGHT: attr = 1 | 16; break;
-    default: attr = 1; break;
+        case STYLE_HANDHELD: attr = 0x3f; break;
+        case STYLE_JOY_DUAL: attr = 1 | 4 | 16; break;
+        case STYLE_JOY_LEFT: attr = 1 | 4; break;
+        case STYLE_JOY_RIGHT: attr = 1 | 16; break;
+        default: attr = 1; break;
     }
     memcpy(out + HO_HidNpadCommonState_sampling_number, &hid.samp, 8);
     memcpy(out + HO_HidNpadCommonState_buttons, &buttons, 8);
@@ -337,24 +343,24 @@ static void hid_npad_state(const HidSource* s, u32 style, u8* out) {
 /* the player and the sensor or motor behind an Npad's left (0) or right (1) device; 0 when there is none */
 static int hid_device(const HidSource* s, int dev, int* p, int* sensor) {
     switch (s->kind) {
-    case SRC_PAD:
-        *p = s->p;
-        *sensor = hid_single(s->p) ? 0 : dev;
-        return 1;
-    case SRC_HANDHELD:
-        *p = 0;
-        *sensor = dev;
-        return 1;
-    case SRC_LEFT_HALF:
-    case SRC_RIGHT_HALF:
-        *p = s->p;
-        *sensor = s->kind == SRC_RIGHT_HALF;
-        return 1;
-    case SRC_MERGED:
-        *p = dev ? s->q : s->p;
-        *sensor = 0;
-        return 1;
-    default: return 0;
+        case SRC_PAD:
+            *p = s->p;
+            *sensor = hid_single(s->p) ? 0 : dev;
+            return 1;
+        case SRC_HANDHELD:
+            *p = 0;
+            *sensor = dev;
+            return 1;
+        case SRC_LEFT_HALF:
+        case SRC_RIGHT_HALF:
+            *p = s->p;
+            *sensor = s->kind == SRC_RIGHT_HALF;
+            return 1;
+        case SRC_MERGED:
+            *p = dev ? s->q : s->p;
+            *sensor = 0;
+            return 1;
+        default: return 0;
     }
 }
 static void hid_six_axis(int e, u32 lifo, const HidSource* s, int dev, u64 dt) {
@@ -422,23 +428,23 @@ void hid_update(void) {
         hid_lifo_push(n + HO_HidNpadInternalState_system_ext_lifo, HS_HidNpadCommonStateAtomicStorage,
                       style ? state : none, HS_HidNpadCommonState);
         switch (style) {
-        case STYLE_FULL_KEY:
-            hid_six_axis(e, HO_HidNpadInternalState_full_key_six_axis_sensor_lifo, &src[e], 0, dt);
-            break;
-        case STYLE_HANDHELD:
-            hid_six_axis(e, HO_HidNpadInternalState_handheld_six_axis_sensor_lifo, &src[e], 0, dt);
-            break;
-        case STYLE_JOY_DUAL:
-            hid_six_axis(e, HO_HidNpadInternalState_joy_dual_left_six_axis_sensor_lifo, &src[e], 0, dt);
-            hid_six_axis(e, HO_HidNpadInternalState_joy_dual_right_six_axis_sensor_lifo, &src[e], 1, dt);
-            break;
-        case STYLE_JOY_LEFT:
-            hid_six_axis(e, HO_HidNpadInternalState_joy_left_six_axis_sensor_lifo, &src[e], 0, dt);
-            break;
-        case STYLE_JOY_RIGHT:
-            hid_six_axis(e, HO_HidNpadInternalState_joy_right_six_axis_sensor_lifo, &src[e], 1, dt);
-            break;
-        default: break;
+            case STYLE_FULL_KEY:
+                hid_six_axis(e, HO_HidNpadInternalState_full_key_six_axis_sensor_lifo, &src[e], 0, dt);
+                break;
+            case STYLE_HANDHELD:
+                hid_six_axis(e, HO_HidNpadInternalState_handheld_six_axis_sensor_lifo, &src[e], 0, dt);
+                break;
+            case STYLE_JOY_DUAL:
+                hid_six_axis(e, HO_HidNpadInternalState_joy_dual_left_six_axis_sensor_lifo, &src[e], 0, dt);
+                hid_six_axis(e, HO_HidNpadInternalState_joy_dual_right_six_axis_sensor_lifo, &src[e], 1, dt);
+                break;
+            case STYLE_JOY_LEFT:
+                hid_six_axis(e, HO_HidNpadInternalState_joy_left_six_axis_sensor_lifo, &src[e], 0, dt);
+                break;
+            case STYLE_JOY_RIGHT:
+                hid_six_axis(e, HO_HidNpadInternalState_joy_right_six_axis_sensor_lifo, &src[e], 1, dt);
+                break;
+            default: break;
         }
     }
     /* the touch screen, and the devices nothing drives here, which only count their samples */

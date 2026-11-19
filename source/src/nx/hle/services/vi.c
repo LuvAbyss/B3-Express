@@ -726,7 +726,9 @@ static int nn_visrv_sf_IManagerDisplayService_GetDisplayModeChangedEvent(SvcObj*
 }
 
 /* ============================================================ the display */
-/* the main loop's 60 Hz: the display's vsync */
+unsigned g_vi_hz = VI_REFRESH_HZ;
+
+/* the main loop's g_vi_hz: the display's vsync */
 void vi_vsync_tick(void) {
     if (vi.vsync) kevent_signal(vi.vsync);
 }

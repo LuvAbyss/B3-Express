@@ -342,10 +342,14 @@ static u32 mods_find(char* list, FsNode*** out) {
         }
         if ((size_t)snprintf(path, sizeof path, "mods/%s/romfs", line) >= sizeof path) continue;
         if (fs_tree_lookup(&fsp.tree, NULL, path, &node) || !node->is_dir) {
-            FsNode* exefs;
+            FsNode *exefs, *cheats;
+            int code;
             snprintf(path, sizeof path, "mods/%s/exefs", line);
-            if (fs_tree_lookup(&fsp.tree, NULL, path, &exefs) || !exefs->is_dir) /* a code-only mod has none */
-                WARN("mods: %s has no romfs or exefs folder in %smods/, it is left out\n", line, g_datadir);
+            code = !fs_tree_lookup(&fsp.tree, NULL, path, &exefs) && exefs->is_dir;
+            snprintf(path, sizeof path, "mods/%s/cheats", line);
+            code = code || (!fs_tree_lookup(&fsp.tree, NULL, path, &cheats) && cheats->is_dir);
+            if (!code) /* a code-only or cheats-only mod has none */
+                WARN("mods: %s has no romfs, exefs or cheats folder in %smods/, it is left out\n", line, g_datadir);
             continue;
         }
         for (i = 0; i < n && mods[i] != node; i++) {}

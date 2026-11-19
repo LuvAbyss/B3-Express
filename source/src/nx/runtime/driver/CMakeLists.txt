@@ -6,7 +6,7 @@ set_target_properties(snx_nx_module PROPERTIES C_STANDARD ${SNX_C90_STANDARD} C_
 target_compile_options(snx_nx_module PRIVATE -pedantic-errors -Wall -Wextra -Werror=missing-prototypes)
 target_link_libraries(snx_nx_module PUBLIC scarletnx-common)
 # code-patch mods (IPS, IPSwitch): applied by the recompiler (loader.c) and again by the runtime (runtime/loader.c)
-add_library(snx_patch STATIC ../../loader/patch.c)
+add_library(snx_patch STATIC ../../loader/patch.c ../../loader/cheat.c)
 set_target_properties(snx_patch PROPERTIES C_STANDARD ${SNX_C90_STANDARD} C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 target_compile_options(snx_patch PRIVATE -pedantic-errors -Wall -Wextra -Werror=missing-prototypes)
 target_include_directories(snx_patch PUBLIC "${CMAKE_SOURCE_DIR}/src")

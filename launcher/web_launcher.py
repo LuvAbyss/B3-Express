@@ -280,6 +280,14 @@ class Api:
             return f'The list could not be saved: {e}'
         return ''
 
+    def cheats_save(self, name, cheats):
+        """A mod's cheats on, every other one of it off"""
+        try:
+            L.cheats_set(name, cheats)
+        except (OSError, ValueError) as e:
+            return f'The cheats could not be saved: {e}'
+        return ''
+
     def mod_add(self, kind):
         """A mod from a folder or a .zip the player picks; {'name'} or {'error'}, or {} when the dialog was closed"""
         import webview

@@ -7,6 +7,7 @@
 #include "nx/hle/services/nvdrv.h"
 #include "nx/hle/services/vi.h"
 #include "nx/memory/mem.h"
+#include "nx/runtime/cheats.h"
 #include "nx/runtime/options.h"
 #include "nx/runtime/platform/log.h"
 #include "nx/runtime/platform/plat.h"
@@ -23,6 +24,7 @@ void vi_show_buffer(u32 nvmap_id, u32 offset, u32 w, u32 h, u32 pitch, u32 layou
     /* the flips are the display's: the guest's buffer is never turned */
     g_renderer->present_buffer(a + offset, w, h, pitch, layout, bhl, fmt, crop, transform);
     __atomic_add_fetch(&g_frames, 1, __ATOMIC_RELAXED);
+    cheats_frame();
 }
 
 /* Several threads may queue frames, so the schedule is under a lock; the wait itself is outside it. Called on the
@@ -38,7 +40,7 @@ u64 present_period_ns(void) {
     int fps = __atomic_load_n(&g_opt_fps, __ATOMIC_RELAXED);
     u32 interval = __atomic_load_n(&g_pace_interval, __ATOMIC_RELAXED);
     if (!fps || (fps == SNX_FPS_GAME && !interval)) return 0;
-    return fps == SNX_FPS_GAME ? 1000000000u / (u64)VI_REFRESH_HZ * interval : 1000000000u / (u64)fps;
+    return fps == SNX_FPS_GAME ? 1000000000u / (u64)g_vi_hz * interval : 1000000000u / (u64)fps;
 }
 
 void present_pace(u32 interval) {

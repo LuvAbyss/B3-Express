@@ -9,6 +9,7 @@
 #ifndef SNX_NX_PATCH_H
 #define SNX_NX_PATCH_H
 
+#include "nx/loader/cheat.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -36,6 +37,14 @@ int snx_patch_kind(const char* file_name);
    writing outside the module (error says why, and the image may be partly patched) */
 int snx_patch_apply(const char* file_name, const unsigned char* data, size_t size, const SnxPatchTarget* t,
                     SnxPatchStats* stats, char* error, size_t error_size);
+/* 1 for a cheat file's name (cheat.h): <build id>.txt, 16 to 64 hex digits of it */
+int snx_patch_cheat_kind(const char* file_name);
+/* The writes of program (parsed from file_name, a mod's cheats/<build id>.txt) that every run makes into t's code,
+   applied as patch records when the file is meant for t's build: 1 applied (or none to apply), 0 another module's,
+   -1 writing outside the module. They go into the digest as any patch: turning such a cheat on or off needs the code
+   built again */
+int snx_patch_cheats(const char* file_name, const SnxCheatProgram* program, const SnxPatchTarget* t,
+                     SnxPatchStats* stats, char* error, size_t error_size);
 /* The mod names mods.txt turns on, in its order, as the RomFS overlay reads them: text is changed in place, names[]
    points into it. '#' starts a comment, blank lines are skipped, a name that is a path (/ \ :, ".", "..") is left
    out, and a name given twice counts once. The count, at most max */

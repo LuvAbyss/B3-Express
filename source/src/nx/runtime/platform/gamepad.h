@@ -21,8 +21,9 @@ void gamepad_state_slot(int slot, u64* buttons, i32 sticks[4]);
 int gamepad_slot_type(int slot); /* SDL_GamepadType, or SDL_GAMEPAD_TYPE_UNKNOWN */
 /* the button prompts the game shows (gpu/vk/prompts.c): 1 Switch, 2 PlayStation, 3 Xbox, 4 the keyboard and mouse,
    from button_prompts and, for auto, what was last used (the keyboard and mouse too where no pad is connected);
-   *by_letter: A and B by printed letter (gamepad_swap_ab) rather than by position */
-int gamepad_prompts(int* by_letter);
+   *map: what each control of that pad sends (its player's map, A and B swapped or not), so a prompt shows the control
+   that sends its button */
+int gamepad_prompts(SnxPadMap* map);
 /* a key or mouse button that is a control was pressed: auto's prompts are the keyboard's until a pad is used */
 void gamepad_kbm_used(void);
 int gamepad_slot_connected(int slot);

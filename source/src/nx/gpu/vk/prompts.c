@@ -10,8 +10,10 @@
    it in guest memory, in its own format, whenever the choice changes, and the cache reads it again like any texture the
    game wrote. A mod's atlas has another hash and stays as it is.
 
-   Face buttons: by position (gamepad_swap_ab=0, the default) Switch A, the right button, shows Circle / Xbox B; by printed
-   letter (gamepad_swap_ab=1) A is the bottom button, and the pictures of where a button sits (four dots) swap too.
+   Each of the ten cells shows the control of the pad in use that sends its button (gamepad_prompts' map: the player's
+   map and gamepad_swap_ab over the buttons by position). By position, the default, Switch A, the right button, shows
+   Circle / Xbox B; a map that sends B from RB shows RB in B's cell. With A on the bottom button the pictures of where
+   a button sits (four dots) swap too. The Switch's set is painted the same way, from the game's own cells.
    The keyboard and mouse set (family 4) is ours, drawn with Witch Time's key cap and mouse pictures: each of the ten
    cells shows its control's first key or mouse button from [Keyboard and mouse] (backend_kbm_prompt), and is painted
    again when a key changes. The sticks' and the D-pad's cells stay the Switch's. Witch Time's own keyboard set and its
@@ -138,75 +140,123 @@ static void cell_draw(uint8_t* mem, Cell c, const uint8_t* s) {
             vk_prompts_astc_block(rgba + (y * bw * 4 + x) * 4, bw * 4, block_at(mem, c.x + x, c.y + y));
 }
 
-/* mem: a copy of the game's atlas, block linear. family: 2 PlayStation, 3 Xbox, 4 the keyboard and mouse */
-void vk_prompts_paint(uint8_t* mem, int family, int by_letter) {
+static void cell_copy(uint8_t* mem, Cell to, const uint8_t* game, Cell from) {
+    for (int y = 0; y < CELL; y += 4)
+        for (int x = 0; x < CELL; x += 4)
+            memcpy(block_at(mem, to.x + x, to.y + y), block_at((uint8_t*)game, from.x + x, from.y + y), 16);
+}
+/* a D-pad with one arm filled: dir 0 up, 1 down, 2 left, 3 right (pad_map.h's order) */
+static void dpad(uint8_t* s, int dir) {
+    static const float ARM[4][4] = {{15, 4, 25, 16}, {15, 24, 25, 36}, {4, 15, 16, 25}, {24, 15, 36, 25}};
+    box(s, 15, 4, 25, 36, 2, 1);
+    box(s, 4, 15, 36, 25, 2, 1);
+    for (int i = 0; i < 4; i++)
+        if (i != dir) box(s, ARM[i][0] + 2.2f, ARM[i][1] + 2.2f, ARM[i][2] - 2.2f, ARM[i][3] - 2.2f, 1, 0);
+}
+
+/* the ten cells the game's prompts use, by the console's button (HidNpadButton bit) each shows */
+static const struct {
+    const Cell* cell;
+    int bit;
+} TEN[] = {{&A, 0}, {&B, 1}, {&X, 2}, {&Y, 3}, {&L1, 6}, {&R1, 7}, {&L2, 8}, {&R2, 9}, {&PLUS, 10}, {&MINUS, 11}};
+static const Cell* cell_of(int bit) {
+    for (size_t i = 0; i < sizeof TEN / sizeof *TEN; i++)
+        if (TEN[i].bit == bit) return TEN[i].cell;
+    return NULL;
+}
+
+/* the picture of control c (pad_map.h's order) in a family's set, into cell to. The game's own cells serve where they
+   show that control: the Switch's by where its buttons sit, Xbox's face buttons by letter */
+static void picture(uint8_t* mem, const uint8_t* game, Cell to, int family, int c, uint8_t* s) {
+    static const char* const SHOULDER[2][4] = {{"L1", "R1", "L2", "R2"}, {"LB", "RB", "LT", "RT"}};
     typedef void Face(uint8_t*);
-    uint8_t* s = malloc(S * S);
-    if (!s) return;
-#define PIC(cell, draw) (memset(s, 0, S * S), draw, cell_draw(mem, cell, s))
-    if (family == 2) {
-        Face *a = by_letter ? ps_cross : ps_circle, *b = by_letter ? ps_circle : ps_cross;
-        Face *x = by_letter ? ps_square : ps_triangle, *y = by_letter ? ps_triangle : ps_square;
-        PIC(A, a(s));
-        PIC(B, b(s));
-        PIC(X, x(s));
-        PIC(Y, y(s));
-        PIC(PLUS, bars_across(s));
-        PIC(MINUS, bars_up(s));
-        PIC(L1, bumper(s, "L1"));
-        PIC(R1, bumper(s, "R1"));
-        PIC(L2, trigger(s, "L2"));
-        PIC(R2, trigger(s, "R2"));
-    } else if (family == 4) { /* each control's first key or mouse button; one without a key keeps the Switch's */
-        static const struct {
-            Cell cell;
-            int bit; /* HidNpadButton's */
-        } KEY[] = {{A, 0}, {B, 1}, {X, 2}, {Y, 3}, {L1, 6}, {R1, 7}, {L2, 8}, {R2, 9}, {PLUS, 10}, {MINUS, 11}};
-        for (size_t i = 0; i < sizeof KEY / sizeof *KEY; i++) {
-            char t[5];
-            int kind = backend_kbm_prompt(KEY[i].bit, t);
-            if (kind == 1)
-                PIC(KEY[i].cell, keycap(s, t));
-            else if (kind)
-                PIC(KEY[i].cell, mouse(s, kind - 1));
-        }
-        by_letter = 0; /* the pictures of where a button sits stay the Switch's */
-    } else {
-        if (!by_letter) { /* the game's letters are already Xbox's: by position they trade places */
-            cell_swap(mem, A, B);
-            cell_swap(mem, X, Y);
-        }
-        PIC(PLUS, bars_across(s));
-        PIC(MINUS, view(s));
-        PIC(L1, bumper(s, "LB"));
-        PIC(R1, bumper(s, "RB"));
-        PIC(L2, trigger(s, "LT"));
-        PIC(R2, trigger(s, "RT"));
+    static Face* const PS[4] = {ps_cross, ps_circle, ps_square, ps_triangle};
+    SnxPadMap placed;
+    const Cell* from = NULL;
+    snx_pad_map_position(&placed);
+    if (family == 1) from = cell_of(placed.bit[c]);
+    if (family == 3 && c <= SNX_PAD_NORTH) from = cell_of(c); /* south is A, east B, west X, north Y */
+    if (from) {
+        cell_copy(mem, to, game, *from);
+        return;
     }
-#undef PIC
+    memset(s, 0, S * S);
+    if (c <= SNX_PAD_NORTH)
+        PS[c](s);
+    else if (c <= SNX_PAD_RB)
+        bumper(s, SHOULDER[family == 3][c - SNX_PAD_LB]);
+    else if (c <= SNX_PAD_RT)
+        trigger(s, SHOULDER[family == 3][c - SNX_PAD_LB]);
+    else if (c <= SNX_PAD_RS)
+        letter_disc(s, family == 2 ? (c == SNX_PAD_LS ? "L3" : "R3") : c == SNX_PAD_LS ? "LS" : "RS");
+    else if (c == SNX_PAD_BACK)
+        family == 2 ? bars_up(s) : view(s);
+    else if (c == SNX_PAD_START)
+        bars_across(s);
+    else
+        dpad(s, c - SNX_PAD_UP);
+    cell_draw(mem, to, s);
+}
+
+/* mem: a copy of the game's atlas (game), block linear. family: 1 Switch, 2 PlayStation, 3 Xbox, 4 the keyboard and
+   mouse. map: what each control of the pad sends; each cell shows the control that sends its button (one bound
+   to it away from its place first), else the one in its place */
+void vk_prompts_paint(uint8_t* mem, const uint8_t* game, int family, const SnxPadMap* map) {
+    uint8_t* s = malloc(S * S);
+    SnxPadMap placed;
+    int by_letter = 0;
+    if (!s) return;
+    snx_pad_map_position(&placed);
+    if (family == 4) { /* each control's first key or mouse button; one without a key keeps the Switch's */
+        for (size_t i = 0; i < sizeof TEN / sizeof *TEN; i++) {
+            char t[5];
+            int kind = backend_kbm_prompt(TEN[i].bit, t);
+            memset(s, 0, S * S);
+            if (kind == 1)
+                keycap(s, t);
+            else if (kind)
+                mouse(s, kind - 1);
+            if (kind) cell_draw(mem, *TEN[i].cell, s);
+        }
+    } else {
+        for (size_t i = 0; i < sizeof TEN / sizeof *TEN; i++) {
+            int c = 0, d = 0;
+            /* a control bound to it from elsewhere first: RB set to B shows RB though the bottom button sends B too */
+            while (c < SNX_PAD_CONTROLS && (map->bit[c] != TEN[i].bit || placed.bit[c] == TEN[i].bit)) c++;
+            if (c == SNX_PAD_CONTROLS)
+                for (c = 0; c < SNX_PAD_CONTROLS && map->bit[c] != TEN[i].bit; c++) {}
+            while (placed.bit[d] != TEN[i].bit) d++;
+            picture(mem, game, *TEN[i].cell, family, c < SNX_PAD_CONTROLS ? c : d, s);
+        }
+        by_letter = map->bit[SNX_PAD_SOUTH] == 0;
+    }
+    /* shortcut: the pictures of where a button sits (four dots) only know A on the bottom or on the right; a map that
+       moves A elsewhere keeps the Switch's dots */
     if (by_letter)
         for (int i = 0; i < 3; i++) cell_swap(mem, DOTS[i][0], DOTS[i][1]);
     free(s);
 }
 
+/* the set's signature: the family and the map, and for the keyboard its ten pictures, so that a change paints it again */
+static int set_sig(int family, const SnxPadMap* map) {
+    u64 h = 0xcbf29ce484222325ull;
+    if (family == 4)
+        for (size_t i = 0; i < sizeof TEN / sizeof *TEN; i++) {
+            char t[5] = {0};
+            int kind = backend_kbm_prompt(TEN[i].bit, t);
+            for (int j = 0; j < 5; j++) h = (h ^ (uint8_t)t[j]) * 0x100000001b3ull;
+            h = (h ^ (u64)kind) * 0x100000001b3ull;
+        }
+    else
+        for (int c = 0; c < SNX_PAD_CONTROLS; c++) h = (h ^ (uint8_t)map->bit[c]) * 0x100000001b3ull;
+    return (int)(h & 0x3fffffff) + 1;
+}
+
 /* ---- the atlas in use. Both entry points run under vk_lock (the texture cache, the present) */
 static u64 g_gva;                  /* the atlas's GPU address, 0 = none known */
 static uint8_t* g_shown;           /* which of the sets below guest memory holds */
-static uint8_t* g_pic[5];          /* by family; [1] the game's own */
-static int g_pic_sig[5], g_family; /* what a set was painted for (by_letter + 1, the keys); the family shown */
-
-/* the keyboard set's signature: its ten pictures, so that a key changed in the menu paints the set again */
-static int kbm_sig(void) {
-    static const int BIT[] = {0, 1, 2, 3, 6, 7, 8, 9, 10, 11};
-    u64 h = 0xcbf29ce484222325ull;
-    for (size_t i = 0; i < sizeof BIT / sizeof *BIT; i++) {
-        char t[5] = {0};
-        int kind = backend_kbm_prompt(BIT[i], t);
-        for (int j = 0; j < 5; j++) h = (h ^ (uint8_t)t[j]) * 0x100000001b3ull;
-        h = (h ^ (u64)kind) * 0x100000001b3ull;
-    }
-    return (int)(h & 0x3fffffff) + 1;
-}
+static uint8_t* g_pic[5];          /* by family; [0] the game's own, untouched */
+static int g_pic_sig[5], g_family; /* what a set was painted for (set_sig); the family shown */
 
 static u64 fnv(const uint8_t* p, size_t n) {
     u64 h = 0xcbf29ce484222325ull;
@@ -220,11 +270,12 @@ void vk_prompts_texture(u64 gva, const VkFmt* f, u32 w, u32 h, u32 bh_log2) {
     if (gva == g_gva) return; /* ours, made again (evicted, or another view) */
     uint8_t* mem = gmem_ptr(gva, ATLAS_SIZE);
     if (!mem || fnv(mem, ATLAS_SIZE) != ATLAS_HASH) return;
-    if (!g_pic[1] && !(g_pic[1] = malloc(ATLAS_SIZE))) return;
-    memcpy(g_pic[1], mem, ATLAS_SIZE);
+    if (!g_pic[0] && !(g_pic[0] = malloc(ATLAS_SIZE))) return;
+    memcpy(g_pic[0], mem, ATLAS_SIZE);
+    memset(g_pic_sig, 0, sizeof g_pic_sig); /* found again: every set is painted again from this one */
     g_gva = gva;
-    g_shown = g_pic[1];
-    g_family = 1;
+    g_shown = g_pic[0];
+    g_family = 0;
     LOG("button prompts: the game's atlas at %llx\n", (unsigned long long)gva);
     vk_prompts_frame(); /* painted before the cache hashes and uploads it */
 }
@@ -232,9 +283,10 @@ void vk_prompts_texture(u64 gva, const VkFmt* f, u32 w, u32 h, u32 bh_log2) {
 /* once a present (vk_tex_frame), and when the atlas is found: guest memory gets the set wanted */
 void vk_prompts_frame(void) {
     if (!g_gva) return;
-    int by_letter = 0, family = gamepad_prompts(&by_letter);
+    SnxPadMap map;
+    int family = gamepad_prompts(&map);
     if (family < 1 || family > 4) family = 1;
-    int sig = family == 1 ? 0 : family == 4 ? kbm_sig() : by_letter + 1;
+    int sig = set_sig(family, &map);
     if (family == g_family && sig == g_pic_sig[family]) return;
     uint8_t* mem = gmem_ptr(g_gva, ATLAS_SIZE);
     if (!mem || memcmp(mem, g_shown, ATLAS_SIZE)) { /* not what we left there: the game has reused the memory */
@@ -243,9 +295,9 @@ void vk_prompts_frame(void) {
         return;
     }
     if (!g_pic[family] && !(g_pic[family] = malloc(ATLAS_SIZE))) return;
-    if (family > 1 && g_pic_sig[family] != sig) {
-        memcpy(g_pic[family], g_pic[1], ATLAS_SIZE);
-        vk_prompts_paint(g_pic[family], family, by_letter);
+    if (g_pic_sig[family] != sig) { /* the Switch's set too: a map moves its pictures */
+        memcpy(g_pic[family], g_pic[0], ATLAS_SIZE);
+        vk_prompts_paint(g_pic[family], g_pic[0], family, &map);
     }
     g_pic_sig[family] = sig;
     memcpy(mem, g_pic[family], ATLAS_SIZE);
@@ -257,5 +309,5 @@ void vk_prompts_frame(void) {
         : family == 2 ? "PlayStation"
         : family == 3 ? "Xbox"
                       : "keyboard and mouse",
-        (family == 2 || family == 3) && by_letter ? ", face buttons by printed letter" : "");
+        family < 4 && map.bit[SNX_PAD_SOUTH] == 0 ? ", A on the bottom button" : "");
 }

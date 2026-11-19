@@ -306,6 +306,11 @@ assert L.options_read(t) == o2, (L.options_read(t), o2)
 assert L.ini_get(t, 'dither') == '1' and L.ini_get(t, 'button_prompts') == '3' and L.ini_get(t, 'shadows') == '0'
 assert L.ini_get(L.options_apply(t, dict(o2, prompts='Keyboard')), 'button_prompts') == '4'
 assert L.ini_get(t, 'aspect_ratio') == '2.3333'
+# 90 FPS: off is the console's 60, on is 90, and a rate above 60 set by hand stays while it is on
+assert o['fps90'] is False and L.ini_get(t, 'frame_rate') == '60'
+assert L.ini_get(L.options_apply(t, dict(o2, fps90=True)), 'frame_rate') == '90'
+assert L.ini_get(L.options_apply('frame_rate=120\r\n' + t, dict(o2, fps90=True)), 'frame_rate') == '120'
+assert L.options_read('frame_rate=90\r\n')['fps90'] is True
 # wider than 16:9 the scene is drawn wider (prepared shaders for scaling); 16:10 and 16:9 aren't
 assert L.scaled_mode('resolution=1\r\naspect_ratio=2.3333\r\n') and not L.scaled_mode('resolution=1\r\naspect_ratio=1.6\r\n')
 assert not L.scaled_mode('resolution=1\r\naspect_ratio=0\r\n')
@@ -484,6 +489,34 @@ assert L.code_mods_changed()  # back on, but later in the order: the patches app
 L.mods_set([n for n in L.mods_on() if n not in ('Bayo3 60fps', 'ultrawide')])
 L.CODEMODS.unlink()
 assert not L.code_mods_changed()  # only RomFS mods on: nothing to compile
+
+# cheats: Atmosphère's contents/<title>/cheats/<build id>.txt, all off at first, then some on
+with zipfile.ZipFile(downloads / 'b3cheats.zip', 'w') as z:
+    z.writestr('atmosphere/contents/01004A4010FEA000/cheats/B47CC79B88B7091E.txt',
+               '[Title]\n\n[Halos]\n040E0000 04E50830 000F423F\n[Invincible]\n040E0000 0131FFF4 2A1F03E1\n'
+               '[Halos]\n040E0000 04E50830 000F423F\n')
+    z.writestr('atmosphere/contents/01004A4010FEA000/cheats/enabled.txt', 'Halos\n')  # not the player's choice
+    z.writestr('atmosphere/contents/01004A4010FEA000/cheats/notes.txt', 'x')
+assert L.mod_import(downloads / 'b3cheats.zip') == 'b3cheats'
+assert sorted(p.name for p in (L.mods_dir() / 'b3cheats' / 'cheats').iterdir()) == ['B47CC79B88B7091E.txt']
+cheats = [m for m in L.mod_list() if m['name'] == 'b3cheats'][0]
+assert cheats['on'] and cheats['usable'] and cheats['cheats'] == [
+    {'name': 'Halos', 'on': False}, {'name': 'Invincible', 'on': False}]
+assert [(n, f) for n, f, _ in L.code_mods()] == [('b3cheats', 'cheats/B47CC79B88B7091E.txt')]
+L.CODEMODS.write_text(L.code_mods_print() + '\n', encoding='ascii')
+L.cheats_set('b3cheats', ['Invincible', 'Halos'])
+assert L._cheats_on('b3cheats') == ['Invincible', 'Halos'] and L.code_mods_changed()
+assert [f for _, f, _ in L.code_mods()] == ['cheats/B47CC79B88B7091E.txt', 'cheats/enabled.txt']
+for bad in (['Nope'], ['../x']):
+    try:
+        L.cheats_set('b3cheats', bad)
+        raise AssertionError(bad)
+    except ValueError:
+        pass
+assert L._cheats_on('b3cheats') == ['Invincible', 'Halos']  # a refused list changes nothing
+L.mods_set([n for n in L.mods_on() if n != 'b3cheats'])
+L.CODEMODS.unlink()
+assert not L.code_mods_changed()
 
 # the game program reads mods only from build m1 on
 assert L.mods_supported() is False  # no program in the test game folder

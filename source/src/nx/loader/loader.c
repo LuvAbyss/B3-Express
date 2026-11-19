@@ -1023,6 +1023,56 @@ static int load_nro_program(const char* entry, SnxProgram* program, char* error,
     return 0;
 }
 
+/* A mod's cheats (mod/cheats/<build id>.txt, the ones its enabled.txt names): the writes into code that every run of
+   them makes, applied as patches. Before the mod's exefs/ files, as the runtime does (runtime/loader.c) */
+static int apply_cheats(SnxProgram* program, const char* mod, char* error, size_t error_size) {
+    char *dir = snx_path_join(mod, "cheats"), *on_path, *on = NULL, **files = NULL;
+    size_t nfiles = 0, on_size = 0, j, k;
+    int rc = 0;
+    if (!snx_is_dir(dir) || snx_list_dir(dir, &files, &nfiles)) {
+        free(dir);
+        return 0;
+    }
+    on_path = snx_path_join(dir, "enabled.txt");
+    if (snx_is_file(on_path)) on = (char*)snx_read_file(on_path, &on_size);
+    free(on_path);
+    for (j = 0; j < nfiles && !rc; ++j) {
+        char* path;
+        unsigned char* data;
+        size_t data_size = 0;
+        SnxCheatProgram cheats;
+        if (!snx_patch_cheat_kind(files[j])) continue;
+        path = snx_path_join(dir, files[j]);
+        data = snx_is_file(path) ? snx_read_file(path, &data_size) : NULL;
+        free(path);
+        if (!data) continue;
+        if (snx_cheat_parse((const char*)data, data_size, on, on_size, &cheats, error, error_size)) {
+            free(data);
+            rc = -1;
+            break;
+        }
+        free(data);
+        for (k = 0; k < program->module_count && !rc; ++k) {
+            SnxModuleImage* m = &program->modules[k];
+            SnxPatchTarget t;
+            int got;
+            t.image = m->image;
+            t.image_size = m->image_size;
+            t.build_id = m->build_id;
+            t.text_off = m->text_off;
+            t.text_size = m->text_size;
+            got = snx_patch_cheats(files[j], &cheats, &t, &program->patches, error, error_size);
+            if (got < 0) rc = -1;
+            if (got > 0 && cheats.n) program->patch_files++;
+        }
+        snx_cheat_free(&cheats);
+    }
+    free(on);
+    snx_free_strings(files, nfiles);
+    free(dir);
+    return rc;
+}
+
 /* The code-patch mods turned on in <root>/mods/mods.txt (patch.h), applied to the modules in its order, each mod's
    exefs/ files in name order: the same order the runtime applies them in (runtime/loader.c) */
 static int apply_patches(SnxProgram* program, const char* root, char* error, size_t error_size) {
@@ -1041,8 +1091,9 @@ static int apply_patches(SnxProgram* program, const char* root, char* error, siz
     count = strlen(text) == size ? snx_patch_mod_names(text, names, sizeof names / sizeof names[0]) : 0;
     for (i = 0; i < count && !rc; ++i) {
         char *mod = snx_path_join(mods, names[i]), *exefs = snx_path_join(mod, "exefs"), **files = NULL;
+        rc = apply_cheats(program, mod, error, error_size);
         free(mod);
-        if (!snx_is_dir(exefs) || snx_list_dir(exefs, &files, &nfiles)) {
+        if (rc || !snx_is_dir(exefs) || snx_list_dir(exefs, &files, &nfiles)) {
             free(exefs);
             continue;
         }

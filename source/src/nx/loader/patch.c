@@ -7,6 +7,7 @@
    "<hex offset> \"string\"" (written with a NUL after it). Hex bytes are written in memory order. */
 #include "nx/loader/patch.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define NSO_HEADER 0x100u
@@ -245,6 +246,34 @@ int snx_patch_apply(const char* file_name, const unsigned char* data, size_t siz
     n = strlen(base) - 4;
     if (!same_build(base, n, t->build_id)) return 0;
     return apply_ips(base, data, size, t, stats, error, error_size);
+}
+
+int snx_patch_cheat_kind(const char* file_name) {
+    const char* p = file_name;
+    while (*p && hexval((unsigned char)*p) >= 0) p++;
+    return p - file_name >= 16 && p - file_name <= 64 && ends_with(file_name, ".txt") && strlen(p) == 4;
+}
+
+int snx_patch_cheats(const char* file_name, const SnxCheatProgram* program, const SnxPatchTarget* t, SnxPatchStats* s,
+                     char* error, size_t error_size) {
+    SnxCheatWrite* w;
+    size_t n, i;
+    int rc = 1;
+    if (!snx_patch_cheat_kind(file_name) || !same_build(file_name, strlen(file_name) - 4, t->build_id)) return 0;
+    n = snx_cheat_fixed(program, NULL, 0);
+    if (!n) return 1;
+    if (!(w = (SnxCheatWrite*)malloc(n * sizeof *w))) return failf(error, error_size, file_name, "out of memory", 0);
+    snx_cheat_fixed(program, w, n);
+    for (i = 0; i < n && rc > 0; ++i) {
+        unsigned char bytes[8];
+        unsigned k;
+        /* only the code's: data is written by the cheat itself on every frame, as on the console */
+        if (w[i].offset >= t->text_off + t->text_size || w[i].offset + w[i].width <= t->text_off) continue;
+        for (k = 0; k < w[i].width; ++k) bytes[k] = (unsigned char)(w[i].value >> (8 * k));
+        if (put(file_name, t, s, w[i].offset + NSO_HEADER, bytes, 0, w[i].width, error, error_size)) rc = -1;
+    }
+    free(w);
+    return rc;
 }
 
 size_t snx_patch_mod_names(char* text, char** names, size_t max) {

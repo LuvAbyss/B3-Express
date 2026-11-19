@@ -426,6 +426,9 @@ void vk_write_changed(u64 addr, const u8* res, const u8* org, u32 size);
 /* 1 if [host, host+len) was written since the write-tracking clock read `since`, 0 if not, -1 when write tracking
    can't tell (no host pointer, or not available): then check the contents */
 int vk_written_since(const u8* host, u64 len, u32 since);
+/* the same for a texture: inside an NVN window each 4 MB of guest memory is scanned once (vk_ww_window) */
+int vk_tex_written_since(const u8* host, u64 len, u32 since);
+void vk_ww_window(int open); /* an NVN window opens (1) or closes (0) */
 void vk_written_each(const u8* host, u64 len, u32 since, void (*fn)(int, u64, u64), int arg);
 u32 vk_ww_now(void);
 void vk_mem_changed(u64 cpu, u64 len); /* gpu.c's g_gpu_mem_changed: the range counts as written */

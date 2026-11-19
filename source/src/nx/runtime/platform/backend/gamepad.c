@@ -560,16 +560,15 @@ void gamepad_rumble_slot(int slot, u32 left, u32 right) {
 }
 
 void gamepad_kbm_used(void) { __atomic_store_n(&g_used, -2, __ATOMIC_RELAXED); }
-int gamepad_prompts(int* by_letter) {
-    int want = __atomic_load_n(&g_prompts, __ATOMIC_RELAXED), slot = __atomic_load_n(&g_used, __ATOMIC_RELAXED), i;
-    const SnxPlayerConfig* p = &g_players[0];
-    *by_letter = p->swap_ab >= 0 ? p->swap_ab : g_cfg.swap_ab;
-    if (want) return want;
-    if (slot == -2) return 4;
+int gamepad_prompts(SnxPadMap* map) {
+    int want = __atomic_load_n(&g_prompts, __ATOMIC_RELAXED), used = __atomic_load_n(&g_used, __ATOMIC_RELAXED);
+    int slot = used, i;
     if (slot < 0 || !g_pads[slot]) /* none used yet, or it went: the first one connected */
         for (slot = -1, i = 0; i < SNX_GAMEPADS && slot < 0; i++)
             if (g_pads[i]) slot = i;
-    if (slot < 0) return 4; /* no controller at all: the player has the keyboard and the mouse */
+    map_of(slot < 0 ? 0 : slot, map); /* no pad: player 1's */
+    if (want) return want;
+    if (used == -2 || slot < 0) return 4; /* the keyboard and mouse last used, or no controller at all */
     switch (gamepad_slot_type(slot)) {
         case SDL_GAMEPAD_TYPE_PS3:
         case SDL_GAMEPAD_TYPE_PS4:

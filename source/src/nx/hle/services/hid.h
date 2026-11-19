@@ -36,6 +36,9 @@ extern TouchState g_touch;
 extern PMutex g_pad_input_lock;
 
 void hid_update(void); /* the next samples in shared memory, touch screen included */
+/* player 1's buttons as the last update saw them, as NpadButton bits with the sticks' directions (cheats' key
+   conditions) */
+u64 hid_held(void);
 /* the number of connected players, and the Npad id of the first in *first_id */
 int hid_connected_players(u32* first_id);
 #endif

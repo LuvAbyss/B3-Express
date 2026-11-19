@@ -685,6 +685,11 @@ snx_test_target(snx-test-patch 90)
 target_link_libraries(snx-test-patch PRIVATE snx_patch)
 add_test(NAME code_patches COMMAND snx-test-patch)
 
+add_executable(snx-test-cheat cheat_test.c)
+snx_test_target(snx-test-cheat 90)
+target_link_libraries(snx-test-cheat PRIVATE snx_patch)
+add_test(NAME cheats COMMAND snx-test-cheat)
+
 add_executable(snx-test-runtime-nro runtime_nro.c "${PROJECT_SOURCE_DIR}/src/nx/runtime/loader.c")
 snx_test_target(snx-test-runtime-nro 11)
 target_link_libraries(snx-test-runtime-nro PRIVATE snx_lz4 snx_patch)

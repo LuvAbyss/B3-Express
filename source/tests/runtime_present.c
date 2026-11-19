@@ -9,6 +9,8 @@
 
 u8* g_mem;
 int g_opt_fps = SNX_FPS_GAME;
+unsigned g_vi_hz = VI_REFRESH_HZ;
+void cheats_frame(void) {}
 static u64 now_ns, slept_ns;
 static unsigned checks, failures;
 #define CHECK(c, ...)                                                                                                  \
@@ -48,7 +50,13 @@ u64 bl_offset(u32 x_bytes, u32 y, u32 z, u32 width_bytes, u32 height, u32 bh_log
 }
 
 static void ticks(void) {
-    static const u64 at[] = {0, 1, 9999, 10000, 52083, 1000000000u, SNX_U64C(0x2D79883u, 0xD2000000u) /* 10 years */,
+    static const u64 at[] = {0,
+                             1,
+                             9999,
+                             10000,
+                             52083,
+                             1000000000u,
+                             SNX_U64C(0x2D79883u, 0xD2000000u) /* 10 years */,
                              SNX_U64C(0x7FFFFFFFu, 0xFFFFFFFFu)};
     size_t i;
     for (i = 0; i < sizeof at / sizeof *at; i++) {
@@ -94,6 +102,10 @@ static void pacing(void) {
     present_pace(1);
     CHECK(slept_ns == before, "fps_limit=0 waited");
     g_opt_fps = SNX_FPS_GAME;
+    g_vi_hz = 90; /* frame_rate=90: the game's own pace is the display's 90 */
+    CHECK(present_period_ns() == 1000000000u / 90, "interval 1 at 90 Hz is %llu ns",
+          (unsigned long long)present_period_ns());
+    g_vi_hz = VI_REFRESH_HZ;
 }
 
 static void convert(void) {
@@ -139,8 +151,7 @@ int main(void) {
     test_renderer.present_buffer = test_present;
     vi_show_buffer(7, 0x40, 1, 1, 4, 1, 0, 1, crop, 0);
     vi_show_buffer(8, 0, 1, 1, 4, 1, 0, 1, crop, 0);
-    CHECK(presented == 0x1040 && g_frames == 1, "presented %llx, %d frames", (unsigned long long)presented,
-          g_frames);
+    CHECK(presented == 0x1040 && g_frames == 1, "presented %llx, %d frames", (unsigned long long)presented, g_frames);
     if (failures) {
         fprintf(stderr, "%u of %u checks failed\n", failures, checks);
         return 1;

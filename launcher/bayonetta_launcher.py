@@ -212,8 +212,9 @@ def build_code(report, started=lambda process: None):
         patches = code_mods()
         built_print = code_mods_print(patches)
         for name, f, data in patches:
-            (source / 'mods' / name / 'exefs').mkdir(parents=True, exist_ok=True)
-            (source / 'mods' / name / 'exefs' / f).write_bytes(data)
+            dest = source / 'mods' / name / (f if f.startswith('cheats/') else 'exefs/' + f)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
         if patches:
             names = list(dict.fromkeys(n for n, _, _ in patches))
             (source / 'mods' / 'mods.txt').write_text(''.join(n + '\n' for n in names), encoding='utf8')
@@ -526,6 +527,7 @@ def options_read(text):
             'fade': dict((v, n) for n, v in FADES).get(ini_get(text, 'dither', '3'), FADES[3][0]),
             'prompts': dict((v, n) for n, v in PROMPTS).get(ini_get(text, 'button_prompts', '0'), PROMPTS[0][0]),
             'deadzone': ini_get(text, 'gamepad_deadzone', '20'), 'rumble': ini_get(text, 'gamepad_rumble', '100'),
+            'fps90': to_float(ini_get(text, 'frame_rate', '60'), 60) > 60,
             'mouse_camera': ini_get(text, 'mouse_camera', '1') == '1',
             'mouse_invert_y': ini_get(text, 'mouse_invert_y', '0') == '1',
             'mouse_sensitivity': ini_get(text, 'mouse_sensitivity', '100'),
@@ -552,6 +554,9 @@ def options_apply(text, o):
     text = ini_set(text, 'aspect_ratio', o['aspect'], 'resolution')
     text = ini_set(text, 'hud_area', o['hud'], 'aspect_ratio')
     text = ini_set(text, 'dither', dict(FADES)[o['fade']], 'resolution')
+    rate = ini_get(text, 'frame_rate', '60')  # on keeps a rate above 60 set by hand (up to 120), off is the console's 60
+    text = ini_set(text, 'frame_rate', (rate if to_float(rate, 60) > 60 else '90') if o['fps90'] else '60',
+                   'fps_limit' if ini_get(text, 'fps_limit', None) is not None else 'resolution')  # any section reads
     text = ini_set(text, 'gamepad_deadzone', o['deadzone'], 'gamepad_swap_ab')
     text = ini_set(text, 'gamepad_rumble', o['rumble'], 'gamepad_deadzone')
     text = ini_set(text, 'button_prompts', dict(PROMPTS)[o['prompts']], 'gamepad_swap_ab')
@@ -733,6 +738,7 @@ def mod_list():
         mine = files[name]
         found = [names.find(p) for p in mine]
         patches = _mod_patches(name)
+        cheats = cheat_names(name)
         hidden = {}
         if name in on:
             for later in on[on.index(name) + 1:]:
@@ -740,8 +746,9 @@ def mod_list():
                 if n:
                     hidden[later] = n
         out.append({'name': name, 'on': name in on, 'files': len(mine), 'bytes': sum(mine.values()),
-                    'usable': bool(mine) or bool(patches), 'replaces': found.count('same'),
-                    'adds': found.count(None), 'case': found.count('case'), 'hidden_by': hidden, 'patches': patches})
+                    'usable': bool(mine) or bool(patches) or bool(cheats), 'replaces': found.count('same'),
+                    'adds': found.count(None), 'case': found.count('case'), 'hidden_by': hidden, 'patches': patches,
+                    'cheats': [{'name': c, 'on': on} for c, on in cheats]})
     return out
 
 
@@ -750,7 +757,7 @@ def mods_set(names):
     when it starts. A name that isn't a mod folder with romfs/ or code patches is refused (ValueError) and nothing
     changes"""
     names = list(names)
-    usable = {n for n in mod_folders() if (mods_dir() / n / 'romfs').is_dir() or _mod_patches(n)}
+    usable = {n for n in mod_folders() if (mods_dir() / n / 'romfs').is_dir() or _mod_patches(n) or _mod_cheats(n)}
     for name in names:
         if not MOD_NAME.fullmatch(name) or name.strip() != name or name in ('.', '..') or name not in usable:
             raise ValueError(f'{name!r} is not a mod in {mods_dir()}')
@@ -765,18 +772,74 @@ def mods_set(names):
     temporary.replace(root / 'mods.txt')
 
 
+CHEAT_FILE = re.compile(r'[0-9a-fA-F]{16,64}\.txt')  # a mod's cheats/<build id>.txt (source/src/nx/loader/cheat.h)
+
+
+def _mod_cheats(name):
+    """A mod's cheat files: cheats/<build id>.txt, by name"""
+    cheats = mods_dir() / name / 'cheats'
+    return sorted(p.name for p in cheats.iterdir() if p.is_file() and CHEAT_FILE.fullmatch(p.name)) \
+        if cheats.is_dir() else []
+
+
+def cheat_names(name):
+    """The cheats of a mod, in its files' order, each once: [(cheat name, on)]. A cheat is a '[Name]' line of a cheat
+    file with codes under it (a title line has none; a '{Name}' master code always runs); the ones on are the lines
+    of its cheats/enabled.txt"""
+    on, out = set(_cheats_on(name)), []
+    for f in _mod_cheats(name):
+        text = (mods_dir() / name / 'cheats' / f).read_text(encoding='utf8', errors='replace')
+        cheat = None
+        for line in text.splitlines():
+            line = line.strip()
+            if line[:1] in ('[', '{'):
+                cheat = line[1:line.rindex(']')] if line[0] == '[' and ']' in line else None
+            elif line and cheat and cheat not in [c for c, _ in out]:
+                out.append((cheat, cheat in on))
+    return out
+
+
+def _cheats_on(name):
+    path = mods_dir() / name / 'cheats' / 'enabled.txt'
+    return [line.strip() for line in path.read_text(encoding='utf8', errors='replace').splitlines() if line.strip()] \
+        if path.is_file() else []
+
+
+def cheats_set(name, cheats):
+    """Turns on the cheats named of a mod, and its others off: its cheats/enabled.txt rewritten whole. The game reads
+    it when it starts; a cheat that changes the game's code makes the next Play compile again"""
+    known = {c for c, _ in cheat_names(name)}
+    for cheat in cheats:
+        if cheat not in known:
+            raise ValueError(f'{cheat!r} is not a cheat of {name!r}')
+    path = mods_dir() / name / 'cheats' / 'enabled.txt'
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(''.join(c + '\n' for c in dict.fromkeys(cheats)), encoding='utf8')
+    temporary.replace(path)
+
+
 def code_mods():
-    """The code patches of the mods on, as the game applies them: [(mod, file name, bytes)], in mods.txt's order"""
+    """The code patches of the mods on, as the game applies them: [(mod, file name, bytes)], in mods.txt's order. A
+    cheat file and the list of cheats on count too, as cheats/<file>: the compiler builds in the code writes of the
+    ones on"""
     out = []
     for name in mods_on():
+        cheats = _mod_cheats(name)
+        # shortcut: any change to the cheats on compiles again, though only ones that change code need it (seconds
+        # with code_cache/); tell them apart here if players toggle data cheats often
+        for f in cheats + (['enabled.txt'] if cheats and _cheats_on(name) else []):
+            out.append((name, 'cheats/' + f, (mods_dir() / name / 'cheats' / f).read_bytes()))
         for f in _mod_patches(name):
             out.append((name, f, (mods_dir() / name / 'exefs' / f).read_bytes()))
     return out
 
 
 def code_mods_print(mods=None):
-    """A fingerprint of the code patches on: the game code has to be compiled again when it changes"""
+    """A fingerprint of the code patches on, and of the calls the runtime replaces (TABLE_CALLS, compiled in as
+    table calls): the game code has to be compiled again when either changes"""
     h = hashlib.sha256(b'code mods 1\n')
+    if TABLE_CALLS.is_file():
+        h.update(b'tablecalls\0' + TABLE_CALLS.read_bytes())
     for name, f, data in code_mods() if mods is None else mods:
         h.update(f'{name}\0{f}\0{len(data)}\0'.encode('utf8'))
         h.update(data)
@@ -793,7 +856,7 @@ def code_mods_changed():
 
 
 TITLE_ID = re.compile(r'[0-9a-fA-F]{16}')
-NOT_A_NAME = ('atmosphere', 'contents', 'titles', 'mods', 'romfs', 'exefs', 'exefs_patches', '')  # layout folders
+NOT_A_NAME = ('atmosphere', 'contents', 'titles', 'mods', 'romfs', 'exefs', 'exefs_patches', 'cheats', '')  # layout folders
 
 
 def _mod_name(prefix_parts, fallback):
@@ -812,15 +875,16 @@ def _mod_name(prefix_parts, fallback):
 
 def _mod_layout(paths):
     """Where each file of a downloaded mod goes, from its '/' paths: (the mods found, as the folders above them, and
-    {path: 'romfs/...' or 'exefs/<patch>'} for the files to keep). A mod is a folder holding romfs/ or exefs/
-    (yuzu, Ryujinx, Atmosphère's contents/<title>/), or Atmosphère's exefs_patches/<name>/<build id>.ips. Everything
-    under one atmosphere/ folder counts as one mod, as Atmosphère loads it so"""
+    {path: 'romfs/...', 'exefs/<patch>' or 'cheats/<build id>.txt'} for the files to keep). A mod is a folder holding
+    romfs/, exefs/ or cheats/ (yuzu, Ryujinx, Atmosphère's contents/<title>/), or Atmosphère's
+    exefs_patches/<name>/<build id>.ips. Everything under one atmosphere/ folder counts as one mod, as Atmosphère loads
+    it so"""
     roots, keep = set(), {}
     for path in paths:
         parts = path.strip('/').split('/')
         for i, part in enumerate(parts[:-1]):
             low = part.lower()
-            if low in ('romfs', 'exefs'):
+            if low in ('romfs', 'exefs', 'cheats'):
                 rest = parts[i + 1:]
                 dest = f'{low}/' + '/'.join(rest)
             elif low == 'exefs_patches' and len(parts) == i + 3:
@@ -834,6 +898,8 @@ def _mod_layout(paths):
                 root = tuple(parts[:i + 2])
             if dest.startswith('exefs/') and not (len(rest) == 1 and PATCH_FILE.fullmatch(rest[0])):
                 break  # an exefs file that isn't a code patch (a replaced main, say) can't be used
+            if dest.startswith('cheats/') and not (len(rest) == 1 and CHEAT_FILE.fullmatch(rest[0])):
+                break  # only cheats/<build id>.txt: an enabled.txt from elsewhere isn't this player's choice
             roots.add(root)
             keep[path] = (root, dest)
             break
@@ -867,8 +933,8 @@ def mod_import(source):
     try:
         roots, keep = _mod_layout(infos)
         if not roots:
-            raise ValueError('That has no romfs folder and no code patches (.ips or .pchtxt in exefs). Only those '
-                             'kinds of mods work so far.')
+            raise ValueError('That has no romfs folder, no code patches (.ips or .pchtxt in exefs) and no cheats '
+                             '(cheats/<build id>.txt). Only those kinds of mods work so far.')
         if len(roots) > 1:
             raise ValueError(f'That holds {len(roots)} mods (or versions of one). Add the folder of the one you want.')
         root = next(iter(roots))

@@ -25,7 +25,10 @@ without WebView2 the old window opens instead, with the same logic.
   (IPS, IPS32) and `.pchtxt` (IPSwitch) files for v1.2.0 in a mod's `exefs/`, or Atmosphère's
   `exefs_patches/<name>/`. They are compiled into the game code, so turning one on or off makes the next Play
   compile again (the blocks the patches change, up to about 3 minutes). `Bayo3_120.codemods` records what the code was built with, and the game itself
-  refuses code built with other patches (`Bayo3_120.patches`). Cheats aren't supported. The bug report names the
+  refuses code built with other patches (`Bayo3_120.patches`). Cheats work in Atmosphère's format: a mod's
+  `cheats/<build id>.txt` (or `atmosphere/contents/<title>/cheats/` in a download), each cheat ticked on its own under
+  the mod (all start off, saved in `cheats/enabled.txt`). The game runs the ones on every frame; the writes into
+  game code they always make are compiled in, so changing which cheats are on compiles again too. The bug report names the
   mods on.
 - **Help:** a bug report zip in `reports/` (the game's log, the settings, the graphics card; no game files, no saves),
   the GitHub issues page, preparing shaders again, and updates. The launcher asks GitHub for the latest release when

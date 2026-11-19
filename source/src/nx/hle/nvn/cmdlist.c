@@ -21,10 +21,10 @@
 /* what a command points at: in x[ptr], count from x[count] (or fixed when count < 0) elements of size bytes */
 typedef struct {
     const char* name;
-    int draw;          /* a draw or dispatch, counted per submit */
-    int ptr, count;    /* argument registers, 0 for none */
-    u32 size;          /* bytes per element, or of the fixed block */
-    int ptr2;          /* a second array with the same count (SetRenderTargets' views), 0 for none */
+    int draw;       /* a draw or dispatch, counted per submit */
+    int ptr, count; /* argument registers, 0 for none */
+    u32 size;       /* bytes per element, or of the fixed block */
+    int ptr2;       /* a second array with the same count (SetRenderTargets' views), 0 for none */
 } CmdSpec;
 static const CmdSpec g_spec[] = {
     {"nvnCommandBufferBarrier", 0, 0, 0, 0, 0},
@@ -91,6 +91,7 @@ typedef struct {
 typedef struct {
     u64 cmdbuf, handle; /* the command buffer it records, and the handle EndRecording returned (0 while recording) */
     int recording;
+    int inflight; /* submitted, its replay still queued for the render thread: not recorded over until it ran */
     HostCmd* cmd;
     u32 n, cap;
     u8* bytes;
@@ -98,7 +99,27 @@ typedef struct {
 } CmdList;
 #define LISTS 32
 static CmdList g_list[LISTS];
+/* g_lk: the resource tables, the draw state and the replay, held through a frame's replay (about 8 ms of a heavy
+   fight). g_rec: the lists' recording, which goes on meanwhile on the game's threads; it is taken after g_lk when
+   both are held, never before */
 static PMutex g_lk = PMUTEX_INIT;
+static PMutex g_rec = PMUTEX_INIT;
+static PCond g_rec_cv;               /* a list stopped being in flight */
+static u64 g_lk_wait_ns, g_lk_waits; /* the game's threads' waits for g_lk over 0.1 ms; g_lk held */
+static void lock_game(void) { /* g_lk on a game's thread, its waits counted: the render thread holds it a frame long */
+    u64 t0 = plat_ns(), d;
+    pm_lock(&g_lk);
+    d = plat_ns() - t0;
+    if (d > 100000) {
+        g_lk_wait_ns += d;
+        g_lk_waits++;
+    }
+}
+/* the render thread's jobs (the render thread, below), queued once it runs */
+enum { RT_WINDOW, RT_PRESENT, RT_TEX_FREE };
+static int g_rt;
+static int rt_on(void) { return __atomic_load_n(&g_rt, __ATOMIC_ACQUIRE); }
+static void rt_queue(int kind, u64 arg);
 static int g_live; /* SNX_NVN_LIVE=1: every frame replayed, from the first submit on */
 static u64 g_last_dump;
 static u64 g_op_count[NOPS], g_outside[NOPS], g_lists, g_submits, g_found, g_missing, g_draws, g_bytes, g_max_cmds;
@@ -111,16 +132,23 @@ static const u8* cpu_bytes(u64 a, u64 n) {
     if (b.state == MS_FREE || b.state == MS_INACCESSIBLE || !b.size || a + n > b.addr + b.size) return NULL;
     return GP(a);
 }
-/* the list recording cmdbuf (make: a new one, replacing the oldest finished list when all are used). Lock held */
+/* the list recording cmdbuf (make: a new one, replacing the oldest finished list when all are used, waiting for one
+   in flight when every other list is). g_rec held */
 static CmdList* list_of(u64 cmdbuf, int make) {
     int i, spare = -1;
     for (i = 0; i < LISTS; i++)
         if (g_list[i].recording && g_list[i].cmdbuf == cmdbuf) return &g_list[i];
     if (!make) return NULL;
-    for (i = 0; i < LISTS && spare < 0; i++)
-        if (!g_list[i].recording && !g_list[i].handle) spare = i;
-    for (i = 0; i < LISTS && spare < 0; i++)
-        if (!g_list[i].recording) spare = i;
+    for (;;) {
+        int busy = 0;
+        for (i = 0; i < LISTS && spare < 0; i++)
+            if (!g_list[i].recording && !g_list[i].inflight && !g_list[i].handle) spare = i;
+        for (i = 0; i < LISTS && spare < 0; i++)
+            if (!g_list[i].recording && !g_list[i].inflight) spare = i;
+        for (i = 0; i < LISTS; i++) busy += g_list[i].inflight;
+        if (spare >= 0 || !busy) break;
+        pc_wait(&g_rec_cv, &g_rec, -1);
+    }
     if (spare < 0) return NULL;
     g_list[spare].cmdbuf = cmdbuf;
     g_list[spare].handle = 0;
@@ -170,6 +198,7 @@ static void dump(void) {
     size_t at = 0;
     int i;
     u32 recording = 0;
+    pm_lock(&g_rec);
     for (i = 0; i < NOPS && at < sizeof line - 80; i++)
         if (g_op_count[i])
             at += (size_t)snprintf(line + at, sizeof line - at, " %s:%llu", g_spec[i].name + 16,
@@ -179,9 +208,9 @@ static void dump(void) {
         "draws and dispatches in submitted lists %llu (%.1f per submit); data kept %llu KiB, largest list %llu "
         "commands; unreadable pointers %llu, data overflows %llu\n",
         (unsigned long long)g_lists, recording, (unsigned long long)g_submits, (unsigned long long)g_found,
-        (unsigned long long)g_missing, (unsigned long long)g_draws,
-        g_found ? (double)g_draws / (double)g_found : 0.0, (unsigned long long)(g_bytes >> 10),
-        (unsigned long long)g_max_cmds, (unsigned long long)g_unreadable, (unsigned long long)g_overflow);
+        (unsigned long long)g_missing, (unsigned long long)g_draws, g_found ? (double)g_draws / (double)g_found : 0.0,
+        (unsigned long long)(g_bytes >> 10), (unsigned long long)g_max_cmds, (unsigned long long)g_unreadable,
+        (unsigned long long)g_overflow);
     LOG("nvn-cmdlist: commands kept:%s\n", line);
     at = 0;
     for (i = 0; i < NOPS && at < sizeof line - 80; i++)
@@ -191,6 +220,7 @@ static void dump(void) {
     if (at) LOG("nvn-cmdlist: commands outside a recording:%s\n", line);
     for (i = 0; i < UNKEPT && g_unkept[i].name; i++)
         LOG("nvn-cmdlist: lost in release-only mode, %llu: %s\n", (unsigned long long)g_unkept[i].n, g_unkept[i].name);
+    pm_unlock(&g_rec);
     res_dump();
 }
 static void maybe_dump(void) { /* lock held */
@@ -266,7 +296,7 @@ static void cmd_record(CPU* RESTRICT c, const NvnFn* f) {
     h.op = (u16)f->op;
     for (i = 0; i < 7; i++) h.a[i] = c->x[i + 1];
     for (i = 0; i < 4; i++) memcpy(&h.f[i], &c->v[i], 4);
-    pm_lock(&g_lk);
+    pm_lock(&g_rec);
     l = list_of(cmdbuf, 0);
     if (!l)
         g_outside[f->op]++;
@@ -282,22 +312,21 @@ static void cmd_record(CPU* RESTRICT c, const NvnFn* f) {
         l->cmd[l->n++] = h;
         g_op_count[f->op]++;
     }
-    maybe_dump();
-    pm_unlock(&g_lk);
+    pm_unlock(&g_rec);
     nvn_guest(c, f);
 }
 static void cmd_begin(CPU* RESTRICT c, const NvnFn* f) { /* (cmdbuf) */
     u64 cmdbuf = c->x[0];
-    pm_lock(&g_lk);
+    pm_lock(&g_rec);
     if (list_of(cmdbuf, 1)) g_lists++;
-    pm_unlock(&g_lk);
+    pm_unlock(&g_rec);
     nvn_guest(c, f);
 }
 static void cmd_end(CPU* RESTRICT c, const NvnFn* f) { /* (cmdbuf) -> handle */
     u64 cmdbuf = c->x[0];
     CmdList* l;
     nvn_guest(c, f);
-    pm_lock(&g_lk);
+    pm_lock(&g_rec);
     l = list_of(cmdbuf, 0);
     if (l) {
         l->recording = 0;
@@ -305,7 +334,7 @@ static void cmd_end(CPU* RESTRICT c, const NvnFn* f) { /* (cmdbuf) -> handle */
         g_bytes += l->nbytes;
         if (l->n > g_max_cmds) g_max_cmds = l->n;
     }
-    pm_unlock(&g_lk);
+    pm_unlock(&g_rec);
 }
 /* ------------------------------------------------------------ the resources a frame uses (phase 3 step 3a) */
 /* Memory pools and textures as the driver reports them (nvn_call on its getters after Initialize), and the ids the
@@ -326,7 +355,7 @@ typedef struct {
 static PoolRec g_pool[POOLS];
 static TexRec g_tex[TEXTURES];
 static u64 g_tex_id[IDS], g_img_id[IDS]; /* the texture object registered under each id (any texture pool) */
-static u8 g_smp_id[IDS >> 6];             /* sampler ids registered: 512 at most */
+static u8 g_smp_id[IDS >> 6];            /* sampler ids registered: 512 at most */
 static u64 g_pools_made, g_textures_made, g_getter_failed;
 enum { R_BUFFER, R_TEXTURE, R_SAMPLER, R_IMAGE, R_TARGET, R_KINDS };
 static const char* const g_rkind[R_KINDS] = {"buffer address", "texture handle", "sampler of a handle", "image handle",
@@ -381,10 +410,15 @@ static void pool_init(CPU* RESTRICT c, const NvnFn* f) { /* nvnMemoryPoolInitial
             "memory at the start %s, in the middle %s; %.1f ms here, %.1f of them the game's driver\n",
             (unsigned long long)pool, (unsigned long long)gpu, (unsigned long long)(size >> 10),
             (unsigned long long)flags, (unsigned long long)cpu, n >= 0 ? "queued" : "no",
-            a < 0 ? "-" : a ? "yes" : "NO", b < 0 ? "-" : b ? "yes" : "NO", (double)(plat_ns() - t0) / 1e6,
-            (double)t_guest / 1e6);
+            a < 0 ? "-"
+            : a   ? "yes"
+                  : "NO",
+            b < 0 ? "-"
+            : b   ? "yes"
+                  : "NO",
+            (double)(plat_ns() - t0) / 1e6, (double)t_guest / 1e6);
     }
-    pm_lock(&g_lk);
+    lock_game();
     for (i = 0; i < POOLS && slot < 0; i++)
         if (!g_pool[i].live) slot = i;
     if (slot >= 0) {
@@ -400,7 +434,7 @@ static void pool_init(CPU* RESTRICT c, const NvnFn* f) { /* nvnMemoryPoolInitial
 static void pool_fini(CPU* RESTRICT c, const NvnFn* f) { /* (pool) */
     u64 pool = c->x[0];
     int i;
-    pm_lock(&g_lk);
+    lock_game();
     for (i = 0; i < POOLS; i++)
         if (g_pool[i].live && g_pool[i].obj == pool) g_pool[i].live = 0;
     pm_unlock(&g_lk);
@@ -419,7 +453,7 @@ static void tex_init(CPU* RESTRICT c, const NvnFn* f) { /* nvnTextureInitialize(
     height = (u32)call1(c, "nvnTextureGetHeight", tex);
     target = (u32)call1(c, "nvnTextureGetTarget", tex);
     depth = (u32)call1(c, "nvnTextureGetDepth", tex);
-    pm_lock(&g_lk);
+    lock_game();
     t = tex_slot(tex, 1);
     if (t) {
         t->gpu = gpu;
@@ -432,18 +466,23 @@ static void tex_init(CPU* RESTRICT c, const NvnFn* f) { /* nvnTextureInitialize(
         t->live = 1;
         g_textures_made++;
     }
-    if (g_live) vk_nvn_live_tex_free(gpu); /* a new texture over that memory: what the image held isn't it */
+    if (g_live && !rt_on())
+        vk_nvn_live_tex_free(gpu); /* a new texture over that memory: what the image held isn't it */
     pm_unlock(&g_lk);
+    if (g_live && rt_on()) rt_queue(RT_TEX_FREE, gpu); /* after the frames queued before it */
 }
 static void tex_fini(CPU* RESTRICT c, const NvnFn* f) { /* (texture) */
     TexRec* t;
-    pm_lock(&g_lk);
+    u64 drop = 0;
+    lock_game();
     t = tex_slot(c->x[0], 0);
     if (t) {
         t->live = 0;
-        if (g_live) vk_nvn_live_tex_free(t->gpu);
+        if (g_live && !rt_on()) vk_nvn_live_tex_free(t->gpu);
+        drop = g_live && rt_on() ? t->gpu : 0;
     }
     pm_unlock(&g_lk);
+    if (drop) rt_queue(RT_TEX_FREE, drop);
     nvn_guest(c, f);
 }
 /* Texture pools and the hardware descriptors (TIC) the driver writes into them: the renderer's texture code builds
@@ -462,7 +501,7 @@ static void tpool_init(CPU* RESTRICT c, const NvnFn* f) { /* (pool, memory pool,
     nvn_guest(c, f);
     if (!(c->x[0] & 0xFF)) return;
     cpu = call1(c, "nvnMemoryPoolMap", mem);
-    pm_lock(&g_lk);
+    lock_game();
     for (i = 0; i < TPOOLS; i++)
         if (!g_tpool[i].obj || g_tpool[i].obj == pool) {
             g_tpool[i].obj = pool;
@@ -482,7 +521,7 @@ static void spool_init(CPU* RESTRICT c, const NvnFn* f) { /* (pool, memory pool,
     nvn_guest(c, f);
     if (!(c->x[0] & 0xFF)) return;
     cpu = call1(c, "nvnMemoryPoolMap", mem);
-    pm_lock(&g_lk);
+    lock_game();
     for (i = 0; i < TPOOLS; i++)
         if (!g_spool[i].obj || g_spool[i].obj == pool) {
             g_spool[i].obj = pool;
@@ -536,7 +575,7 @@ static void reg_texture(CPU* RESTRICT c, const NvnFn* f) { /* (pool, id, texture
     u32 tic[8];
     int ok;
     nvn_guest(c, f);
-    pm_lock(&g_lk);
+    lock_game();
     if (id < IDS) g_tex_id[id] = tex;
     ok = tic_check(pool, id, tex, tic);
     {
@@ -548,7 +587,7 @@ static void reg_texture(CPU* RESTRICT c, const NvnFn* f) { /* (pool, id, texture
 static void reg_image(CPU* RESTRICT c, const NvnFn* f) { /* (pool, id, texture, view) */
     u64 pool = c->x[0], id = c->x[1] & 0xFFFFFFFFu, tex = c->x[2];
     nvn_guest(c, f);
-    pm_lock(&g_lk);
+    lock_game();
     if (id < IDS) g_img_id[id] = tex;
     tic_check(pool, id, tex, NULL);
     pm_unlock(&g_lk);
@@ -556,7 +595,7 @@ static void reg_image(CPU* RESTRICT c, const NvnFn* f) { /* (pool, id, texture, 
 static void reg_sampler(CPU* RESTRICT c, const NvnFn* f) { /* (pool, id, sampler or builder) */
     u64 id = c->x[1] & 0xFFFFFFFFu;
     nvn_guest(c, f);
-    pm_lock(&g_lk);
+    lock_game();
     if (id < IDS) g_smp_id[id >> 3] |= (u8)(1u << (id & 7));
     pm_unlock(&g_lk);
 }
@@ -690,7 +729,7 @@ static void prog_shaders(CPU* RESTRICT c, const NvnFn* f) { /* (program, count, 
     for (i = 0; i < (u64)rec.n; i++)
         vk_nvn_prep_add(rec.st[i].stage, rec.st[i].code, rec.st[i].window, rec.st[i].cb, rec.st[i].cb_size,
                         rec.st[i].compute ? rec.st[i].cs_local : NULL, rec.st[i].shared);
-    pm_lock(&g_lk);
+    lock_game();
     {
         ProgRec* p = prog_slot(prog, 1);
         if (p) { /* a program given new shaders is translated again */
@@ -771,23 +810,25 @@ static const char* const g_skind[S_KINDS] = {"blend",        "color",       "dep
                                              "channel mask", "multisample", "vertex attribute", "vertex stream"};
 #define SEEN  4096u
 #define SVALS 32
-static u64 g_seen[S_KINDS][SEEN];     /* hashes of the objects decoded, 0 for none */
-static u64 g_seen_val[S_KINDS][SEEN]; /* and their values */
-static u8 g_seen_ok[S_KINDS][SEEN];   /* 1 decoded, 0 a getter failed */
-static u64 g_state_new[S_KINDS], g_state_fail[S_KINDS];    /* distinct objects, and those a getter failed for */
+static u64 g_seen[S_KINDS][SEEN];                            /* hashes of the objects decoded, 0 for none */
+static u64 g_seen_val[S_KINDS][SEEN];                        /* and their values */
+static u8 g_seen_ok[S_KINDS][SEEN];                          /* 1 decoded, 0 a getter failed */
+static u64 g_state_new[S_KINDS], g_state_fail[S_KINDS];      /* distinct objects, and those a getter failed for */
 static u64 g_sval[S_KINDS][SVALS], g_sval_n[S_KINDS][SVALS]; /* decoded values and how many objects had each */
 static u32 g_sval_used[S_KINDS], g_seen_full;
 #define SCRATCH 2048u /* below SP: the copy at the start, the outputs at +0x100 */
-/* the slot of the object with these bytes, *fresh when new; -1 when the table is full. Lock held */
+/* the slot of the object with these bytes, *fresh when new; -1 when the table is full, or when it isn't there and
+   fresh is NULL (a lookup only). Lock held */
 static int seen_slot(int kind, const u8* p, u32 n, int* fresh) {
     u64 h = 1469598103934665603ull ^ (u64)kind;
     u32 i, k;
-    *fresh = 0;
+    if (fresh) *fresh = 0;
     for (i = 0; i < n; i++) h = (h ^ p[i]) * 1099511628211ull;
     if (!h) h = 1;
     for (k = (u32)h & (SEEN - 1), i = 0; i < SEEN; i++, k = (k + 1) & (SEEN - 1)) {
         if (g_seen[kind][k] == h) return (int)k;
         if (!g_seen[kind][k]) {
+            if (!fresh) return -1;
             g_seen[kind][k] = h;
             *fresh = 1;
             return (int)k;
@@ -808,12 +849,18 @@ static u32 out32(int i) { /* output place i, written by the last getter */
 }
 #define SLOT(i) (g_scratch + 0x100 + (u64)(i) * 8)
 /* the decoded value of a state object (the bytes kept at its bind) in *out: 1, or 0 when a getter failed for it */
+static u64 g_decode_missed; /* objects the render thread found undecoded: drawn as failed */
 static int state_decode(CPU* RESTRICT c, int kind, const u8* p, u32 n, u64* out) { /* lock held */
     u64 v = 0, r = 0;
-    int ok = 1, i, fresh, slot = seen_slot(kind, p, n, &fresh);
+    int ok = 1, i, fresh = 0, slot;
     u32 k;
     *out = 0;
-    if (slot < 0) return 0;
+    /* the render thread (no c): the getters need the game's thread, which decoded the list's objects at submit */
+    slot = seen_slot(kind, p, n, c ? &fresh : NULL);
+    if (slot < 0) {
+        g_decode_missed += !c;
+        return 0;
+    }
     if (!fresh) return *out = g_seen_val[kind][slot], g_seen_ok[kind][slot];
     g_state_new[kind]++;
     g_scratch = (c->x[31] - SCRATCH) & ~(u64)15;
@@ -1035,7 +1082,7 @@ static void replay_dyn(NvnDrawDyn* y) { /* lock held */
 }
 static void stage_bind(const ProgStage* ps, NvnStageBind* b);
 static void replay_draw(const HostCmd* h, const NvnPipeDesc* d, ProgStage* const* st) { /* lock held */
-    const char* nm = g_spec[h->op].name + 16; /* after "nvnCommandBuffer" */
+    const char* nm = g_spec[h->op].name + 16;                                           /* after "nvnCommandBuffer" */
     NvnStageBind bind[5];
     NvnDrawDyn y;
     NvnDrawCall call;
@@ -1366,9 +1413,13 @@ static void pipe_dump(void) { /* lock held */
     for (i = 0; i < 16 && g_pd_why_n[i]; i++)
         LOG("nvn-cmdlist:   without a pipeline, %llu: %s\n", (unsigned long long)g_pd_why_n[i], g_pd_why[i]);
     {
-        static const char* const kind[NVN_B_KINDS] = {"constant buffer 0 (host)", "constant buffer 1 (program)",
-                                                      "constant buffer 2 (host)", "uniform buffers", "uniform buffers not bound (zeros)",
-                                                      "storage buffers",          "textures",
+        static const char* const kind[NVN_B_KINDS] = {"constant buffer 0 (host)",
+                                                      "constant buffer 1 (program)",
+                                                      "constant buffer 2 (host)",
+                                                      "uniform buffers",
+                                                      "uniform buffers not bound (zeros)",
+                                                      "storage buffers",
+                                                      "textures",
                                                       "images"};
         LOG("nvn-cmdlist: descriptors: draws and dispatches checked %llu, every binding resolved %llu\n",
             (unsigned long long)g_db_draws, (unsigned long long)g_db_complete);
@@ -1384,7 +1435,8 @@ static void pipe_dump(void) { /* lock held */
 static u64 cpu_of(u64 gpu) { /* lock held: the CPU address of a GPU address in a live pool, 0 for none */
     int i;
     for (i = 0; i < POOLS; i++)
-        if (g_pool[i].live && g_pool[i].cpu && gpu - g_pool[i].gpu < g_pool[i].size) return g_pool[i].cpu + gpu - g_pool[i].gpu;
+        if (g_pool[i].live && g_pool[i].cpu && gpu - g_pool[i].gpu < g_pool[i].size)
+            return g_pool[i].cpu + gpu - g_pool[i].gpu;
     return 0;
 }
 static u64 g_sync_ns, g_sync_n; /* how long the game's threads wait in NVN for the GPU, all threads together */
@@ -1395,6 +1447,8 @@ void nvn_capture_frame(const char* prefix) {
     __atomic_store_n(&g_cap_req, 1, __ATOMIC_RELEASE);
     if (!g_live) LOG("capture: needs the live renderer (the default), nothing saved\n");
 }
+static void present_run(u32 index);
+static void rt_stats(void);
 static void present(CPU* RESTRICT c, const NvnFn* f) { /* nvnQueuePresentTexture(queue, window, index) */
     u32 index = (u32)c->x[2];
     { /* SNX_NVN_DRS_LOG=1 (Bayonetta 3 v1.2.0 addresses): what picks the game's scene size, logged when it changes.
@@ -1419,7 +1473,17 @@ static void present(CPU* RESTRICT c, const NvnFn* f) { /* nvnQueuePresentTexture
             }
         }
     }
-    pm_lock(&g_lk);
+    if (rt_on())
+        rt_queue(RT_PRESENT, index);
+    else {
+        lock_game();
+        present_run(index);
+        pm_unlock(&g_lk);
+    }
+    nvn_guest(c, f);
+}
+/* a present's bookkeeping, on the render thread when it runs: g_lk held */
+static void present_run(u32 index) {
     if (g_live) { /* every 600 presents its picture, and the renderer's of the same buffer */
         const TexRec* t = index < g_nwin_tex && tex_known(g_win_tex[index]) ? tex_slot(g_win_tex[index], 0) : NULL;
         u64 gpu = t ? t->gpu : 0, frame = g_frames + 1;
@@ -1455,6 +1519,7 @@ static void present(CPU* RESTRICT c, const NvnFn* f) { /* nvnQueuePresentTexture
                 (double)(ns - ns_seen) / 6e8, (double)(n - n_seen) / 600.0);
             ns_seen = ns;
             n_seen = n;
+            rt_stats();
             vk_nvn_live_stats(frame);
         }
     } else if (g_replaying) { /* the frame replayed ends: its picture, and the renderer's of the same buffer */
@@ -1473,23 +1538,22 @@ static void present(CPU* RESTRICT c, const NvnFn* f) { /* nvnQueuePresentTexture
     }
     frame_end();
     vk_nvn_frame();
-    pm_unlock(&g_lk);
-    nvn_guest(c, f);
 }
 static void win_textures(CPU* RESTRICT c, const NvnFn* f) { /* nvnWindowBuilderSetTextures(builder, count, textures) */
     u32 n = (u32)c->x[1], i;
     const u8* p = n && n <= 8 ? cpu_bytes(c->x[2], (u64)n * 8) : NULL;
-    pm_lock(&g_lk);
+    lock_game();
     if (p) {
         for (i = 0; i < n; i++) memcpy(&g_win_tex[i], p + i * 8, 8);
         g_nwin_tex = n;
-        if (tex_known(g_win_tex[0])) vk_nvn_window_size(tex_slot(g_win_tex[0], 0)->width, tex_slot(g_win_tex[0], 0)->height);
+        if (tex_known(g_win_tex[0]))
+            vk_nvn_window_size(tex_slot(g_win_tex[0], 0)->width, tex_slot(g_win_tex[0], 0)->height);
     }
     pm_unlock(&g_lk);
     nvn_guest(c, f);
 }
 static void device_mode(CPU* RESTRICT c, const NvnFn* f) { /* nvnDeviceSetWindowOriginMode / SetDepthMode */
-    pm_lock(&g_lk);
+    lock_game();
     if (strstr(f->name, "Origin"))
         g_upper_left = (u32)c->x[1] & 1;
     else
@@ -1548,8 +1612,9 @@ static void ds_dynamic(const HostCmd* h, const u8* blob) { /* lock held */
         case SVMASK:
             for (i = 0; i < 2; i++)
                 if (h->a[0] >> i & 1)
-                    (k == SREF ? g_ds.stencil_ref : k == SMASK ? g_ds.stencil_wmask : g_ds.stencil_vmask)[i] =
-                        (u32)h->a[1] & 0xFF;
+                    (k == SREF    ? g_ds.stencil_ref
+                     : k == SMASK ? g_ds.stencil_wmask
+                                  : g_ds.stencil_vmask)[i] = (u32)h->a[1] & 0xFF;
             break;
         case AREF: memcpy(&g_ds.alpha_ref, h->f, 4); break;
         case DBOUNDS: /* (cmd, enable, min, max) */
@@ -1561,7 +1626,7 @@ static void ds_dynamic(const HostCmd* h, const u8* blob) { /* lock held */
             break;
         case LWIDTH: memcpy(&g_ds.line_width, h->f, 4); break;
         case POFF: memcpy(g_ds.offset, h->f, 12); break; /* factor, units, clamp */
-        case VBUF:                                         /* (cmd, first, count, ranges) */
+        case VBUF:                                       /* (cmd, first, count, ranges) */
             for (i = 0; i < (u32)h->a[1] && (u32)h->a[0] + i < 16 && (i + 1) * 16 <= h->blob_len; i++)
                 memcpy(&g_ds.vbuf[(u32)h->a[0] + i], blob + i * 16, 16);
             break;
@@ -1599,13 +1664,14 @@ static void ds_dynamic(const HostCmd* h, const u8* blob) { /* lock held */
 }
 
 /* every resource reference in a submitted list, and its state objects decoded */
-static void check_list_body(CPU* RESTRICT c, const CmdList* l);
+static void check_list_body(CPU* RESTRICT c, const CmdList* l, int decode_only);
 static void check_list(CPU* RESTRICT c, const CmdList* l) {
     u64 t0 = plat_ns();
-    check_list_body(c, l);
+    check_list_body(c, l, 0);
     vk_nvn_time_add(RPT_LISTS, plat_ns() - t0);
 }
-static void check_list_body(CPU* RESTRICT c, const CmdList* l) {
+/* decode_only: the state objects a list binds are decoded (the getters need the game's thread), nothing else */
+static void check_list_body(CPU* RESTRICT c, const CmdList* l, int decode_only) {
     static const struct {
         const char* name;
         int kind;
@@ -1621,7 +1687,7 @@ static void check_list_body(CPU* RESTRICT c, const CmdList* l) {
     static int state_op[8] = {-2};
     u32 si;
     static int op_vb = -2, op_ubo, op_ssbo, op_tex, op_img, op_rt, op_de, op_dei, op_dein, op_mdi, op_dci, op_copy,
-                   op_clear;
+               op_clear;
     u32 k, j;
     if (op_vb == -2) {
         op_vb = op_named("nvnCommandBufferBindVertexBuffers");
@@ -1649,6 +1715,16 @@ static void check_list_body(CPU* RESTRICT c, const CmdList* l) {
         op_disp = op_named("nvnCommandBufferDispatchCompute");
         op_tpool = op_named("nvnCommandBufferSetTexturePool");
         op_spool = op_named("nvnCommandBufferSetSamplerPool");
+    }
+    if (decode_only) {
+        for (k = 0; k < l->n; k++)
+            for (si = 0; si < 8; si++)
+                if (l->cmd[k].op == state_op[si])
+                    for (j = 0; j + states[si].size <= l->cmd[k].blob_len; j += states[si].size) {
+                        u64 v;
+                        state_decode(c, states[si].kind, l->bytes + l->cmd[k].blob + j, states[si].size, &v);
+                    }
+        return;
     }
     if (!g_ds_set) ds_reset();
     if (!g_replaying && g_frames == g_replay_frame) { /* the frame to replay: from its first submitted list */
@@ -1708,7 +1784,8 @@ static void check_list_body(CPU* RESTRICT c, const CmdList* l) {
                     g_ds.multisample = v;
             }
         }
-        if (op == op_prog) { /* (cmd, program, stage bits): vertex 1, fragment 2, geometry 4, tess 8 and 0x10, compute 0x20 */
+        if (op ==
+            op_prog) { /* (cmd, program, stage bits): vertex 1, fragment 2, geometry 4, tess 8 and 0x10, compute 0x20 */
             static const int bit_stage[6] = {ST_VS, ST_FS, ST_GS, ST_TCS, ST_TES, ST_CS};
             u32 bits = (u32)h->a[1], b;
             prog_translate(h->a[0]);
@@ -1736,7 +1813,7 @@ static void check_list_body(CPU* RESTRICT c, const CmdList* l) {
             dispatch_pipeline(h, op == op_dci);
         else if (g_spec[op].draw) /* every draw's first argument is its NVNdrawPrimitive */
             draw_pipeline(h);
-        if (g_live) continue; /* what follows is statistics */
+        if (g_live) continue;                             /* what follows is statistics */
         if (op == op_vb || op == op_ubo || op == op_ssbo) /* {address, size} each */
             for (j = 0; j + 16 <= h->blob_len; j += 16) {
                 u64 a;
@@ -1811,13 +1888,136 @@ static void res_dump(void) { /* lock held */
                 (unsigned long long)g_ref[k], (unsigned long long)g_ref_ok[k],
                 (unsigned long long)(g_ref[k] - g_ref_ok[k]), (unsigned long long)g_ref_null[k]);
 }
+/* ------------------------------------------------------------ the render thread
+   The replay of a frame's lists, about 8 ms of a heavy fight on the RTX 3080, ran inside nvnQueueSubmitCommands on the
+   game's draw thread, half of that thread's frame. It runs on a thread of its own, in the order the game called: a
+   submit's lists (a window), a present's bookkeeping, a texture's image dropped. The game's thread queues them and
+   goes on; a submit waits for the window before it to finish, so the replay is at most a frame behind. The GPU thread
+   runs a GPFIFO submission or call once the jobs queued before it are done (g_gpu_host_wait), so the releases the game
+   waits on come after the replayed work. SNX_NVN_RENDER_THREAD=0 replays on the game's thread, as before */
+typedef struct {
+    int kind;
+    u32 n;
+    u8 list[64]; /* a window's lists, in submit order, by their index in g_list */
+    u64 arg;     /* a present's window texture index, a dropped texture's GPU address */
+} RtJob;
+#define RT_N 16
+static RtJob g_rt_q[RT_N];
+static u64 g_rt_put, g_rt_done, g_rt_window; /* jobs queued, jobs done, the count with the last window queued */
+static u64 g_rt_wait_ns, g_rt_waits;         /* submits that waited for the window before them */
+static PMutex g_rt_lk = PMUTEX_INIT;
+static PCond g_rt_cv;
+/* a window's lists replayed: g_lk held */
+static void window_run(CPU* RESTRICT c, const u8* list, u32 n) {
+    u32 i;
+    if (g_live) vk_nvn_live_window(1);
+    for (i = 0; i < n; i++) check_list(c, &g_list[list[i]]);
+    if (g_live) vk_nvn_live_window(0);
+    maybe_dump();
+}
+static void lists_done(const u8* list, u32 n) {
+    u32 i;
+    pm_lock(&g_rec);
+    for (i = 0; i < n; i++) g_list[list[i]].inflight = 0;
+    if (rt_on()) pc_broadcast(&g_rec_cv);
+    pm_unlock(&g_rec);
+}
+static void rt_thread(void* arg) {
+    (void)arg;
+    pm_lock(&g_rt_lk);
+    for (;;) {
+        RtJob j;
+        while (g_rt_done == g_rt_put) pc_wait(&g_rt_cv, &g_rt_lk, -1);
+        j = g_rt_q[g_rt_done % RT_N];
+        pm_unlock(&g_rt_lk);
+        pm_lock(&g_lk);
+        if (j.kind == RT_WINDOW)
+            window_run(NULL, j.list, j.n);
+        else if (j.kind == RT_PRESENT)
+            present_run((u32)j.arg);
+        else
+            vk_nvn_live_tex_free(j.arg);
+        pm_unlock(&g_lk);
+        if (j.kind == RT_WINDOW) lists_done(j.list, j.n);
+        pm_lock(&g_rt_lk);
+        g_rt_done++;
+        pc_broadcast(&g_rt_cv);
+    }
+}
+static void rt_put(const RtJob* j) {
+    pm_lock(&g_rt_lk);
+    while (g_rt_put - g_rt_done >= RT_N) pc_wait(&g_rt_cv, &g_rt_lk, -1);
+    g_rt_q[g_rt_put % RT_N] = *j;
+    __atomic_store_n(&g_rt_put, g_rt_put + 1, __ATOMIC_RELEASE);
+    if (j->kind == RT_WINDOW) g_rt_window = g_rt_put;
+    pc_broadcast(&g_rt_cv);
+    pm_unlock(&g_rt_lk);
+}
+static void rt_queue(int kind, u64 arg) {
+    RtJob j;
+    memset(&j, 0, sizeof j);
+    j.kind = kind;
+    j.arg = arg;
+    rt_put(&j);
+}
+static u64 rt_ticket(void) { return __atomic_load_n(&g_rt_put, __ATOMIC_ACQUIRE); }
+static void rt_wait(u64 ticket) {
+    pm_lock(&g_rt_lk);
+    while (g_rt_done < ticket) pc_wait(&g_rt_cv, &g_rt_lk, -1);
+    pm_unlock(&g_rt_lk);
+}
+/* g_lk held, before the first window */
+static void rt_start(void) {
+    const char* e = getenv("SNX_NVN_RENDER_THREAD");
+    if (e && e[0] == '0') return;
+    pc_init(&g_rt_cv);
+    pc_init(&g_rec_cv);
+    if (plat_thread(rt_thread, NULL, (size_t)16 << 20)) {
+        WARN("nvn-cmdlist: no render thread: the replay stays on the game's thread\n");
+        return;
+    }
+    g_gpu_host_wait = rt_wait;
+    g_gpu_host_ticket = rt_ticket;
+    __atomic_store_n(&g_rt, 1, __ATOMIC_RELEASE);
+    LOG("nvn-cmdlist: the replay runs on its own thread\n");
+}
+static void rt_stats(void) { /* every 600 presents, g_lk held */
+    static u64 ns_seen, n_seen;
+    u64 ns, n;
+    pm_lock(&g_rt_lk);
+    ns = g_rt_wait_ns;
+    n = g_rt_waits;
+    pm_unlock(&g_rt_lk);
+    LOG("nvn-cmdlist: render thread %s, a frame on average: submits waited %.2f ms for the frame before (%llu times); "
+        "the game's threads waited %.2f ms for the tables (%llu times over 0.1 ms); state objects found undecoded %llu\n",
+        rt_on() ? "on" : "off", (double)(ns - ns_seen) / 6e8, (unsigned long long)(n - n_seen),
+        (double)g_lk_wait_ns / 6e8, (unsigned long long)g_lk_waits, (unsigned long long)g_decode_missed);
+    ns_seen = ns;
+    n_seen = n;
+    g_lk_wait_ns = g_lk_waits = 0;
+}
+
 static void queue_submit(CPU* RESTRICT c, const NvnFn* f) { /* (queue, count, handles) */
     static int replay_read;
     u64 count = c->x[1] & 0xFFFFFFFFu, i;
     const u8* p = count && count <= 64 ? cpu_bytes(c->x[2], count * 8) : NULL;
     u64 handles[64];
+    RtJob j;
+    int rt = rt_on();
     if (p) memcpy(handles, p, count * 8);
-    pm_lock(&g_lk);
+    memset(&j, 0, sizeof j);
+    j.kind = RT_WINDOW;
+    if (rt) { /* the frame before replayed first: the replay stays a frame behind at most */
+        u64 t0 = plat_ns();
+        pm_lock(&g_rt_lk);
+        if (g_rt_done < g_rt_window) {
+            while (g_rt_done < g_rt_window) pc_wait(&g_rt_cv, &g_rt_lk, -1);
+            g_rt_wait_ns += plat_ns() - t0;
+            g_rt_waits++;
+        }
+        pm_unlock(&g_rt_lk);
+    }
+    lock_game();
     if (!replay_read) { /* SNX_NVN_REPLAY=frame [SNX_NVN_REPLAY_OUT=path without .ppm] */
         const char* e = getenv("SNX_NVN_REPLAY");
         const char* o = getenv("SNX_NVN_REPLAY_OUT");
@@ -1837,13 +2037,14 @@ static void queue_submit(CPU* RESTRICT c, const NvnFn* f) { /* (queue, count, ha
                     /* a debug aid: the engines still run in release-only mode, 2 3D, 4 compute, 8 inline, 16 2D, 32 copy */
                     if ((e = getenv("SNX_NVN_STREAM_KEEP")) != NULL) g_gpu_stream_keep = (u32)strtoul(e, NULL, 0);
                 }
-            }
-            else
+                rt_start(); /* this window is the first it replays */
+                rt = rt_on();
+            } else
                 LOG("nvn-cmdlist: live frames need SNX_NVN_IMPORT=1\n");
             g_replay_frame = ~0ull;
         }
     }
-    if (g_live) vk_nvn_live_window(1);
+    pm_lock(&g_rec);
     for (i = 0; p && i < count; i++) {
         int k;
         CmdList* l = NULL;
@@ -1856,12 +2057,20 @@ static void queue_submit(CPU* RESTRICT c, const NvnFn* f) { /* (queue, count, ha
         }
         g_found++;
         for (k = 0; k < (int)l->n; k++) g_draws += (u64)g_spec[l->cmd[k].op].draw;
-        check_list(c, l);
-        l->handle = 0; /* submitted: the list may record again */
+        l->handle = 0;   /* submitted: the list may record again once replayed */
+        l->inflight = 1; /* and not before */
+        j.list[j.n++] = (u8)(l - g_list);
     }
-    if (g_live) vk_nvn_live_window(0);
-    maybe_dump();
-    pm_unlock(&g_lk);
+    pm_unlock(&g_rec);
+    if (rt) {
+        for (i = 0; i < j.n; i++) check_list_body(c, &g_list[j.list[i]], 1);
+        pm_unlock(&g_lk);
+        rt_put(&j);
+    } else {
+        window_run(c, j.list, j.n);
+        pm_unlock(&g_lk);
+        lists_done(j.list, j.n);
+    }
     nvn_guest(c, f);
 }
 
@@ -1873,15 +2082,15 @@ static void sync_wait(CPU* RESTRICT c, const NvnFn* f) {
     __atomic_add_fetch(&g_sync_n, 1, __ATOMIC_RELAXED);
     if (ns > 50000000) /* a wait long enough to show as a hitch */
         LOG_LIMIT(200, "nvn-cmdlist: %s(%llx, timeout %llx) took %.1f ms, result %llu, frame %llu\n", f->name,
-                  (unsigned long long)obj, (unsigned long long)timeout, (double)ns / 1e6,
-                  (unsigned long long)c->x[0], (unsigned long long)g_frames);
+                  (unsigned long long)obj, (unsigned long long)timeout, (double)ns / 1e6, (unsigned long long)c->x[0],
+                  (unsigned long long)g_frames);
 }
 /* a command the host path has no case for, which release-only mode loses with the stream; or a CPU read of a texture
    the host drew, which finds guest memory unwritten */
 static void cmd_unkept(CPU* RESTRICT c, const NvnFn* f) {
     if (g_gpu_release_only) {
         int i;
-        pm_lock(&g_lk);
+        pm_lock(&g_rec);
         for (i = 0; i < UNKEPT && g_unkept[i].name && g_unkept[i].name != f->name; i++) {}
         if (i < UNKEPT) {
             if (!g_unkept[i].name) {
@@ -1890,7 +2099,7 @@ static void cmd_unkept(CPU* RESTRICT c, const NvnFn* f) {
             }
             g_unkept[i].n++;
         }
-        pm_unlock(&g_lk);
+        pm_unlock(&g_rec);
     }
     nvn_guest(c, f);
 }

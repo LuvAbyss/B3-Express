@@ -18,18 +18,18 @@ typedef struct {
 /* The macro engine (mme.c) of a channel, kept between steps: a method a macro sends can make the stream wait
    (gpu_park), and the macro goes on from here (mme_resume) once the wait ends */
 typedef struct {
-    u32 regs[8];     /* r0 reads as 0 */
-    u32 carry;       /* of the last add or subtract */
-    u32 method;      /* where the next send goes */
-    u32 incr;        /* how far the method moves after a send */
-    u32 pc;          /* the next instruction, a word index into the channel's macro memory */
-    u32 target;      /* where a taken branch goes once its delay slot has run */
-    u32 np, next;    /* the parameters of the call (in the channel's mme_params) and the next one to fetch */
-    u32 steps;       /* instructions run in this call, against a macro that never ends */
-    int running;     /* a call started and not ended: a wait stopped it */
-    int branch;      /* a branch was taken: after the next instruction, its delay slot, pc becomes target */
-    int slot;        /* the next instruction is a delay slot, whose exit bit doesn't count */
-    int exiting;     /* the call ends after the next instruction, the exit's delay slot */
+    u32 regs[8];  /* r0 reads as 0 */
+    u32 carry;    /* of the last add or subtract */
+    u32 method;   /* where the next send goes */
+    u32 incr;     /* how far the method moves after a send */
+    u32 pc;       /* the next instruction, a word index into the channel's macro memory */
+    u32 target;   /* where a taken branch goes once its delay slot has run */
+    u32 np, next; /* the parameters of the call (in the channel's mme_params) and the next one to fetch */
+    u32 steps;    /* instructions run in this call, against a macro that never ends */
+    int running;  /* a call started and not ended: a wait stopped it */
+    int branch;   /* a branch was taken: after the next instruction, its delay slot, pc becomes target */
+    int slot;     /* the next instruction is a delay slot, whose exit bit doesn't count */
+    int exiting;  /* the call ends after the next instruction, the exit's delay slot */
 } GpuMme;
 
 /* Inline-to-memory (I2M, the methods at 0x60-0x6D of the 3D, compute and inline-to-memory classes): a launch's
@@ -39,9 +39,9 @@ typedef struct {
     u32 cap;      /* bytes buf has room for */
     u32 len, pos; /* the bytes the launch wants, and those that came */
     u32 line, lines, pitch;
-    u32 bh, bd;   /* block height and depth (log2 GOBs) of a block linear destination */
-    u32 w, h, z;  /* its width in bytes, height and slice */
-    u32 x, y;     /* the origin, x in bytes */
+    u32 bh, bd;  /* block height and depth (log2 GOBs) of a block linear destination */
+    u32 w, h, z; /* its width in bytes, height and slice */
+    u32 x, y;    /* the origin, x in bytes */
     int linear;
     u64 addr;
 } GpuI2m;
@@ -54,7 +54,7 @@ typedef struct GpuChannel {
     PbBatch pb;
     u32 puller[0x40];
     /* the engines' registers, by method */
-    u32 r3d[0x1000]; /* the 3D engine's. 0xE00 up are the macro calls' */
+    u32 r3d[0x1000];       /* the 3D engine's. 0xE00 up are the macro calls' */
     u32 r3d_shadow[0xE00]; /* the MME shadow RAM (SET_MME_SHADOW_RAM_CONTROL, 3D 0x49) */
     u32 shadow_mode;       /* 0 or 1 track, 2 passthrough, 3 replay */
     u32 rcomp[0x1000];
@@ -84,7 +84,7 @@ typedef struct GpuChannel {
     /* counter reports (3D 0x6C3 operation 2): g_draws at each selector's last reset, and the selectors reset */
     u64 counter_base[32];
     u32 counter_reset;
-    u32 instance_count; /* the instance the next draw is: BEGIN's next-instance bit and the SUBSEQUENT methods count */
+    u32 instance_count;  /* the instance the next draw is: BEGIN's next-instance bit and the SUBSEQUENT methods count */
     u32* inline_indices; /* the 3D inline index methods' indices, widened to u32, until END draws them */
     u32 inline_n, inline_cap;
     /* the copy engine's launches of the job running: a submission-time copy of a linear source belongs to one */
@@ -201,19 +201,19 @@ enum {
     KR_CP_ACQ,     /* compute report semaphore acquire */
     KR_DMA_SEM,    /* copy engine launch with its completion semaphore */
     /* not releases: other work of the stream that writes memory, for release-only mode to account for */
-    KR_I2M,        /* an inline-to-memory launch */
-    KR_DMA_COPY,   /* a copy engine launch */
-    KR_2D,         /* a 2D blit */
-    KR_COMPUTE,    /* a compute launch */
+    KR_I2M,      /* an inline-to-memory launch */
+    KR_DMA_COPY, /* a copy engine launch */
+    KR_2D,       /* a 2D blit */
+    KR_COMPUTE,  /* a compute launch */
     KR_KINDS
 };
 /* each release method performed, on the GPU thread (hle/nvn/kick.c's trace), when set */
 extern void (*g_gpu_release_note)(u32 ch, u64 job, int kind, int in_macro, u32 entry, u32 entries, u64 detail);
-#define GPU_RELEASE_NOTE(ch, kind, detail) \
-    do { \
-        if (g_gpu_release_note) \
-            g_gpu_release_note((ch)->id, (ch)->dma_job_id, (kind), (ch)->mme.running, (ch)->job_entry, (ch)->job_n, \
-                               (detail)); \
+#define GPU_RELEASE_NOTE(ch, kind, detail)                                                                             \
+    do {                                                                                                               \
+        if (g_gpu_release_note)                                                                                        \
+            g_gpu_release_note((ch)->id, (ch)->dma_job_id, (kind), (ch)->mme.running, (ch)->job_entry, (ch)->job_n,    \
+                               (detail));                                                                              \
     } while (0)
 
 /* the engines' methods (engines.c, compute.c, fermi2d.c, dma.c): m is the method, last marks a batch's last word */
@@ -231,8 +231,8 @@ void dma_snap_reset(u32 channel);              /* the channel closed: what it qu
 /* maxwell3d.c: the record of GPU-side writes. Each write stamps a new generation on the pages it covers, by GPU
    address and by the guest pages behind them */
 void gpu_mem_written(u64 gva, u64 size);
-void gpu_mem_written_shader(u64 gva, u64 size); /* a shader's result landing in guest memory */
-u64 gpu_mem_generation(void);                   /* the last generation fully published */
+void gpu_mem_written_shader(u64 gva, u64 size);    /* a shader's result landing in guest memory */
+u64 gpu_mem_generation(void);                      /* the last generation fully published */
 int gpu_mem_dirty_since(u64 since, u64 a, u64 sz); /* a GPU-side write after since touched [a, a + sz) */
 
 /* ---- gpu.c: GPFIFO submission and the GPU thread's queue */
@@ -267,6 +267,12 @@ extern void (*g_gpu_before_write)(u64 gva, u64 size);
    results may land later, when they are read (set when it starts) */
 extern void (*g_gpu_barrier)(void);
 extern int g_gpu_releases; /* the renderer holds releases waiting to happen (renderer.h release_need) */
+/* the NVN path's render thread (hle/nvn/cmdlist.c) replays what the game submitted after the submit returns. A
+   GPFIFO submission or a call carries the count of host jobs queued when it came (g_gpu_host_ticket), and the GPU
+   thread waits for those to finish before running it, holding no lock: its releases (the fences the game waits on)
+   then come after the replayed work, as on the console. Both are set when that thread starts */
+extern u64 (*g_gpu_host_ticket)(void);
+extern void (*g_gpu_host_wait)(u64 ticket);
 /* the renderer's memory lock held across a change of backing. full is for CPU guest pages, whose GPU aliases are
    unknown; GPU address space changes give the range. Begin is taken before the memory manager's own lock */
 extern void (*g_gpu_mapping_begin)(u64 gva, u64 size, int full);

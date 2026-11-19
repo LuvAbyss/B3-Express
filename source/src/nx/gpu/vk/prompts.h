@@ -4,13 +4,15 @@
 #ifndef SNX_VK_PROMPTS_H
 #define SNX_VK_PROMPTS_H
 #include "nx/gpu/vk/vk.h"
+#include "common/utilities/pad_map.h"
 
 /* texture.c, a texture made from memory: remembers it when it is the game's button atlas, and paints it */
 void vk_prompts_texture(u64 gva, const VkFmt* f, u32 w, u32 h, u32 bh_log2);
 /* once a present: guest memory gets the set gamepad_prompts asks for */
 void vk_prompts_frame(void);
-/* the parts, for tests: one ASTC block from 4 x 4 RGBA texels (row stride in texels); a set painted over an atlas */
+/* the parts, for tests: one ASTC block from 4 x 4 RGBA texels (row stride in texels); a set painted over
+   a copy of the game's atlas, each cell showing the control that sends its button */
 void vk_prompts_astc_block(const uint8_t* rgba, int stride, uint8_t* out);
-void vk_prompts_paint(uint8_t* mem, int family, int by_letter);
+void vk_prompts_paint(uint8_t* mem, const uint8_t* game, int family, const SnxPadMap* map);
 
 #endif

@@ -37,6 +37,8 @@ void (*g_gpu_release_note)(u32 ch, u64 job, int kind, int in_macro, u32 entry, u
 int g_gpu_releases;
 void (*g_gpu_mapping_begin)(u64 gva, u64 size, int full);
 void (*g_gpu_mapping_end)(void);
+u64 (*g_gpu_host_ticket)(void);
+void (*g_gpu_host_wait)(u64 ticket);
 
 /* ------------------------------------------------------------ guest memory through the GPU's address space */
 /* the runs of guest memory behind [gva, gva + size), copied in or out: 1 when every page was mapped. An unmapped
@@ -141,8 +143,7 @@ static u64 bl_yz(u32 y, u32 z, u32 wb, u32 h, u32 bh, u32 bd) {
     u64 rows = ((((u64)h + 7) >> 3) + (1u << bh) - 1) >> bh; /* block rows in a slice of blocks */
     u64 block = (u64)512 << (bh + bd);
     u64 in_block = ((((u64)z & ((1u << bd) - 1)) << bh) + (gy & ((1u << bh) - 1))) << 9;
-    return (((u64)(z >> bd) * rows + (gy >> bh)) * gobs_x) * block + in_block + (((y & 7) >> 1) << 6) +
-           ((y & 1) << 4);
+    return (((u64)(z >> bd) * rows + (gy >> bh)) * gobs_x) * block + in_block + (((y & 7) >> 1) << 6) + ((y & 1) << 4);
 }
 u64 bl_offset(u32 x_bytes, u32 y, u32 z, u32 width_bytes, u32 height, u32 bh_log2, u32 bd_log2) {
     return bl_x(x_bytes, bh_log2, bd_log2) + bl_yz(y, z, width_bytes, height, bh_log2, bd_log2);
@@ -321,15 +322,15 @@ static void reset_3d(u32* r) {
     r[0x566] = r[0x567] = r[0x568] = 1;
     r[0x569] = 0x207;
     r[0x3D6] = r[0x3D7] = 0xFFFFFFFF;
-    r[0x4C3] = 0x207; /* depth test always */
-    r[0x647] = 0x900; /* front face clockwise, NVN's */
-    r[0x648] = 0x405; /* cull the back */
-    r[0x546] = f1;    /* point size */
+    r[0x4C3] = 0x207;                                /* depth test always */
+    r[0x647] = 0x900;                                /* front face clockwise, NVN's */
+    r[0x648] = 0x405;                                /* cull the back */
+    r[0x546] = f1;                                   /* point size */
     for (i = 0; i < 32; i++) r[0x458 + i] = 1u << 6; /* vertex attributes constant until set */
-    r[0xDF] = 1;                                      /* rasterize */
-    r[0x3EB] = 1;                                     /* color target MRT */
-    r[0x4EC] = r[0x4ED] = f1;                         /* line widths */
-    r[0x36B] = r[0x36C] = 0x1B02;                     /* polygons filled */
+    r[0xDF] = 1;                                     /* rasterize */
+    r[0x3EB] = 1;                                    /* color target MRT */
+    r[0x4EC] = r[0x4ED] = f1;                        /* line widths */
+    r[0x36B] = r[0x36C] = 0x1B02;                    /* polygons filled */
     for (i = 0; i < 8; i++) r[0x680 + i] = 0x11111111;
     r[0x56E] = 1;
     r[0x556] = 1;
@@ -340,7 +341,7 @@ static void channel_reset(GpuChannel* ch) {
     memcpy(ch->sub_class, classes, sizeof classes);
     reset_3d(ch->r3d);
     memcpy(ch->r3d_shadow, ch->r3d, sizeof ch->r3d_shadow); /* the reset values count as tracked */
-    ch->r2d[0x83] = ch->r2d[0x8F] = 1; /* the 2D surfaces' depth, as NVIDIA's driver assumes */
+    ch->r2d[0x83] = ch->r2d[0x8F] = 1;                      /* the 2D surfaces' depth, as NVIDIA's driver assumes */
 }
 /* the channel of syncpoint id, made at its first submission. The queue's lock held */
 static GpuChannel* channel_get(u32 id) {
@@ -539,7 +540,7 @@ static int park_over(GpuChannel* ch, i64* again) {
                    ch->park == GPU_PARK_REPORT ? "1" : "2", park_name(ch->park), (unsigned long long)ch->park_addr,
                    ch->park_geq ? "reach" : "be", ch->park_val,
                    ch->park == GPU_PARK_SYNCPOINT || ch->park == GPU_PARK_FENCE ? syncpt_read((u32)ch->park_addr)
-                                                                               : gmem_r32(ch->park_addr));
+                                                                                : gmem_r32(ch->park_addr));
         ch->park = 0;
         may_have_changed();
         return 1;
@@ -560,12 +561,13 @@ struct GpuItem {
     void (*fn)(void*); /* set for a call */
     void* arg;
     u32 chans[4], nchans;
-    u64 id; /* a job's */
+    u64 id;   /* a job's */
+    u64 host; /* the host jobs queued before it (g_gpu_host_ticket), which it waits for */
     u32 chan, incs, wait_id, wait_val, expect;
-    u32 n, pf;        /* the entries, and those before the first SYNC entry, fetched at submission into words */
-    u32 entry, word;  /* where the stream goes on */
+    u32 n, pf;       /* the entries, and those before the first SYNC entry, fetched at submission into words */
+    u32 entry, word; /* where the stream goes on */
     int started;
-    u32* late;        /* the entries the GPU thread fetched: [late_first, late_end) */
+    u32* late; /* the entries the GPU thread fetched: [late_first, late_end) */
     u32 late_cap, late_first, late_end;
 };
 #define QUEUE_ROOM 256 /* runnable jobs at most: jobs of a waiting channel don't count */
@@ -573,8 +575,8 @@ static PMutex g_qlk = PMUTEX_INIT;
 static PCond g_qcv;
 static int g_qcv_ready, g_qthread;
 static GpuItem *g_qhead, *g_qtail;
-static u64 g_qgen;           /* bumped by each new item and kick: a pass that saw an older one looks again */
-static u32 g_qjobs[128];     /* each channel's queued jobs */
+static u64 g_qgen;       /* bumped by each new item and kick: a pass that saw an older one looks again */
+static u32 g_qjobs[128]; /* each channel's queued jobs */
 static u32 g_qtotal;
 static u8 g_qparked[128];    /* the channel's oldest job waits (gpu_park) */
 static u8 g_scan_stale[128]; /* the channel closed: its submission scan starts again from reset */
@@ -721,6 +723,7 @@ static int run_pass(i64* wake) {
                 g_qhead = it->next;
             if (g_qtail == it) g_qtail = prev;
             pm_unlock(&g_qlk);
+            if (it->host) g_gpu_host_wait(it->host);
             it->fn(it->arg);
             item_free(it);
             pm_lock(&g_qlk);
@@ -742,6 +745,7 @@ static int run_pass(i64* wake) {
             g_qparked[it->chan] = 0;
         }
         pm_unlock(&g_qlk);
+        if (it->host && !it->started) g_gpu_host_wait(it->host);
         done = run_job(it);
         pm_lock(&g_qlk);
         if (!done)
@@ -812,6 +816,7 @@ void gpu_call(void (*fn)(void*), void* arg, const u32* chans, u32 nchans) {
     if (nchans > 4) nchans = 4;
     if (nchans) memcpy(it->chans, chans, nchans * sizeof *chans);
     it->nchans = nchans;
+    it->host = g_gpu_host_ticket ? g_gpu_host_ticket() : 0;
     pm_lock(&g_qlk);
     queue_init();
     queue_append(it);
@@ -863,8 +868,7 @@ static void scan_job(GpuScan* s, const GpuItem* j) {
         for (i = 0; i < len; i++) {
             u32 sub, m, v;
             int last;
-            if (pb_decode(&s->pb, w[i], &sub, &m, &v, &last) &&
-                !scan_method(s, j->chan, j->id, &launches, sub, m, v)) {
+            if (pb_decode(&s->pb, w[i], &sub, &m, &v, &last) && !scan_method(s, j->chan, j->id, &launches, sub, m, v)) {
                 s->stopped = 1;
                 break;
             }
@@ -917,6 +921,7 @@ u64 gpu_submit(const void* entries, u32 n, u32 channel, u32 incs, u32 wait_id, u
     j->wait_id = wait_id;
     j->wait_val = wait_val;
     j->expect = expect;
+    j->host = g_gpu_host_ticket ? g_gpu_host_ticket() : 0;
     pm_lock(&g_qlk);
     queue_init();
     stale = !g_gpu.chan[channel] || g_scan_stale[channel];

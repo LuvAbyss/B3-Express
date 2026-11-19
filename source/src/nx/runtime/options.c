@@ -24,7 +24,8 @@
 
 int g_opt_fullscreen, g_opt_docked = 1, g_opt_lang = 1, g_opt_fps = SNX_FPS_GAME, g_opt_diag, g_opt_shadows = 1;
 int g_opt_prof, g_opt_auto_stub_ipc = 1, g_opt_network, g_opt_vsync = 1, g_opt_aniso, g_opt_mute_unfocused = 1;
-int g_opt_cutscene_fps = 30, g_opt_film_grain = 1, g_opt_model_lod, g_opt_dither = 3, g_opt_fast_renderer = 1;
+int g_opt_frame_rate = 60, g_opt_cutscene_fps = 30, g_opt_film_grain = 1, g_opt_model_lod, g_opt_dither = 3,
+    g_opt_fast_renderer = 1;
 int g_opt_hud_area;
 float g_opt_resf = 1, g_opt_lod_bias, g_opt_aspect, g_opt_fsr, g_opt_fsr_sharpness = 0.2f;
 
@@ -158,6 +159,11 @@ static const IniOpt g_performance[] = {
      "game = the pace the game asks for, as on the console (60 FPS, or 30 for a game made for 30); 0 = no limit;\n"
      "10 to 1000 = that many frames a second. F4 turns the limit off and on",
      INI_TEXT, 0, NULL, 0, 0, fps_set, "FPS limit", NULL, 0, 0},
+    {"frame_rate", "60",
+     "The game's own rate: 60 as on the console; 61 to 120 = play, menus and cutscenes run at that rate in real time\n"
+     "(cutscenes as with cutscene_fps=60). Experimental: the game's timing that counts frames runs faster, and it\n"
+     "needs a game module compiled with the .tablecalls file. Bayonetta 3 v1.2.0 only (hle/scene60.c)",
+     INI_INT, INI_STARTUP, &g_opt_frame_rate, 60, 120, NULL, "Frame rate", NULL, 0, 0},
     {"memory_gb", "0",
      "The memory the game sees: below 6 the console's 3.2 GB, 6 = 4.8 GB, 8 = 6.8 GB. A game that runs out on\n"
      "the console's amount needs 6",

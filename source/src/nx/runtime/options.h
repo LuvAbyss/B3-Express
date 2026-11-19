@@ -42,6 +42,7 @@ extern float g_opt_resf;  /* resolution: the scale of render targets */
 extern float g_opt_fsr, g_opt_fsr_sharpness; /* fsr: scene smaller than resolution by this, 0 off; stops */
 extern int g_opt_vsync;                      /* vsync: 0 = at once, 1 = mailbox, 2 = FIFO */
 extern int g_opt_mute_unfocused; /* mute_unfocused: 1 = the sound stops while another window has the focus */
+extern int g_opt_frame_rate;     /* frame_rate: 60, or 61 to 120 where hle/scene60.c knows the game */
 extern int g_opt_cutscene_fps;   /* cutscene_fps: 30 as the game asks, 60 where hle/scene60.c knows the game */
 extern int g_opt_dither;         /* dither: the game's screen-door fade, gpu/vk/dither.h's DITHER_* */
 extern int g_opt_fast_renderer;  /* fast_renderer: 1 = SNX_NVN_FRONTEND=2 and RELEASE_ONLY=1 unless set (main.c) */

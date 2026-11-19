@@ -573,7 +573,20 @@ static void ww_take_changed(void) {
     for (int i = 0; i < n; i++) ww_mark_range(c[i].a, c[i].e);
 }
 
-int vk_written_since(const u8* host, u64 len, u32 since) {
+/* textures' checks inside an NVN window (vk_ww_window): each 4 MB leaf is scanned once a window, one GetWriteWatch for
+   every texture in it instead of one a texture (0.2-0.5 ms a heavy frame, diagnostics/fps90-20261118). The window's
+   lists were all submitted before it opened, so what they read was written before its first scan. A write after it
+   is found by the next window's scan */
+static u32 g_ww_win; /* the open window's number, 0 outside one */
+static u32 g_wscanned[AS_SIZE >> WW_LEAF_SHIFT];
+void vk_ww_window(int open) {
+    static u32 n;
+    g_ww_win = open ? (++n ? n : ++n) : 0;
+}
+static int written_since(const u8* host, u64 len, u32 since, int shared);
+int vk_written_since(const u8* host, u64 len, u32 since) { return written_since(host, len, since, 0); }
+int vk_tex_written_since(const u8* host, u64 len, u32 since) { return written_since(host, len, since, 1); }
+static int written_since(const u8* host, u64 len, u32 since, int shared) {
     if (!g_ww || !host || !len) return -1;
     if (g_ww < 0) {
         g_ww = plat_ww_scan(g_mem, 4096, ww_mark) == 0;
@@ -589,12 +602,22 @@ int vk_written_since(const u8* host, u64 len, u32 since) {
     }
     g_wclock++;
     ww_take_changed();
-    if (plat_ww_scan((u8*)host, len, ww_mark) < 0) {
+    u64 o = (u64)(host - g_mem);
+    if (shared && g_ww_win && o < AS_SIZE && len <= AS_SIZE - o) {
+        for (u64 l = o >> WW_LEAF_SHIFT; l <= (o + len - 1) >> WW_LEAF_SHIFT && shared; l++)
+            if (g_wscanned[l] != g_ww_win) {
+                if (plat_ww_scan(g_mem + (l << WW_LEAF_SHIFT), 1ull << WW_LEAF_SHIFT, ww_mark) < 0)
+                    shared = 0; /* a leaf past the watched range: the texture's own range below */
+                else
+                    g_wscanned[l] = g_ww_win;
+            }
+    } else
+        shared = 0;
+    if (!shared && plat_ww_scan((u8*)host, len, ww_mark) < 0) {
         g_ww = 0;
         LOG("vulkan: write tracking failed, caches check contents\n");
         return -1;
     }
-    u64 o = (u64)(host - g_mem);
     for (u64 pg = o >> 12, e = (o + len - 1) >> 12; pg <= e;) {
         u64 l = pg >> (WW_LEAF_SHIFT - 12), lend = (l + 1) << (WW_LEAF_SHIFT - 12);
         if (g_wleaf_max[l] > since) {
@@ -1081,8 +1104,7 @@ void vk_buf_frame(void) {
             (unsigned long long)g_copy_peak, (unsigned long long)g_copy_stage, (unsigned long long)g_copy_owned,
             (unsigned long long)g_read_bound, (unsigned long long)g_wb_outputs, (unsigned long long)g_wb_bytes,
             (unsigned long long)g_wb_waits, (unsigned long long)(g_wb_wait_ns / 1000000),
-            (unsigned long long)g_wb_reuses, (unsigned long long)g_wb_targets,
-            (unsigned long long)g_wb_target_submits);
+            (unsigned long long)g_wb_reuses, (unsigned long long)g_wb_targets, (unsigned long long)g_wb_target_submits);
         LOG("vulkan: buffer waits: draw=%llu/%llums read=%llu/%llums write=%llu/%llums signal=%llu/%llums syncwait=%llu/%llums map=%llu/%llums draw_landed=old_frame:%llu changed:%llu composed=%llu+%llu\n",
             (unsigned long long)g_wb_reason[WB_DRAW], (unsigned long long)(g_wb_reason_ns[WB_DRAW] / 1000000),
             (unsigned long long)g_wb_reason[WB_READ], (unsigned long long)(g_wb_reason_ns[WB_READ] / 1000000),
