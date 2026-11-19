@@ -14,12 +14,22 @@ never the user's save. The notes behind each section are in the `diagnostics/*/R
 
 | | |
 |---|---|
-| Latest release | 0.3.5 (2026-11-19), packaged from `43e6f1c` (runtime `7e51999c`) and pushed (`23547fa`); the user publishes it on GitHub |
-| Installed in `output/` | 0.3.5's runtime plus the present slack change (runtime `5556e5c7`, game code `f13c034c`), 2026-11-19, uncommitted. Rollback: `diagnostics/install-20261119/` |
+| Latest release | 0.3.6 (2026-11-19), packaged from `d874ad0` (runtime `447f4090`), committed, not pushed; 0.3.5 pushed (`23547fa`) |
+| Installed in `output/` | 0.3.6's code (runtime `5556e5c7`, built before the commit, so stamped `23547fa`; game code `f13c034c`), 2026-11-19. Rollback: `diagnostics/install-20261119/` |
 | Played | the AMD fixes on the RX 6700 XT (2026-11-16) and on an NVIDIA card (2026-11-17): no graphics bugs seen |
 | Stability | 0.3.0: 8 fight routes and a preparation pass on the RTX 3080, no crash (section below) |
-| In progress | Everything below marked "not released" went into 0.3.5. The user played the 90 FPS build (installed 2026-11-18, `diagnostics/install-20261118c/`); the recording cuts and the double-tap fix are not played by hand and not installed |
+| In progress | Nothing unreleased. 0.3.6's slack change is installed, not played by hand yet |
 | Next | 90 FPS step 2, the game's frame counters; FSR 3.1: plan below, not started |
+
+## Release 0.3.6 (2026-11-19)
+
+- **Contents:** the present slot's slack, 250 to 50 us: fewer frames late for the screen at 90 (section below).
+- **Files:** code commit `d874ad0`; runtime `447f4090`; zip `ab1740a6`, 84.2 MB, 1,016 files; notes
+  `release/RELEASE-NOTES-0.3.6.md`.
+- **Measured:** fight route at 90, 1% low 57.2-57.7 to 58.8-60.4 FPS, about 2 ms more wait before the present (section
+  below). New-player test on the unzipped package (`test-fresh.py --web`, RTX 3080): Install from an extracted dump in
+  209 s, no error, next step Prepare shaders, the game drew 600 frames and exited 0.
+- **Not checked:** played by hand; an update's recompile (the game-code ABI is unchanged from 0.3.5); AMD and Intel.
 
 ## Release 0.3.5 (2026-11-19)
 
@@ -39,7 +49,7 @@ never the user's save. The notes behind each section are in the `diagnostics/*/R
 - **Not checked:** the recording cuts and the double-tap fix by hand; the launcher's 90 FPS switch in its window (logic
   tested, layout checked in a page preview); AMD and Intel.
 
-## 90 FPS: 1% low, the present slot's slack (2026-11-19; installed 2026-11-19, not committed)
+## 90 FPS: 1% low, the present slot's slack (2026-11-19; 0.3.6)
 
 - **Mechanism:** each frame's present slot came 250 us earlier than one period after the last, so the slot crept up on
   the frames until 1.5% of them came after it, each then 12.5-16 ms on the display. At 50 us it creeps a fifth as fast
