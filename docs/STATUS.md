@@ -14,8 +14,8 @@ never the user's save. The notes behind each section are in the `diagnostics/*/R
 
 | | |
 |---|---|
-| Latest release | 0.3.5 (2026-11-19), packaged from `43e6f1c` (runtime `7e51999c`), committed, not pushed; 0.3.0 (2026-11-16) pushed (`5c8c9d2`) |
-| Installed in `output/` | The render thread build (runtime `0b969bfb`, game code `f13c034c`), 2026-11-17. Rollback to 0.2.8 with the AMD fixes: `diagnostics/install-20261117/` |
+| Latest release | 0.3.5 (2026-11-19), packaged from `43e6f1c` (runtime `7e51999c`) and pushed (`23547fa`); the user publishes it on GitHub |
+| Installed in `output/` | 0.3.5's runtime plus the present slack change (runtime `5556e5c7`, game code `f13c034c`), 2026-11-19, uncommitted. Rollback: `diagnostics/install-20261119/` |
 | Played | the AMD fixes on the RX 6700 XT (2026-11-16) and on an NVIDIA card (2026-11-17): no graphics bugs seen |
 | Stability | 0.3.0: 8 fight routes and a preparation pass on the RTX 3080, no crash (section below) |
 | In progress | Everything below marked "not released" went into 0.3.5. The user played the 90 FPS build (installed 2026-11-18, `diagnostics/install-20261118c/`); the recording cuts and the double-tap fix are not played by hand and not installed |
@@ -38,6 +38,30 @@ never the user's save. The notes behind each section are in the `diagnostics/*/R
   diff (ELF linking, test include paths, `g_frames` in `vi_service`, `window_icon`, `tex_upload_rows`).
 - **Not checked:** the recording cuts and the double-tap fix by hand; the launcher's 90 FPS switch in its window (logic
   tested, layout checked in a page preview); AMD and Intel.
+
+## 90 FPS: 1% low, the present slot's slack (2026-11-19; installed 2026-11-19, not committed)
+
+- **Mechanism:** each frame's present slot came 250 us earlier than one period after the last, so the slot crept up on
+  the frames until 1.5% of them came after it, each then 12.5-16 ms on the display. At 50 us it creeps a fifth as fast
+  and sits behind more of them.
+- **Files:** `gpu/vk/renderer.c` (`PT_SLACK`).
+- **Measured** (fight route at 90, `resolution=1.6`, no screenshots, two runs each): 1% low 57.2-57.7 to 58.8-60.4
+  FPS, 80-83 against 74-76 in steady play; frames of 12.5-16 ms 87-89 to 40-44; frames wait 1.0 to 2.7-3.3 ms on
+  average before the present (latency). The GPU sits at 50% load, so it isn't the limit.
+- **Not done:** what's left in the slowest 1% is the game loading at the area's title card and the result screen
+  (frames of about 68 ms) and new effects' shader translation and pipelines on their first draw (20-39 ms); not
+  played by hand; not on AMD. Notes: `diagnostics/fps90-20261118/README.md`.
+
+## 90 FPS: the fight holds it (measured 2026-11-19; no code change)
+
+- **Mechanism:** none new. 0.3.5's code, measured on the heavy fight at 90 to find recording's next cost.
+- **Files:** none. A packed render-target key array (`nvn_res.c`) was tried and taken out: no measurable effect.
+- **Measured** (fight route at 90, isolated copy, `resolution=1.6`, three runs): frames on the display have an
+  11.25 ms median and a 12.5-15 ms p99 in every window; 1-5 of 600 are over 19 ms, about what the screenshots cost;
+  the pacer still holds 5-6 ms a frame in the heaviest windows. Recording varies about 0.6 ms between two runs of one
+  build. One window a frame; the driver is about 0.4 ms a frame.
+- **Not done:** step 2 (frame-counted game logic 1.5x fast at 90); not played by hand; not on AMD. Notes:
+  `diagnostics/fps90-20261118/README.md`.
 
 ## 90 FPS, step 1: clock floor and pacing (2026-11-18; 0.3.5)
 

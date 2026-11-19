@@ -206,3 +206,69 @@ Outside a window, and for buffers and the mirror, the check scans the caller's o
 windows (0.3 to 0.2 in the others); lists 4.1-4.3 to 3.7-3.8 ms and 3.8-4.0 to 3.3-3.5 in the heaviest. No crash,
 no "write tracking failed". Screenshots differ from `rec90-s` by animation timing only, about as much as `rec90-r`
 differs from `rec90-s` (two builds without this change).
+
+## The fight holds 90; what recording still costs (2026-11-19)
+
+The question: does the heavy fight hold 90 on current code (0.3.5's), and what is recording's next largest cost?
+Runs on the fight route at 90, `resolution=1.6`, on a quiet PC (no other game, nothing above 3% of the GPU).
+
+- **The display holds 90.** `rec90-t`, `rec90-v` (both 0.3.5's code) and `rec90-w` (the change below), every 7 s
+  window from 35 s to the end: median 11.25 ms, p99 12.5-15.3 ms (one 18.0), 590-599 of 600 frames under 14 ms, 1-5
+  over 19 ms. The screenshot frames (one every 450, about 100 ms each) make about 1.3 of those per 600. The pacer
+  still holds 5.1-6.3 ms of each frame in the heaviest windows. Recording no longer decides whether a fight holds 90.
+- **Run to run, recording varies by about 0.6 ms.** `rec90-t` and `rec90-v`, the same build: lists 3.28 against 3.90
+  ms at 76 s, 3.54 against 3.95 at 110 s. A change worth less than that needs several runs to show.
+- **Windows per frame: one.** `prof90-d` (temporary counters): every sampled frame was one window, and no texture
+  missed the cache twice in a frame. A cache kept across windows saves nothing. Heavy frames miss 300-640 textures,
+  all the frame's, since the cache empties each frame; keeping it across frames still needs the write check (the
+  section above), and its views would outlive textures the cache evicts.
+- **Where the time goes** (`prof90-d`, every thread sampled each 1 ms, 110 s): the NVIDIA driver (`nvoglv64.dll`)
+  4,274 samples, about 0.4 ms a frame; in the runtime, `pb_decode` 1,002, `nvn_entry` 833, `gpu_thread` 740,
+  `plat_ns` 724, `vk_nvn_live_window` 475, `rp_target_of` 452 (about 0.05 ms a frame), `check_list_body` 442,
+  `rp_stage_set` 391, `tex_get` 316. Nearly all other host samples are threads waiting (ntdll).
+- **Tried and taken out:** the render targets' address and size packed in their own array (4 KB in place of 256
+  entries of about 700 bytes), so `rp_target_of` and `rp_target_vk` scan in cache. `rec90-w`: lists 3.33-3.92 ms in
+  the heaviest windows against `rec90-v`'s 3.73-4.13 and `rec90-t`'s 3.28-4.00, inside the run-to-run spread, as the
+  profile's 0.05 ms predicted. Not kept.
+
+Not done: step 2 (what the game counts in frames runs 1.5x fast at 90), which is now the open part of 90 FPS; binding
+4 as a dynamic offset (0.1-0.15 ms, rebuilds every pipeline cache); not played by hand; not on AMD.
+
+## 1% low at 90: the present slot's slack (2026-11-19)
+
+Fight route at 90, `resolution=1.6`, isolated copy, no screenshots (`shot_every=0`: each costs about 100 ms and would
+count), each frame's time on the display from `SNX_PRESENT_TIMES`, the GPU from `nvidia-smi` every 100 ms. The 1% low is
+the FPS of the mean of the slowest 1% of frames after the first 30 s (about 6,150 frames, so the slowest 61).
+
+**What the slowest 1% are** (`low90-a`, `low90-b`, 0.3.5's code; the same frames in both runs):
+
+- Two frames of about 68 ms and a few of 25-36 ms at the area's title card (66.6 s) and the result screen (85.6 s): the
+  time is after the last window, on the game's side, while it loads. 135 ms of the 1,080 ms the 61 frames add up to.
+- Six frames of 20-39 ms when new effects first draw (50.3, 63.0, 71.0, 107.8 s): the render thread translates their
+  shader stages (up to 60 in a frame, 16 ms; 0.14 ms translating and 0.12 ms in `vkCreateShaderModule` each, SPIR-V
+  128 KB for 3 KB of code) and then waits for each new pipeline in turn (5-8 ms). One frame (62.0 s) decodes 13 Mpx
+  of ASTC.
+- The rest: 87-96 frames of 12.5-16 ms in steady play. They weren't late for their present slot (0.25 ms after it,
+  as all frames); the slot itself was. `pt_hand` (`renderer.c`) gives each frame a slot `PT_SLACK` earlier than one
+  period after the last, so the slot creeps up on the frames until they come after it; a frame that does is shown
+  when it comes, and the schedule moves with it, so that frame is long on the display. At 250 us that settled where
+  frames reached the present a median 0.5 ms before their slot, and 1.5% of them after it.
+- The GPU isn't the limit: 50% load on average at 1.87-1.89 GHz, 148 W, 48-53 C, 4.7 GB of VRAM.
+
+**Changed:** `PT_SLACK` 250 to 50 us (`renderer.c`). The slot creeps a fifth as fast, so it sits behind more of the
+frames.
+
+| run | slack | 1% low | 0.1% low | frames 12.5-16 ms | over 19 ms | held before the present, median / mean |
+|---|---|---|---|---|---|---|
+| `low90-a`, `low90-b` | 250 us | 57.7, 57.2 | 23.7, 23.0 | 87, 89 | 12, 12 | 0.49-0.55 / 1.04-1.05 ms |
+| `slack50-a`, `-b` (test build) | 50 us | 59.6, 58.9 | 24.0, 23.8 | 34, 39 | 11, 13 | 1.70-1.77 / 2.85-3.03 ms |
+| `slack25-a`, `-b` (test build) | 25 us | 61.5, 60.5 | 24.9, 25.3 | 31, 45 | 10, 9 | 2.30-2.51 / 3.65-3.87 ms |
+| `slack50-c`, `-d` (the change alone) | 50 us | 60.4, 58.8 | 24.1, 24.0 | 40, 44 | 11, 10 | 1.77-1.85 / 2.73-3.30 ms |
+
+In the steady parts (35-45 s, 85-95 s) the 1% low went from 74-76 to 80-83 FPS. The cost is latency: frames wait
+about 2 ms longer, on average, before the present. 25 us didn't cut the long frames further and held another 0.8 ms,
+so 50. The temporary builds (`-a`, `-b` rows) carried timing lines that cost about 1 FPS of 1% low.
+
+Not done: the shader stages and pipelines new effects need on their first draw (translation is under `vk_lock`, so
+workers can't share it as it is; keeping prepared modules would take about 1 GB); the game's own loads at transitions;
+not played by hand; not on AMD; no screenshots compared (the change moves only when frames are presented).

@@ -273,7 +273,8 @@ static void flip_src(VkImageBlit* b, u32 transform) {
    PT_SLACK early, so the schedule drifts back toward the frames as they come and doesn't stay behind after a late
    one. Under vk_queue_lock, not vk_lock, which recording holds for long stretches: g_pt's fields and the numbers,
    and g_pt_lock with g_pt for the thread's wait */
-#define PT_SLACK 250000ull /* ns */
+/* 50 us: at 250 the slot crept up on the frames until 1.5% of them came after it, each 12.5-16 ms on the display */
+#define PT_SLACK 50000ull /* ns */
 typedef struct {
     VkSwapchainKHR sc; /* VK_NULL_HANDLE: none waiting */
     VkSemaphore sem;
