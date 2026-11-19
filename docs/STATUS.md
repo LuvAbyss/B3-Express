@@ -14,7 +14,7 @@ never the user's save. The notes behind each section are in the `diagnostics/*/R
 
 | | |
 |---|---|
-| Latest release | 0.3.6 (2026-11-19), packaged from `d874ad0` (runtime `447f4090`), committed, not pushed; 0.3.5 pushed (`23547fa`) |
+| Latest release | 0.3.6 (2026-11-19), packaged from `d874ad0` (runtime `447f4090`) and pushed (`cc87675`); the user publishes it on GitHub |
 | Installed in `output/` | 0.3.6's code (runtime `5556e5c7`, built before the commit, so stamped `23547fa`; game code `f13c034c`), 2026-11-19. Rollback: `diagnostics/install-20261119/` |
 | Played | the AMD fixes on the RX 6700 XT (2026-11-16) and on an NVIDIA card (2026-11-17): no graphics bugs seen |
 | Stability | 0.3.0: 8 fight routes and a preparation pass on the RTX 3080, no crash (section below) |
