@@ -10,18 +10,36 @@ Test PC: Ryzen 7 5700X3D with an RTX 3080, except 2026-11-14 to 16 with an RX 67
 (`diagnostics/nvn-phase5-20261030/route-remnant9.txt`) in the isolated copy (`diagnostics/desktop-launch-20261028/isolated`),
 never the user's save. The notes behind each section are in the `diagnostics/*/README.md` it names.
 
-## Now (2026-11-17)
+## Now (2026-11-19)
 
 | | |
 |---|---|
-| Latest release | 0.3.0 (2026-11-16), packaged and pushed (`5c8c9d2`); the user publishes it on GitHub |
+| Latest release | 0.3.5 (2026-11-19), packaged from `43e6f1c` (runtime `7e51999c`), committed, not pushed; 0.3.0 (2026-11-16) pushed (`5c8c9d2`) |
 | Installed in `output/` | The render thread build (runtime `0b969bfb`, game code `f13c034c`), 2026-11-17. Rollback to 0.2.8 with the AMD fixes: `diagnostics/install-20261117/` |
 | Played | the AMD fixes on the RX 6700 XT (2026-11-16) and on an NVIDIA card (2026-11-17): no graphics bugs seen |
 | Stability | 0.3.0: 8 fight routes and a preparation pass on the RTX 3080, no crash (section below) |
-| In progress | The replay on its own thread: built, measured (section below) and installed; not committed, not played. Prompts that follow the button map (issue 14): built, checked in the isolated copy (Xbox, PlayStation, Switch) and installed 2026-11-18 (`diagnostics/install-20261118/`); not committed, not played. Cheats in Atmosphère's format (issue 15): built, tested in the isolated copy, installed 2026-11-18 (`diagnostics/install-20261118b/`); not committed, not played. 90 FPS step 1 (`frame_rate`): built, runs at 90 in real time in the isolated copy, installed 2026-11-18 with `frame_rate=90` (`diagnostics/install-20261118c/`); not committed, not played |
+| In progress | Everything below marked "not released" went into 0.3.5. The user played the 90 FPS build (installed 2026-11-18, `diagnostics/install-20261118c/`); the recording cuts and the double-tap fix are not played by hand and not installed |
 | Next | 90 FPS step 2, the game's frame counters; FSR 3.1: plan below, not started |
 
-## 90 FPS, step 1: clock floor and pacing (2026-11-18; installed, not released)
+## Release 0.3.5 (2026-11-19)
+
+- **Contents:** the replay on its own thread, 90 FPS step 1 with the double-tap window in game time, cheats (issue 15),
+  prompts by button map (issue 14), and two recording cuts for a steadier 90: a stage's descriptor set reused when
+  every write matches the draw before's, and textures' write checks scanning each 4 MB block once a window instead of
+  once a texture (`buffer.c` `vk_tex_written_since`). Launcher: a 90 FPS switch on the Graphics page (`frame_rate` 90
+  when on, 60 when off; a rate above 60 set by hand stays while it is on).
+- **Files:** code commit `43e6f1c`; runtime `7e51999c`; zip `377fc30a`, 84.2 MB, 1,016 files.
+- **Measured:** the recording cuts, fight route at 90 (`diagnostics/fps90-20261118/README.md`): lists 0.3-0.7 ms
+  shorter in heavy frames, screenshots matching earlier builds apart from animation timing. New-player test on the
+  unzipped package (`test-fresh.py --web`, RTX 3080): Install from an extracted dump in 243 s, no error, next step
+  Prepare shaders, the game ran and exited 0. With the code stamp removed, as an update does, the game code compiled
+  again in 14.0 s (83 blocks, the cache from the install). `test_launcher.py`, `snx-test-cheat`, `runtime_present`,
+  `runtime_nro` and `code_patches` pass. 13 ctest cases fail on this Windows host for causes outside this release's
+  diff (ELF linking, test include paths, `g_frames` in `vi_service`, `window_icon`, `tex_upload_rows`).
+- **Not checked:** the recording cuts and the double-tap fix by hand; the launcher's 90 FPS switch in its window (logic
+  tested, layout checked in a page preview); AMD and Intel.
+
+## 90 FPS, step 1: clock floor and pacing (2026-11-18; 0.3.5)
 
 The user wants 90 FPS first, then higher. The game's clock (`main+0xc1f600`) never lets a step drop under 1.0 (a
 60 Hz frame), so above 60 it would play fast.
@@ -42,7 +60,7 @@ The user wants 90 FPS first, then higher. The game's clock (`main+0xc1f600`) nev
   not played by hand; rides not run at 90; not on AMD; no launcher control yet. Notes:
   `diagnostics/fps90-20261118/README.md`.
 
-## Cheats in Atmosphère's format (issue 15, 2026-11-18; installed, not released)
+## Cheats in Atmosphère's format (issue 15, 2026-11-18; 0.3.5)
 
 A player asked for cheats. Switch cheats are Atmosphère cheat files (`cheats/<build id>.txt`): small programs the
 console's `dmnt` runs beside the game, writing memory. The ones shared for our build (`B47CC79B88B7091E`) are 17,
@@ -76,7 +94,7 @@ compiled already. So cheats go two ways.
   turning cheats on or off while the game runs (only at start). A data-only cheat toggled still compiles again
   (`shortcut:` in `code_mods`). Our own built-in cheat list (the second half of the request): not started.
 
-## Prompts follow the button map (issue 14, 2026-11-17; installed 2026-11-18, not released)
+## Prompts follow the button map (issue 14, 2026-11-17; 0.3.5)
 
 An Xbox player mapped each button to its own letter (A bottom, B right, X left, Y top) and the prompts still showed
 the buttons by position, so every face prompt pointed at the wrong button. The Xbox and PlayStation pictures were
@@ -113,7 +131,7 @@ and left X and Y, and a map made in the game's controller menu wasn't read at al
   map). The four dots that show where a button sits only know A on the right or on the bottom. `tests/tex_upload_rows.c`
   doesn't compile against the current `texture.c` (older than this change).
 
-## The replay on its own thread (2026-11-17; not released)
+## The replay on its own thread (2026-11-17; 0.3.5)
 
 The game submits one command list a frame from its draw thread (`MainDraw`), and our hook replayed it into Vulkan
 inside that call: about 8 ms of a heavy fight, half of that thread's frame. The replay also held the lock every
@@ -411,6 +429,7 @@ Before 0.1.1. Not measured again on the current build (`diagnostics/chapter12-20
 
 | version | date | what changed |
 |---|---|---|
+| 0.3.5 | 2026-11-19 | 90 FPS (experimental, launcher switch), replay on its own thread, steadier recording, cheats (issue 15), prompts by button map (issue 14) |
 | 0.3.0 | 2026-11-16 | AMD dots, lines and floor grid fixed, game code compile cache (seconds after an update), compiler on every thread |
 | 0.2.8 | 2026-11-15 | AMD slow frames, shorter shader preparation, one-button update, Graphics and Controls pages, keyboard prompts, GPU name on any card, safe save restore, issue 13 message |
 | 0.2.7 | 2026-11-13 | keyboard and mouse, resolution steps without hitches, pipeline cache saved only when it grew |
