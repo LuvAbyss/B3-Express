@@ -3,6 +3,7 @@
 [![Latest release](https://img.shields.io/github/v/release/LuvAbyss/B3-Express)](https://github.com/LuvAbyss/B3-Express/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/LuvAbyss/B3-Express/total)](https://github.com/LuvAbyss/B3-Express/releases)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/luvabyss)
 
 Bayonetta 3 (v1.2.0) running natively on Windows. The game's code is recompiled on your own PC by [ScarletNX](https://github.com/scarletnx/ScarletNX), a static ARM64 to x86 recompiler, and a renderer on Vulkan draws it. The goal is a smooth 60 FPS and a launcher anyone can use, not higher frame rates.
 
@@ -58,6 +59,10 @@ The launcher's bundled Python isn't in this repository. Releases include it.
 ## Credits
 
 Thanks to the ScarletNX contributors, who are happy to see this project. The detail options and widescreen are ported from [Witch Time](https://github.com/Zexyen/Witch-Time), with thanks. Witch Time and B2recomp are also references and a comparison, see `source/docs/CREDITS.md`. `launcher/ATTRIBUTION.md` lists what the launcher adapts.
+
+## Support
+
+If you'd like to support the project, you can on [Ko-fi](https://ko-fi.com/luvabyss).
 
 ## License
 
