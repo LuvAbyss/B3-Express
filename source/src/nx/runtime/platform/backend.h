@@ -19,6 +19,13 @@ extern const IniOpt g_kbm_ini[];
    HidNpadButton bit): 0 no key, 1 a key cap with text (one to four of A-Z and 0-9), 2 the mouse's left button, 3 its
    right, 4 its wheel */
 int backend_kbm_prompt(int bit, char text[5]);
+/* 1 while mouse_camera is on: the right stick's prompts show the mouse */
+int backend_kbm_mouse_camera(void);
+/* the mouse camera's motion since the last call, in counts times mouse_sensitivity (y down, mouse_invert_y
+   applied), for the game's own camera to turn by (hle/mouse_look.c), from any thread: 0 while the window doesn't
+   hold the mouse. Each call marks the camera as taking the mouse, so for the next 100 ms the poll doesn't make the
+   mouse's motion into the right stick */
+int backend_mouse_look(float* dx, float* dy);
 /* Offers a .ini or command line setting to the backend, the on-screen controls and the unattended options: 1 when
    one of them took it */
 int backend_ini(const char* k, const char* v);

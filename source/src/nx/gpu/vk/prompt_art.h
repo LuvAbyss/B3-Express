@@ -95,6 +95,22 @@ static void keycap(uint8_t *s, const char *t) {
     box(s, strlen(t) > 3 ? 4 : 7, 9, strlen(t) > 3 ? 36 : 33, 31, 4, 1);
     text(s, t);
 }
+/* a key cap with arrows cut out: bit 0 up, 1 left, 2 down, 3 right; one arrow has a stem, several sit around the centre */
+static void arrow_cap(uint8_t *s, int dirs) {
+    static const float D[4][2] = {{0, -1}, {-1, 0}, {0, 1}, {1, 0}};
+    int n = (dirs & 1) + (dirs >> 1 & 1) + (dirs >> 2 & 1) + (dirs >> 3 & 1);
+    box(s, 7, 9, 33, 31, 4, 1);
+    for (int i = 0; i < 4; i++) {
+        if (!(dirs >> i & 1)) continue;
+        float dx = D[i][0], dy = D[i][1], k = n == 1 ? 6 : 3.4f, w = n == 1 ? 2.4f : 1.9f;
+        float cx = 20 + dx * (n == 1 ? 0 : 8), cy = 20 + dy * (n == 1 ? 0 : 6); /* apart, or four make a diamond */
+        float back = n == 1 ? 0 : k * .3f, side = n == 1 ? k * .8f : k;
+        float tx = cx + dx * k, ty = cy + dy * k, bx = cx - dx * back, by = cy - dy * back;
+        seg(s, tx, ty, bx - dy * side, by + dx * side, w, 0); /* the arrow's two sides, from its tip */
+        seg(s, tx, ty, bx + dy * side, by - dx * side, w, 0);
+        if (n == 1) seg(s, tx, ty, cx - dx * k, cy - dy * k, w, 0);
+    }
+}
 static void mouse(uint8_t *s, int button) {                 /* 0 none (it moves), 1 left, 2 right, 3 wheel */
     box(s, 12.5f, 8, 27.5f, 32, 7.5f, 1); box(s, 14.2f, 9.7f, 25.8f, 30.3f, 5.8f, 0);
     seg(s, 13, 19, 27, 19, 1.5f, 1);

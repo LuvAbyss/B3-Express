@@ -16,8 +16,9 @@
    a button sits (four dots) swap too. The Switch's set is painted the same way, from the game's own cells.
    The keyboard and mouse set (family 4) is ours, drawn with Witch Time's key cap and mouse pictures: each of the ten
    cells shows its control's first key or mouse button from [Keyboard and mouse] (backend_kbm_prompt), and is painted
-   again when a key changes. The sticks' and the D-pad's cells stay the Switch's. Witch Time's own keyboard set and its
-   BC3 atlas (ui_core_gb) aren't ported. */
+   again when a key changes. The sticks' and the D-pad's 31 cells (STICKS) show their keys too: one cap with each
+   direction's letter (WASD, AD), arrows for the arrow keys, the mouse for the right stick while it's the camera.
+   Witch Time's own keyboard set and its BC3 atlas (ui_core_gb) aren't ported. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -159,6 +160,66 @@ static const struct {
     const Cell* cell;
     int bit;
 } TEN[] = {{&A, 0}, {&B, 1}, {&X, 2}, {&Y, 3}, {&L1, 6}, {&R1, 7}, {&L2, 8}, {&R2, 9}, {&PLUS, 10}, {&MINUS, 11}};
+/* the sticks' and the D-pad's cells, for the keyboard and mouse set: which control (0 the left stick, 1 the right,
+   2 the D-pad) and the directions it shows (bit 0 up, 1 left, 2 down, 3 right), or PRESS for the stick's press. Seen
+   in the atlas decoded (SNX_PROMPTS_DUMP); the four widest reach x = 44 */
+enum { PRESS = 16, ALL = 15, UD = 5, LR = 10 };
+static const struct {
+    Cell cell;
+    int pad, dirs;
+} STICKS[] = {{{0, 0, 48}, 0, ALL},  {{56, 0, 48}, 1, ALL}, {{112, 0}, 1, ALL},     {{0, 44, 48}, 1, LR},
+              {{56, 44, 48}, 0, LR}, {{112, 44}, 0, ALL},   {{56, 132}, 0, ALL},    {{204, 132}, 0, 2},
+              {{0, 176}, 0, 8},      {{56, 176}, 0, UD},    {{160, 176}, 1, ALL},   {{0, 220}, 1, 2},
+              {{56, 220}, 1, 8},     {{112, 220}, 2, 2},    {{160, 220}, 2, ALL},   {{204, 220}, 2, 1},
+              {{0, 264}, 2, 4},      {{56, 264}, 2, 8},     {{112, 264}, 2, UD},    {{160, 264}, 2, LR},
+              {{204, 264}, 2, 1},    {{0, 308}, 2, 4},      {{56, 308}, 2, 2},      {{112, 308}, 2, 8},
+              {{0, 396}, 0, 1},      {{56, 396}, 0, 4},     {{112, 396}, 0, PRESS}, {{160, 396}, 1, 4},
+              {{204, 396}, 1, 1},    {{0, 440}, 1, PRESS},  {{56, 440}, 1, UD}};
+/* the control bits of a pad's directions (up, left, down, right): [Keyboard and mouse]'s key_move_*, key_look_*,
+   the D-pad's HidNpadButton bits; then each stick's press */
+static const int DIR_BIT[3][4] = {{41, 40, 43, 42}, {45, 44, 47, 46}, {13, 12, 15, 14}}, PRESS_BIT[2] = {4, 5};
+
+/* a stick's or the D-pad's cell from its keys: one key cap with each direction's letter (WASD), or arrows when its
+   keys are the arrow keys; the right stick is the mouse while the mouse is the camera. 0 when its keys can't be
+   drawn so (a mouse button, a long name): the Switch's cell stays */
+static int stick_picture(uint8_t* s, int pad, int dirs) {
+    static const char* const ARROW[4] = {"UP", "LEFT", "DOWN", "RGHT"};
+    char t[5], word[5] = {0};
+    int n = 0, arrows = 0;
+    memset(s, 0, S * S);
+    if (dirs == PRESS) {
+        int kind = backend_kbm_prompt(PRESS_BIT[pad], t);
+        if (kind == 1)
+            keycap(s, t);
+        else if (kind)
+            mouse(s, kind - 1);
+        return kind;
+    }
+    if (pad == 1 && backend_kbm_mouse_camera()) {
+        mouse(s, 0);
+        return 1;
+    }
+    for (int i = 0; i < 4; i++) {
+        if (!(dirs >> i & 1)) continue;
+        if (backend_kbm_prompt(DIR_BIT[pad][i], t) != 1) return 0;
+        if (!strcmp(t, ARROW[i]))
+            arrows |= 1 << i;
+        else if (dirs != (1 << i) && strlen(t) != 1)
+            return 0; /* shortcut: a long name among several keys has no room; the Switch's cell shows */
+        else {        /* one name of up to four letters, or up to four of one letter */
+            memcpy(word + n, t, strlen(t) + 1);
+            n += (int)strlen(t);
+        }
+    }
+    if (arrows == dirs)
+        arrow_cap(s, dirs);
+    else if (arrows)
+        return 0; /* arrows and letters mixed: the Switch's cell */
+    else
+        keycap(s, word);
+    return 1;
+}
+
 static const Cell* cell_of(int bit) {
     for (size_t i = 0; i < sizeof TEN / sizeof *TEN; i++)
         if (TEN[i].bit == bit) return TEN[i].cell;
@@ -218,6 +279,8 @@ void vk_prompts_paint(uint8_t* mem, const uint8_t* game, int family, const SnxPa
                 mouse(s, kind - 1);
             if (kind) cell_draw(mem, *TEN[i].cell, s);
         }
+        for (size_t i = 0; i < sizeof STICKS / sizeof *STICKS; i++)
+            if (stick_picture(s, STICKS[i].pad, STICKS[i].dirs)) cell_draw(mem, STICKS[i].cell, s);
     } else {
         for (size_t i = 0; i < sizeof TEN / sizeof *TEN; i++) {
             int c = 0, d = 0;
@@ -240,14 +303,17 @@ void vk_prompts_paint(uint8_t* mem, const uint8_t* game, int family, const SnxPa
 /* the set's signature: the family and the map, and for the keyboard its ten pictures, so that a change paints it again */
 static int set_sig(int family, const SnxPadMap* map) {
     u64 h = 0xcbf29ce484222325ull;
-    if (family == 4)
-        for (size_t i = 0; i < sizeof TEN / sizeof *TEN; i++) {
+    if (family == 4) { /* every control a cell shows: the ten buttons, the presses, the D-pad, the sticks' keys */
+        static const int BITS[] = {0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11,
+                                   12, 13, 14, 15, 40, 41, 42, 43, 44, 45, 46, 47};
+        for (size_t i = 0; i < sizeof BITS / sizeof *BITS; i++) {
             char t[5] = {0};
-            int kind = backend_kbm_prompt(TEN[i].bit, t);
+            int kind = backend_kbm_prompt(BITS[i], t);
             for (int j = 0; j < 5; j++) h = (h ^ (uint8_t)t[j]) * 0x100000001b3ull;
             h = (h ^ (u64)kind) * 0x100000001b3ull;
         }
-    else
+        h = (h ^ (u64)backend_kbm_mouse_camera()) * 0x100000001b3ull;
+    } else
         for (int c = 0; c < SNX_PAD_CONTROLS; c++) h = (h ^ (uint8_t)map->bit[c]) * 0x100000001b3ull;
     return (int)(h & 0x3fffffff) + 1;
 }
@@ -272,6 +338,12 @@ void vk_prompts_texture(u64 gva, const VkFmt* f, u32 w, u32 h, u32 bh_log2) {
     if (!mem || fnv(mem, ATLAS_SIZE) != ATLAS_HASH) return;
     if (!g_pic[0] && !(g_pic[0] = malloc(ATLAS_SIZE))) return;
     memcpy(g_pic[0], mem, ATLAS_SIZE);
+    if (getenv("SNX_PROMPTS_DUMP")) { /* the atlas's blocks in rows, for finding cells (decoded with texture/astc.c) */
+        FILE* f = fopen(getenv("SNX_PROMPTS_DUMP"), "wb");
+        for (int y = 0; f && y < ATLAS_H; y += 4)
+            for (int x = 0; x < ATLAS_W; x += 4) fwrite(block_at(mem, x, y), 1, 16, f);
+        if (f) fclose(f);
+    }
     memset(g_pic_sig, 0, sizeof g_pic_sig); /* found again: every set is painted again from this one */
     g_gva = gva;
     g_shown = g_pic[0];
@@ -298,6 +370,14 @@ void vk_prompts_frame(void) {
     if (g_pic_sig[family] != sig) { /* the Switch's set too: a map moves its pictures */
         memcpy(g_pic[family], g_pic[0], ATLAS_SIZE);
         vk_prompts_paint(g_pic[family], g_pic[0], family, &map);
+        if (getenv("SNX_PROMPTS_DUMP")) { /* and each set painted, as <file>.<family> */
+            char name[1024];
+            snprintf(name, sizeof name, "%s.%d", getenv("SNX_PROMPTS_DUMP"), family);
+            FILE* f = fopen(name, "wb");
+            for (int y = 0; f && y < ATLAS_H; y += 4)
+                for (int x = 0; x < ATLAS_W; x += 4) fwrite(block_at(g_pic[family], x, y), 1, 16, f);
+            if (f) fclose(f);
+        }
     }
     g_pic_sig[family] = sig;
     memcpy(mem, g_pic[family], ATLAS_SIZE);

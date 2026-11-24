@@ -201,6 +201,11 @@ static int g_mouse_held_win; /* the window holds the mouse (relative mode) */
 static int g_mouse_again;    /* it did when the menu opened: taken again as it closes */
 static u64 g_mouse_buttons;  /* the controls its buttons hold */
 static u64 g_wheel_bits;     /* the controls a wheel notch pressed, for g_wheel_left more polls */
+/* the mouse's motion for the game's own camera (hle/mouse_look.c), in 1/64 counts, and when it last took it: while
+   that's recent the motion turns the camera directly and isn't made into the right stick */
+#define LOOK_RECENT 100000000ull
+static i32 g_look_x, g_look_y;
+static u64 g_look_taken;
 static int g_wheel_left;
 static float g_mouse_dx, g_mouse_dy; /* its motion since the last poll */
 
@@ -298,10 +303,24 @@ static void mouse_hold(int on) {
         LOG_LIMIT(4, "input: the window can't hold the mouse: %s\n", SDL_GetError());
         return;
     }
-    g_mouse_held_win = on;
+    __atomic_store_n(&g_mouse_held_win, on, __ATOMIC_RELAXED);
     g_mouse_buttons = 0;
     g_wheel_bits = 0;
     g_mouse_dx = g_mouse_dy = 0;
+    __atomic_store_n(&g_look_x, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_look_y, 0, __ATOMIC_RELAXED);
+}
+int backend_kbm_mouse_camera(void) { return g_mouse_cam; }
+int backend_mouse_look(float* dx, float* dy) {
+    u64 now = plat_ns(), was = __atomic_exchange_n(&g_look_taken, now, __ATOMIC_RELAXED);
+    i32 x = __atomic_exchange_n(&g_look_x, 0, __ATOMIC_RELAXED);
+    i32 y = __atomic_exchange_n(&g_look_y, 0, __ATOMIC_RELAXED);
+    float scale = (float)g_mouse_sens / (100.0f * 64.0f);
+    /* motion from before the camera took the mouse was the right stick's already */
+    if (!__atomic_load_n(&g_mouse_held_win, __ATOMIC_RELAXED) || now - was > LOOK_RECENT) return 0;
+    *dx = (float)x * scale;
+    *dy = (float)(g_mouse_invert ? -y : y) * scale;
+    return 1;
 }
 static void mouse_cam_set(const IniOpt* o, const char* v) {
     (void)o;
@@ -1142,6 +1161,8 @@ static int kbm_mouse_event(const SDL_Event* e) {
         if (!g_mouse_held_win || e->motion.which == SDL_TOUCH_MOUSEID) return 0;
         g_mouse_dx += e->motion.xrel;
         g_mouse_dy += e->motion.yrel;
+        __atomic_add_fetch(&g_look_x, (i32)(e->motion.xrel * 64.0f), __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_look_y, (i32)(e->motion.yrel * 64.0f), __ATOMIC_RELAXED);
         return 1;
     }
     if (e->button.which == SDL_TOUCH_MOUSEID) return 0;
@@ -1278,7 +1299,12 @@ void video_poll(void) {
         lx = lx * 2 / 5;
         ly = ly * 2 / 5;
     }
-    if (g_mouse_held_win) mouse_stick(&rx, &ry);
+    if (g_mouse_held_win) {
+        if (plat_ns() - __atomic_load_n(&g_look_taken, __ATOMIC_RELAXED) < LOOK_RECENT)
+            g_mouse_dx = g_mouse_dy = 0; /* the game's camera turns by the mouse itself (hle/mouse_look.c) */
+        else
+            mouse_stick(&rx, &ry);
+    }
     pm_lock(&g_pad_input_lock);
     /* Each SDL slot is one guest Npad. Keyboard, scripted and on-screen input also drive No1. */
     static u32 previous_ids[SNX_GAMEPADS];
@@ -1350,7 +1376,8 @@ void video_poll(void) {
     }
     input_stick_clamp(&lx, &ly);
     input_stick_clamp(&rx, &ry);
-    if (menu_had || overlay_shown() || vpad_editing()) { /* the game's menu, or the controls' edit mode, has them */
+    /* the game's menu, the controls' edit mode, or a screen of the runtime's own over the game has them */
+    if (menu_had || overlay_shown() || vpad_editing() || ui_hold()) {
         g_menu_held = nonpad;
         g_menu_held_pad0 = g_pad.buttons;
         b = 0;

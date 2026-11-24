@@ -12,6 +12,7 @@
 #include "nx/hle/nvn/nvn.h"
 #include "nx/hle/scene60.h"
 #include "nx/hle/model_lod.h"
+#include "nx/hle/mouse_look.h"
 #include "nx/hle/aspect.h"
 #include "nx/hle/services/hid.h"
 #include "nx/hle/services/nvdrv.h"
@@ -465,6 +466,7 @@ int snx_main(int argc, char** argv) {
     scene60_init();
     model_lod_init();
     aspect_init();
+    mouse_look_init();
     read_npdm();
     svc_core_init();
     svc_fs_init();
