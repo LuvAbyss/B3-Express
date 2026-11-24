@@ -75,6 +75,16 @@ colours, by AO55 after Liz's Wimsy, GPL-3.0-or-later.
 the dispatch loop: the design comes from [Witch Time](https://github.com/Zexyen/Witch-Time) (GPL-3.0, `docs/STATUS.md`,
 issues 92, 100 and 107). The code is written from its notes.
 
+`src/nx/gpu/shader/spirv_translate.c` `quad_place`, `quad_across` and `quad_pick`, pixel stages reading their quad
+by position and through fine derivatives: the finding that AMD's compilers count the subgroup lane over live lanes
+only, and that derivatives keep a quad's helpers running, comes from
+[Witch Time](https://github.com/Zexyen/Witch-Time) (GPL-3.0, PRs 74 and 88), whose `mx_quad` was the reference. The
+SPIR-V, the single-direction reads and the rule for sources outside the quad are written here.
+
+`src/nx/gpu/shader/spirv_translate.c` `region_end` and its loops: pixel stages whose loops hold no quad read or vote
+run their blocks in order inside structured loops, as [Witch Time](https://github.com/Zexyen/Witch-Time) PRs 272
+and 276 do, which cleared issue 17's lines on Vega. The idea is theirs, the code is written here.
+
 `src/nx/gpu/vk/prompts.c` and `prompt_art.h`, PlayStation and Xbox button prompts: ported from
 [Witch Time](https://github.com/Zexyen/Witch-Time) v0.4.5 `runtime/prompts.c` and `runtime/prompt_art.h`
 (GPL-3.0-or-later, copyright K0NL and the Witch Time authors): the atlas's cells and hash, the pictures drawn from

@@ -13,6 +13,7 @@
 #include "nx/gpu/vk/dither.h"
 #include "nx/runtime/main.h"
 #include "nx/runtime/platform/plat.h"
+#include "nx/runtime/platform/ui.h"
 #include "nx/runtime/options.h"
 #include "nx/hle/aspect.h"
 #include "nx/gpu/vk/vk.h"
@@ -388,6 +389,21 @@ static u32* stage_spirv(int stage, const u8* code, u32 window, int compute_stub,
     *out = si;
     return spv;
 }
+static u32 spv_fnv(const u32* spv, size_t words) { /* a module's hash, as the log names it */
+    u32 h = 2166136261u;
+    size_t w;
+    for (w = 0; w < words; w++) h = (h ^ spv[w]) * 16777619u;
+    return h;
+}
+/* what this thread has the driver making, for vk_nvn_crash_note: a driver whose compiler crashes on a stage names it
+   (issue 17, a Vega driver crashing at the title screen) */
+static _Thread_local const char* t_making;
+static _Thread_local u32 t_making_h[2];
+static void making(const char* what, u32 a, u32 b) { t_making = what, t_making_h[0] = a, t_making_h[1] = b; }
+void vk_nvn_crash_note(void) {
+    if (t_making)
+        WARN("  the thread was having the driver make %s %08x %08x\n", t_making, t_making_h[0], t_making_h[1]);
+}
 /* SNX_NVN_SPV_DUMP=dir: each module as the renderer made it, named by the hash nvn-top logs: <hash>_<stage>.spv, the
    game's code it came from (.bin) and its constant buffer 1 (.cb1). The renderer handles programs itself, so
    SNX_NVN_CORPUS (the shadow path) sees none of them */
@@ -434,9 +450,12 @@ int vk_nvn_shader(int stage, u64 code_gva, u32 window, int compute_stub, u64 cb1
     else {
         VkShaderModuleCreateInfo mi = {
             .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = words * 4, .pCode = spv};
-        if (vkCreateShaderModule(g_vk.dev, &mi, NULL, &g_mod[g_nmod].mod) == VK_SUCCESS) {
-            u32 h = 2166136261u, w;
-            for (w = 0; w < words; w++) h = (h ^ spv[w]) * 16777619u;
+        u32 h = spv_fnv(spv, words);
+        int ok;
+        making("a shader module (stage, hash)", (u32)stage, h);
+        ok = vkCreateShaderModule(g_vk.dev, &mi, NULL, &g_mod[g_nmod].mod) == VK_SUCCESS;
+        making(NULL, 0, 0);
+        if (ok) {
             g_mod[g_nmod].si = si;
             g_mod[g_nmod].spv_hash = h;
             vk_module_note(g_mod[g_nmod].mod, vk_spirv_id(spv, words));
@@ -444,8 +463,10 @@ int vk_nvn_shader(int stage, u64 code_gva, u32 window, int compute_stub, u64 cb1
             if (cut) {
                 VkShaderModuleCreateInfo ci = {
                     .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = cut_words * 4, .pCode = cut};
+                making("a cut-out twin module (stage, hash)", (u32)stage, spv_fnv(cut, cut_words));
                 if (vkCreateShaderModule(g_vk.dev, &ci, NULL, &g_mod[g_nmod].cut) != VK_SUCCESS)
                     g_mod[g_nmod].cut = VK_NULL_HANDLE;
+                making(NULL, 0, 0);
             }
             r = g_nmod++;
             spv_dump(h, stage, spv, words, code, window, cb1_gva, cb1_size);
@@ -492,6 +513,12 @@ static int prep_old(u64 h) {
         if (g_prold[i] == h) return 1;
     return 0;
 }
+/* The preparation screen: when this driver and scale mode have no finished preparation (prepared.txt), a play run
+   covers the game with a progress bar (vk_ui_draw) and holds its input until the game's stages are prepared, with
+   the launcher's pass's workers. Then the picture is the game's, at its title by then. SNX_NVN_PREP_SCREEN=0 leaves
+   preparation in the background */
+static int g_prep_screen;  /* atomic: read by the renderer's thread */
+static int g_prep_workers; /* a play run's workers: the others wait while no screen is up */
 static FILE* g_prf;
 static u64 g_pr_set, g_pr_done, g_pr_ns, g_pr_paused;
 static u64 g_pr_wait_ns, g_pr_spv_ns; /* of g_pr_ns: waiting for vk_lock, and translating under it */
@@ -568,19 +595,17 @@ static int prep_key(const PrepJob* j, const NvnStageKey* key, u32* in_mask) {
     __atomic_add_fetch(&g_pr_spv_ns, plat_ns() - t1, __ATOMIC_RELAXED);
     if (!spv) return 0;
     *in_mask = si.in_mask;
+    u32 h = spv_fnv(spv, words);
     {
         static int show = -1; /* SNX_NVN_PREP_LOG=1: each prepared stage's SPIR-V hash, to match against draws' */
         if (show < 0) show = getenv("SNX_NVN_PREP_LOG") && getenv("SNX_NVN_PREP_LOG")[0] == '1';
-        if (show) {
-            u32 h = 2166136261u;
-            size_t w;
-            for (w = 0; w < words; w++) h = (h ^ spv[w]) * 16777619u;
+        if (show)
             LOG("nvn-live: prepared stage %d: %08x (clip %x, int %x, unfed %x)\n", j->stage, h, key->clip,
                 key->int_mask, key->unfed);
-        }
     }
     VkShaderModuleCreateInfo mi = {
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = words * 4, .pCode = spv};
+    making("a prepared stage (stage, hash)", (u32)j->stage, h);
     if (vkCreateShaderModule(g_vk.dev, &mi, NULL, &m) == VK_SUCCESS) {
         if (j->stage == ST_CS) { /* as vk_nvn_compute_pipeline makes it on the draw thread, there 150-180 ms cold */
             VkPipeline p = VK_NULL_HANDLE;
@@ -597,11 +622,12 @@ static int prep_key(const PrepJob* j, const NvnStageKey* key, u32* in_mask) {
         }
         vkDestroyShaderModule(g_vk.dev, m, NULL);
     }
+    making(NULL, 0, 0);
     free(spv);
     return 1;
 }
 static void prep_worker(void* arg) {
-    (void)arg;
+    int index = (int)(size_t)arg;
     if (!g_prep_run) vk_thread_low();
     for (;;) {
         PrepJob j;
@@ -609,6 +635,10 @@ static void prep_worker(void* arg) {
         u32 in_mask = 0;
         u64 t0;
         int old;
+        if (index >= g_prep_workers && !__atomic_load_n(&g_prep_screen, __ATOMIC_RELAXED)) {
+            plat_sleep_ns(100000000);
+            continue;
+        }
         if (__atomic_load_n(&g_prep_heavy, __ATOMIC_RELAXED)) {
             __atomic_add_fetch(&g_pr_paused, 1, __ATOMIC_RELAXED);
             plat_sleep_ns(50000000);
@@ -660,12 +690,12 @@ static void prep_worker(void* arg) {
 }
 /* each frame: starts the workers once Vulkan is up, and stops them for a heavy frame */
 static void prep_frame(u32 draws) {
-    if (g_prep_on == 1 && g_prep_run && g_prep_started) {
+    if (g_prep_on == 1 && (g_prep_run || __atomic_load_n(&g_prep_screen, __ATOMIC_RELAXED)) && g_prep_started) {
         static u64 shown;
         char path[1300];
         FILE* f;
         pm_lock(&g_prq_lk);
-        if (g_pr_done != shown) { /* for the launcher's bar */
+        if (g_prep_run && g_pr_done != shown) { /* for the launcher's bar */
             shown = g_pr_done;
             snprintf(path, sizeof path, "%s/prepare_progress.txt", vk_pipeline_cache_dir());
             f = fopen(path, "w");
@@ -689,7 +719,9 @@ static void prep_frame(u32 draws) {
                 fclose(f);
             }
             vk_pipeline_mark_dirty();
-            g_quit = 1;
+            if (g_prep_run) g_quit = 1;
+            __atomic_store_n(&g_prep_screen, 0, __ATOMIC_RELAXED);
+            ui_hold_set(0);
         }
         pm_unlock(&g_prq_lk);
         return;
@@ -704,9 +736,28 @@ static void prep_frame(u32 draws) {
         int i, workers;
         FILE* f;
         u64 h;
+        const char* screen = getenv("SNX_NVN_PREP_SCREEN");
         g_prep_run = pass && pass[0] == '1';
-        workers = e && atoi(e) > 0 ? atoi(e) : g_prep_run ? vk_cpu_threads() - 2 : vk_cpu_threads() / 2;
-        if (workers < 1) workers = 1;
+        g_prep_workers = e && atoi(e) > 0 ? atoi(e) : g_prep_run ? vk_cpu_threads() - 2 : vk_cpu_threads() / 2;
+        if (g_prep_workers < 1) g_prep_workers = 1;
+        workers = g_prep_workers;
+        snprintf(path, sizeof path, "%s/prepared.txt", vk_pipeline_cache_dir());
+        if (!g_prep_run && !(screen && screen[0] == '0')) {
+            char want[64], have[64] = "";
+            f = fopen(path, "r");
+            if (f) {
+                if (!fgets(have, sizeof have, f)) have[0] = 0;
+                fclose(f);
+            }
+            snprintf(want, sizeof want, "%s %d\n", prep_gpu(), prep_mode());
+            if (strcmp(have, want)) {
+                LOG("nvn-live: shader preparation: none finished for this driver and scale mode, the game waits "
+                    "behind a progress bar until it is\n");
+                __atomic_store_n(&g_prep_screen, 1, __ATOMIC_RELAXED);
+                ui_hold_set(1);
+                if (!(e && atoi(e) > 0) && vk_cpu_threads() - 2 > workers) workers = vk_cpu_threads() - 2;
+            }
+        }
         g_prep_quiet = plat_ns();
         snprintf(path, sizeof path, "%s/gpu.txt", vk_pipeline_cache_dir());
         f = fopen(path, "w");
@@ -746,8 +797,17 @@ static void prep_frame(u32 draws) {
             prep_keep() ? ", libraries kept for the draws" : "");
         pm_unlock(&g_prq_lk);
         for (i = 0; i < workers; i++)
-            if (plat_thread(prep_worker, NULL, (size_t)1 << 20)) break;
+            if (plat_thread(prep_worker, (void*)(size_t)i, (size_t)1 << 20)) break;
     }
+}
+int vk_nvn_prep_screen(u64* done, u64* left, u64* given) {
+    if (!__atomic_load_n(&g_prep_screen, __ATOMIC_RELAXED)) return 0;
+    pm_lock(&g_prq_lk);
+    *done = g_pr_done;
+    *left = (u64)(g_prq_in - g_prq_out) + (u64)g_prep_busy;
+    *given = g_pr_set;
+    pm_unlock(&g_prq_lk);
+    return 1;
 }
 int vk_nvn_shader_io(int mod, u32* in_mask, u32* out_mask, u32* frag_outputs) {
     if (mod < 0 || mod >= g_nmod) return 0;
@@ -927,7 +987,10 @@ static void pipe_worker(void* arg) {
         p = g_pq[g_pq_out++ % PIPE_QUEUE];
         p->t_begun = plat_ns();
         pm_unlock(&g_pq_lk);
+        making("a pipeline (vertex, fragment)", p->d.mod[0] >= 0 ? g_mod[p->d.mod[0]].spv_hash : 0,
+               p->d.mod[4] >= 0 ? g_mod[p->d.mod[4]].spv_hash : 0);
         v = vk_pipeline_make(&p->k);
+        making(NULL, 0, 0);
         p->p = v;
         if (!v) snprintf(p->why, sizeof p->why, "vkCreateGraphicsPipelines failed");
         p->t_done = plat_ns();
@@ -1176,7 +1239,10 @@ static NvnPipe* pipe_get(const NvnPipeDesc* d, int* made) { /* the cache entry f
             else {
                 u64 t0 = plat_ns(), t;
                 vk_lock(); /* the renderer's pipeline table and cache */
+                making("a pipeline (vertex, fragment)", d->mod[0] >= 0 ? g_mod[d->mod[0]].spv_hash : 0,
+                       d->mod[4] >= 0 ? g_mod[d->mod[4]].spv_hash : 0);
                 p->p = vk_pipeline_get(&k);
+                making(NULL, 0, 0);
                 vk_unlock();
                 t = plat_ns() - t0;
                 if (t > 5000000ull)
@@ -1217,8 +1283,10 @@ int vk_nvn_compute_pipeline(int mod, int* made, char* why, u32 why_size) {
         u64 t0 = plat_ns(), t;
         tried[mod] = 1;
         vk_lock();
+        making("a compute pipeline (module, hash)", (u32)mod, g_mod[mod].spv_hash);
         if (!VK_OK(vkCreateComputePipelines(g_vk.dev, vk_pipeline_cache(), 1, &ci, NULL, &pipe[mod])))
             pipe[mod] = VK_NULL_HANDLE;
+        making(NULL, 0, 0);
         vk_unlock();
         *made = pipe[mod] != VK_NULL_HANDLE;
         t = plat_ns() - t0;
@@ -1794,6 +1862,73 @@ static struct {
     char why[16][64];
     u64 why_n[16];
 } g_rp;
+
+/* SNX_GPU_MARKERS=1 (g_vk.has_marker): each replayed draw and dispatch writes its number into a host buffer as it
+   starts and as it ends (VK_AMD_buffer_marker), so a lost device names the work the GPU was in (issue 16) */
+#define MARKS 65536u
+static struct {
+    u64 frame, draw;
+    u64 spv[5]; /* the stages' SPIR-V hashes, vertex to fragment; a dispatch's in [0] */
+    int compute;
+} g_mk[MARKS];
+static u32 g_mk_next;
+static VkBuffer g_mk_buf;
+static VmaAllocation g_mk_mem;
+static volatile u32* g_mk_at; /* [0] the last one started, [1] the last one finished */
+
+static u32 mk_begin(const int* mod, int compute) {
+    if (!g_vk.has_marker) return 0;
+    if (!g_mk_buf) {
+        VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                  .size = 64,
+                                  .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                  .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+        VmaAllocationCreateInfo aci = {.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
+                                                VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+                                       .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST};
+        VmaAllocationInfo ai;
+        if (!VK_OK(vmaCreateBuffer(g_vk.vma, &bci, &aci, &g_mk_buf, &g_mk_mem, &ai))) {
+            g_vk.has_marker = 0;
+            return 0;
+        }
+        g_mk_at = ai.pMappedData;
+        g_mk_at[0] = g_mk_at[1] = 0;
+        vmaFlushAllocation(g_vk.vma, g_mk_mem, 0, VK_WHOLE_SIZE);
+        LOG("vulkan: GPU markers on: each draw and dispatch of the replay is numbered for a lost device's report\n");
+    }
+    u32 id = ++g_mk_next, s;
+    g_mk[id % MARKS].frame = g_rp.frame;
+    g_mk[id % MARKS].draw = g_rp.draws;
+    g_mk[id % MARKS].compute = compute;
+    for (s = 0; s < 5; s++) g_mk[id % MARKS].spv[s] = mod[s] >= 0 && mod[s] < g_nmod ? g_mod[mod[s]].spv_hash : 0;
+    vkCmdWriteBufferMarkerAMD(g_rp.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_mk_buf, 0, id);
+    return id;
+}
+static void mk_end(u32 id) {
+    if (id) vkCmdWriteBufferMarkerAMD(g_rp.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_mk_buf, 4, id);
+}
+void vk_nvn_markers_report(void) {
+    if (!g_mk_at) return;
+    vmaInvalidateAllocation(g_vk.vma, g_mk_mem, 0, VK_WHOLE_SIZE);
+    u32 started = g_mk_at[0], done = g_mk_at[1], id;
+    WARN("gpu markers: %u draws and dispatches recorded; the GPU started up to %u and finished up to %u\n", g_mk_next,
+         started, done);
+    /* ends are written in order, so the first unfinished one is where the GPU stood */
+    for (id = done + 1; id <= started && id - done <= 16; id++) {
+        if (g_mk_next - id >= MARKS) continue; /* overwritten since */
+        const u64* h = g_mk[id % MARKS].spv;
+        if (g_mk[id % MARKS].compute)
+            WARN("gpu markers: unfinished %u: dispatch, frame %llu, draw %llu, compute %016llx\n", id,
+                 (unsigned long long)g_mk[id % MARKS].frame, (unsigned long long)g_mk[id % MARKS].draw,
+                 (unsigned long long)h[0]);
+        else
+            WARN("gpu markers: unfinished %u: draw, frame %llu, draw %llu, vertex %016llx, tess %016llx %016llx, "
+                 "geometry %016llx, fragment %016llx\n",
+                 id, (unsigned long long)g_mk[id % MARKS].frame, (unsigned long long)g_mk[id % MARKS].draw,
+                 (unsigned long long)h[0], (unsigned long long)h[1], (unsigned long long)h[2], (unsigned long long)h[3],
+                 (unsigned long long)h[4]);
+    }
+}
 #define RSKIP(why)                                                                                                     \
     do {                                                                                                               \
         vk_nvn_replay_skip(why);                                                                                       \
@@ -4466,6 +4601,7 @@ static void rp_draw_body(const NvnPipeDesc* d, const NvnStageBind* bind, const N
     g_rpd.pipe = p->p;
     dl = dl_row(d, bind, y, call);
     if (dl >= 0) vkCmdBeginQuery(g_rp.cb, g_dl.q, (u32)dl, VK_QUERY_CONTROL_PRECISE_BIT);
+    u32 mk = mk_begin(d->mod, 0);
     if (call->kind == 0)
         vkCmdDraw(g_rp.cb, call->count, 1, call->first, 0);
     else if (call->kind == 1)
@@ -4475,6 +4611,7 @@ static void rp_draw_body(const NvnPipeDesc* d, const NvnStageBind* bind, const N
         vkCmdDrawIndexedIndirect(g_rp.cb, xb, xo, 1, 20);
     else
         vkCmdDrawIndexedIndirectCount(g_rp.cb, xb, xo, pb, po, call->max_draws, call->stride ? call->stride : 20);
+    mk_end(mk);
     if (dl >= 0) vkCmdEndQuery(g_rp.cb, g_dl.q, (u32)dl);
     g_rp.drawn++;
     g_rp.kinds[call->kind & 3]++;
@@ -4513,10 +4650,13 @@ static void rp_dispatch_body(int mod, const NvnStageBind* b, u32 x, u32 y, u32 z
     vkCmdBindPipeline(g_rp.cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_cpipe[mod]);
     vkCmdBindDescriptorSets(g_rp.cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_vk_playout, (u32)shader_vk_set(ST_CS), 1, &set,
                             0, NULL);
+    int mods[5] = {mod, -1, -1, -1, -1};
+    u32 mk = mk_begin(mods, 1);
     if (buf)
         vkCmdDispatchIndirect(g_rp.cb, buf, off);
     else
         vkCmdDispatch(g_rp.cb, x, y, z);
+    mk_end(mk);
     if (g_pt.open) {
         int k;
         g_pt.mod = mod;

@@ -14,6 +14,10 @@ static u32 g_version;
 void ui_lock(void) { pm_lock(&g_lock); }
 void ui_unlock(void) { pm_unlock(&g_lock); }
 
+static int g_hold;
+void ui_hold_set(int on) { __atomic_store_n(&g_hold, on, __ATOMIC_RELEASE); }
+int ui_hold(void) { return __atomic_load_n(&g_hold, __ATOMIC_ACQUIRE); }
+
 static void quad(SnxUiList* l, float x, float y, float w, float h, int u, int v, int uw, int vh, u32 rgba, int turn,
                  int sharp) {
     SnxUiQuad* q;

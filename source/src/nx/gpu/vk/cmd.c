@@ -333,7 +333,10 @@ void vk_submit(VkSemaphore wait, VkPipelineStageFlags2 wait_stage, VkSemaphore s
     vk_queue_lock();
     VkResult r = vkQueueSubmit2(g_vk.gfx, 1, &si, VK_NULL_HANDLE);
     vk_queue_unlock();
-    if (r == VK_ERROR_DEVICE_LOST) fatal("vulkan: the GPU device was lost (driver reset or crash)");
+    if (r == VK_ERROR_DEVICE_LOST) {
+        vk_device_lost_report();
+        fatal("vulkan: the GPU device was lost (driver reset or crash)");
+    }
     VK_OK(r);
     g_gval++;
     if (r != VK_SUCCESS) { /* never signaled by the GPU: the host signals it, so waits for it and later ones end */

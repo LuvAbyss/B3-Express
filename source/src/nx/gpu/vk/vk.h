@@ -72,7 +72,11 @@ typedef struct {
     int has_indirect_count; /* drawIndirectCount (Vulkan 1.2), for the NVN path's MultiDrawElementsIndirectCount */
     int has_sparse;         /* sparse buffers with holes, bound on the graphics queue (the NVN path's pool copies) */
     int has_gpl;            /* graphics pipeline libraries with fast linking: pipeline.c builds pipelines from them */
+    int has_marker;         /* SNX_GPU_MARKERS=1 and VK_AMD_buffer_marker: the replay numbers its draws (nvn_res.c) */
+    int has_fault;          /* SNX_GPU_MARKERS=1 and VK_EXT_device_fault: the driver's own report of a lost device */
 } VkState;
+/* a lost device: the GPU markers and the driver's fault report to the log, once (device.c) */
+void vk_device_lost_report(void);
 extern VkState g_vk;
 
 /* device.c */

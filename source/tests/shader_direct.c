@@ -100,5 +100,79 @@ int main(int argc, char** argv) {
     spv = shader_to_spirv((const u8*)code, sizeof code, ST_CS, &info, &words, 1, 1, 1, 1);
     if (!spv || (!check_only && !save(argv[5], spv, words))) ok = 0;
     free(spv);
+    /* a pixel stage's SHFL reads its quad through fine derivatives (issue 17): no shuffle, quad swap or subgroup lane */
+    memset(code, 0, sizeof code);
+    ((u32*)code)[18] = 15;
+    code[10] = SCHED;
+    code[11] = SHFL | (3ull << 30) | (1ull << 28) | (1ull << 29) | (0x1c03ull << 34) | (1ull << 20) | (1ull << 8) | 2;
+    code[12] = SHFL | (1ull << 29) | (0x1c03ull << 34) | (3ull << 20) | (1ull << 8) | 4; /* index in r3 */
+    code[13] = EXIT;
+    info = (ShaderInfo){0};
+    spv = shader_to_spirv((const u8*)code, sizeof code, ST_FS, &info, &words, 1, 1, 1, 1);
+    int fine = 0, lane_ops = 0;
+    for (size_t i = 5; spv && i < words && spv[i] >> 16; i += spv[i] >> 16) {
+        u32 op = spv[i] & 0xffff;
+        if (op == 210 || op == 211) fine++;                               /* OpDPdxFine, OpDPdyFine */
+        if (op == 345 || op == 366) lane_ops++;                           /* OpGroupNonUniformShuffle, QuadSwap */
+        if (op == 71 && spv[i + 2] == 11 && spv[i + 3] == 41) lane_ops++; /* BuiltIn SubgroupLocalInvocationId */
+    }
+    if (!spv || !fine || lane_ops) ok = 0;
+    free(spv);
+    /* a pixel stage with flow kills only after it (upstream PR 512, issue 17): KIL marks the lane, EXIT doesn't
+       return, so there is no demote, one OpKill and one OpReturn, the function's last */
+    memset(code, 0, sizeof code);
+    ((u32*)code)[18] = 15;
+    code[10] = SCHED;
+    code[11] = BRA | (8ull << 20);    /* over the next instruction */
+    code[12] = 0xE33000000007000Full; /* KIL */
+    code[13] = EXIT;
+    info = (ShaderInfo){0};
+    spv = shader_to_spirv((const u8*)code, sizeof code, ST_FS, &info, &words, 1, 1, 1, 1);
+    int kills = 0, demotes = 0, returns = 0;
+    for (size_t i = 5; spv && i < words && spv[i] >> 16; i += spv[i] >> 16) {
+        u32 op = spv[i] & 0xffff;
+        if (op == 252) kills++;    /* OpKill */
+        if (op == 5380) demotes++; /* OpDemoteToHelperInvocation */
+        if (op == 253) returns++;  /* OpReturn */
+    }
+    if (!spv || kills != 1 || demotes || returns != 1) ok = 0;
+    free(spv);
+    /* a pixel stage whose loop never ends leaves it as a helper after 4096 passes (helper_loop_exit, upstream d48364cc,
+       issue 17's hang): the flow loop asks IsHelperInvocation and compares with 4096 */
+    memset(code, 0, sizeof code);
+    ((u32*)code)[18] = 15;
+    code[10] = SCHED;
+    code[11] = (BRA & ~(7ull << 16)) | (0xFFFFF8ull << 20); /* @P0 to itself */
+    code[12] = EXIT;
+    info = (ShaderInfo){0};
+    spv = shader_to_spirv((const u8*)code, sizeof code, ST_FS, &info, &words, 1, 1, 1, 1);
+    /* and, with no quad read in the loop, it runs as a structured loop around its blocks in order: no OpSwitch
+       dispatcher (Witch Time PR 272, issue 17) */
+    int helper_asks = 0, loops = 0, cap = 0, switches = 0;
+    for (size_t i = 5; spv && i < words && spv[i] >> 16; i += spv[i] >> 16) {
+        u32 op = spv[i] & 0xffff;
+        if (op == 251) switches++;                                        /* OpSwitch */
+        if (op == 5381) helper_asks++;                                    /* OpIsHelperInvocationEXT */
+        if (op == 246) loops++;                                           /* OpLoopMerge */
+        if (op == 43 && (spv[i] >> 16) == 4 && spv[i + 3] == 4096) cap++; /* OpConstant 4096 */
+    }
+    if (!spv || !helper_asks || !loops || !cap || switches) ok = 0;
+    free(spv);
+    /* a converging pixel stage leaves its flow loop only when the whole subgroup has finished (issue 17): one UMin
+       picks the pass's pc, a second asks whether every lane but the helpers is done. The quad read inside the loop
+       keeps it out of the in-order blocks */
+    memset(code, 0, sizeof code);
+    ((u32*)code)[18] = 15;
+    code[10] = SCHED;
+    code[11] = SHFL | (3ull << 30) | (1ull << 28) | (1ull << 29) | (0x1c03ull << 34) | (1ull << 20) | (1ull << 8) | 2;
+    code[12] = (BRA & ~(7ull << 16)) | (0xFFFFF0ull << 20); /* @P0 back to the SHFL */
+    code[13] = EXIT;
+    info = (ShaderInfo){0};
+    spv = shader_to_spirv((const u8*)code, sizeof code, ST_FS, &info, &words, 1, 1, 1, 1);
+    int umins = 0;
+    for (size_t i = 5; spv && i < words && spv[i] >> 16; i += spv[i] >> 16)
+        if ((spv[i] & 0xffff) == 354) umins++; /* OpGroupNonUniformUMin */
+    if (!spv || umins != 2) ok = 0;
+    free(spv);
     return ok ? 0 : 1;
 }

@@ -336,7 +336,10 @@ static int compose(const VicJob* j) {
     VkResult r = vkQueueSubmit2(g_vk.compute, 1, &si, g_vic_fence);
     vk_queue_unlock();
     vk_unlock();
-    if (r == VK_ERROR_DEVICE_LOST) fatal("vulkan: the GPU device was lost (driver reset or crash)");
+    if (r == VK_ERROR_DEVICE_LOST) {
+        vk_device_lost_report();
+        fatal("vulkan: the GPU device was lost (driver reset or crash)");
+    }
     if (r != VK_SUCCESS) return 0;
     VK_OK(vkWaitForFences(g_vk.dev, 1, &g_vic_fence, VK_TRUE, UINT64_MAX));
     VK_OK(vkResetFences(g_vk.dev, 1, &g_vic_fence));

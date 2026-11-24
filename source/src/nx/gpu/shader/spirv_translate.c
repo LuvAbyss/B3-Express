@@ -22,7 +22,17 @@ typedef struct {
     u32 swapped; /* 1 + the slot whose sampler is an array element for this instruction */
     u32 image[8], image_type[8];
     u32 gbuf[16], gbuf_pointer, smap, subgroup_lane_input;
-    u32 zero_cbuf; /* ShaderInfo.zero_cbuf */
+    /* A fragment program with flow discards nothing inside its loop: a KIL or a failed alpha test sets this bool,
+       an EXIT ends the loop for the lane, and the lane is discarded after it. A demote or a kill in the loop lets
+       AMD's Windows compiler mask exec with the quads of the lanes still live, so a quad's lanes stop running
+       together for the rest of the loop (upstream ScarletNX PR 512; issue 17, dots and lines along triangle edges
+       on Vega) */
+    u32 discarded;
+    /* A fragment program with flow: the Function variable counting the flow loop's passes a lane made, which ends a
+       helper lane's loop (helper_loop_exit) */
+    u32 helper_rounds;
+    u32 quad_coord, quad_coord_type; /* a pixel stage's FragCoord and its vec4 type: quad_place */
+    u32 zero_cbuf;                   /* ShaderInfo.zero_cbuf */
 } DirectCtx;
 
 int g_shader_texture_arrays;
@@ -247,6 +257,83 @@ static void pred_write(DirectCtx* c, u32 p, u32 value) {
     if (p < 7) spv_emit_store(&c->emit, c->pred[p], value);
 }
 
+/* A pixel's place in its 2x2 quad, x + 2y as Maxwell and Vulkan lay quads out, from its position. Pixel stages
+   take SR_LANEID, SHFL's lane and FSWZADD's mode from it, not from the subgroup lane: AMD's Windows compilers count
+   that over live lanes only, so one helper shifts every lane after it (Witch Time PR 74, issue 17) */
+static u32 quad_place(DirectCtx* c) {
+    u32 coord = spv_emit_load(&c->emit, c->quad_coord_type, c->quad_coord);
+    u32 one = spv_emit_constant_u32(&c->emit, c->u32_type, 1);
+    u32 x = spv_emit_convert_f_to_u(&c->emit, c->u32_type, spv_emit_vec4_extract(&c->emit, c->f32_type, coord, 0));
+    u32 y = spv_emit_convert_f_to_u(&c->emit, c->u32_type, spv_emit_vec4_extract(&c->emit, c->f32_type, coord, 1));
+    return spv_emit_bitwise_or_u32(
+        &c->emit, c->u32_type, spv_emit_bitwise_and_u32(&c->emit, c->u32_type, x, one),
+        spv_emit_shift_left_u32(&c->emit, c->u32_type, spv_emit_bitwise_and_u32(&c->emit, c->u32_type, y, one), one));
+}
+
+/* value in the quad's pixel k away (1 across, 2 down, 3 diagonal, 0 itself) as across[k], place being quad_place's;
+   only the k_const direction when that is 1-3. A fine derivative is the difference across the pixel's own pair, so
+   the neighbour is the value plus or minus it; on 16-bit halves as floats every step is exact. Derivatives make
+   every driver keep the quad's helpers running, which subgroup shuffles and quad swaps didn't on Vega's driver
+   (issue 17: the dots stayed, and a shuffle whose lane came from the position crashed its compiler). The finding
+   that derivatives hold helpers where AMD's quad reads lose them is Witch Time's (PR 74, PR 88) */
+static void quad_across(DirectCtx* c, u32 value, int k_const, u32 place, u32 across[4]) {
+    u32 one = spv_emit_constant_f32(&c->emit, c->f32_type, 1.0f),
+        minus = spv_emit_constant_f32(&c->emit, c->f32_type, -1.0f);
+    u32 sx =
+        spv_emit_select(&c->emit, c->f32_type,
+                        spv_emit_i_not_equal(&c->emit, c->bool_type,
+                                             spv_emit_bitwise_and_u32(&c->emit, c->u32_type, place,
+                                                                      spv_emit_constant_u32(&c->emit, c->u32_type, 1)),
+                                             c->zero),
+                        minus, one);
+    u32 sy =
+        spv_emit_select(&c->emit, c->f32_type,
+                        spv_emit_i_not_equal(&c->emit, c->bool_type,
+                                             spv_emit_bitwise_and_u32(&c->emit, c->u32_type, place,
+                                                                      spv_emit_constant_u32(&c->emit, c->u32_type, 2)),
+                                             c->zero),
+                        minus, one);
+    u32 sixteen = spv_emit_constant_u32(&c->emit, c->u32_type, 16);
+    across[0] = value;
+    for (int half = 0; half < 2; half++) {
+        u32 bits = half ? spv_emit_shift_right_u32(&c->emit, c->u32_type, value, sixteen)
+                        : spv_emit_bitwise_and_u32(&c->emit, c->u32_type, value,
+                                                   spv_emit_constant_u32(&c->emit, c->u32_type, 0xffff));
+        u32 h = spv_emit_convert_u_to_f(&c->emit, c->f32_type, bits), side[4] = {h, 0, 0, 0};
+        if (k_const != 2) /* across, and the diagonal goes down from there */
+            side[1] = spv_emit_fadd(
+                &c->emit, c->f32_type, h,
+                spv_emit_fmul(&c->emit, c->f32_type, sx, spv_emit_derivative_fine(&c->emit, c->f32_type, h, 0)));
+        if (k_const != 1 && k_const != 3)
+            side[2] = spv_emit_fadd(
+                &c->emit, c->f32_type, h,
+                spv_emit_fmul(&c->emit, c->f32_type, sy, spv_emit_derivative_fine(&c->emit, c->f32_type, h, 1)));
+        if (k_const != 1 && k_const != 2)
+            side[3] = spv_emit_fadd(
+                &c->emit, c->f32_type, side[1],
+                spv_emit_fmul(&c->emit, c->f32_type, sy, spv_emit_derivative_fine(&c->emit, c->f32_type, side[1], 1)));
+        for (int dir = 1; dir < 4; dir++) {
+            if (!side[dir] || (k_const >= 1 && k_const <= 3 && dir != k_const)) continue;
+            u32 r = spv_emit_convert_f_to_u(&c->emit, c->u32_type, side[dir]);
+            across[dir] = half ? spv_emit_bitwise_or_u32(&c->emit, c->u32_type, across[dir],
+                                                         spv_emit_shift_left_u32(&c->emit, c->u32_type, r, sixteen))
+                               : r;
+        }
+    }
+}
+
+/* across[k], or across[k_const] when that is 1-3 */
+static u32 quad_pick(DirectCtx* c, const u32 across[4], int k_const, u32 k) {
+    if (k_const >= 1 && k_const <= 3) return across[k_const];
+    u32 r = across[0];
+    for (u32 dir = 1; dir < 4; dir++)
+        r = spv_emit_select(
+            &c->emit, c->u32_type,
+            spv_emit_i_equal(&c->emit, c->bool_type, k, spv_emit_constant_u32(&c->emit, c->u32_type, dir)), across[dir],
+            r);
+    return r;
+}
+
 static u32 subgroup_ballot_word(DirectCtx* c, u32 vec4_u32, u32 lane, u32 predicate) {
     u32 mask = spv_emit_subgroup_ballot(&c->emit, vec4_u32, c->u32_type, predicate);
     u32 word = spv_emit_shift_right_u32(&c->emit, c->u32_type, lane, spv_emit_constant_u32(&c->emit, c->u32_type, 5));
@@ -346,7 +433,29 @@ static int helper_side_effect(int op) {
 }
 static u32 cc_not(DirectCtx* c, u32 x) { return spv_emit_bool_not(&c->emit, c->bool_type, x); }
 static u32 cc_and(DirectCtx* c, u32 x, u32 y) { return spv_emit_bool_binary(&c->emit, c->bool_type, 0, x, y); }
+/* a lane whose writes must not land: a helper, or one a KIL inside the flow loop marked */
+static u32 lane_dead(DirectCtx* c) {
+    u32 helper = spv_emit_is_helper(&c->emit, c->bool_type);
+    if (!c->discarded) return helper;
+    return spv_emit_bool_binary(&c->emit, c->bool_type, 1, helper, spv_emit_load(&c->emit, c->bool_type, c->discarded));
+}
 static u32 cc_or(DirectCtx* c, u32 x, u32 y) { return spv_emit_bool_binary(&c->emit, c->bool_type, 1, x, y); }
+/* Whether this lane leaves the flow loop at this pass: a helper that made HELPER_LOOP_ROUNDS of them. A helper runs
+   outside the primitive, only for its quad's derivatives, on extrapolated inputs, and a loop on them may never end.
+   With the kill moved after the loop (PR 512) nothing else ends it, and the wave spins until the driver resets the
+   GPU (issue 17's test build 7 on Vega). Lanes that are not helpers run as written; a helper's writes are dropped
+   (lane_dead), so only its quad's derivatives after the loop can differ. Upstream ScarletNX d48364cc, which takes
+   65536 on an RTX 4090: 4096 here, as each pass runs one block, a pixel stage making 4096 is not a Switch game's,
+   and the whole wave waits for its slowest helper on a GPU as small as Vega's */
+#define HELPER_LOOP_ROUNDS 4096u
+static u32 helper_loop_exit(DirectCtx* c) {
+    u32 rounds = spv_emit_iadd_u32(&c->emit, c->u32_type, spv_emit_load(&c->emit, c->u32_type, c->helper_rounds),
+                                   spv_emit_constant_u32(&c->emit, c->u32_type, 1));
+    spv_emit_store(&c->emit, c->helper_rounds, rounds);
+    u32 over = spv_emit_u_less(&c->emit, c->bool_type, spv_emit_constant_u32(&c->emit, c->u32_type, HELPER_LOOP_ROUNDS),
+                               rounds);
+    return spv_emit_bool_binary(&c->emit, c->bool_type, 0, over, spv_emit_is_helper(&c->emit, c->bool_type));
+}
 static u32 cc_xor(DirectCtx* c, u32 x, u32 y) { return spv_emit_bool_binary(&c->emit, c->bool_type, 2, x, y); }
 static u32 cc_test(DirectCtx* c, u32 code) {
     if (code == 0 || code == 15) return code == 15 ? c->true_value : c->false_value;
@@ -567,6 +676,12 @@ static void alpha_test(DirectCtx* c, u32 push, u32 push_pointer, u32 alpha) {
     }
     u32 fail = spv_emit_bool_not(&c->emit, c->bool_type, pass);
     fail = spv_emit_bool_binary(&c->emit, c->bool_type, 0, active, fail);
+    if (c->discarded) { /* in a program with flow: discarded after its loop */
+        spv_emit_store(
+            &c->emit, c->discarded,
+            spv_emit_bool_binary(&c->emit, c->bool_type, 1, spv_emit_load(&c->emit, c->bool_type, c->discarded), fail));
+        return;
+    }
     u32 discard = spv_emit_id(&c->emit), merge = spv_emit_id(&c->emit);
     spv_emit_selection_merge(&c->emit, merge);
     spv_emit_branch_conditional(&c->emit, fail, discard, merge);
@@ -1939,7 +2054,7 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
     int needs_fragcoord = 0;
     int needs_frontface = 0;
     int needs_point_coord = 0, needs_sample_id = 0, needs_coverage = 0;
-    int needs_demote = 0, quad_shfl = 0;
+    int needs_demote = 0, needs_fine_derivatives = 0;
     int needs_image_query = 0, needs_derivatives = 0, needs_clock = 0;
     int needs_instance = 0;
     int needs_local_id = 0, needs_group_id = 0;
@@ -2875,15 +2990,19 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                B(insn[i], op->id == O_TEX_B ? 37 : 55, 3) == 6))))
             needs_derivatives = 1;
         if (stage == ST_FS && helper_side_effect(op->id)) needs_demote = 1;
-        if (op->id == O_VOTE || op->id == O_SHFL) needs_subgroup = 1;
-        if (op->id == O_SHFL && stage == ST_FS) {
-            needs_demote = 1; /* the helper query, below */
-            quad_shfl = g_shader_quad;
-        }
+        if (op->id == O_VOTE || (op->id == O_SHFL && stage != ST_FS)) needs_subgroup = 1;
+        if (op->id == O_SHFL && stage == ST_FS) /* quad_across */
+            needs_derivatives = needs_fine_derivatives = needs_fragcoord = 1;
         if (op->id == O_FSWZADD) { /* a swizzle other than a derivative's reads the lane in its quad */
-            if (stage != ST_FS || !fswzadd_derivative(B(insn[i], 28, 8))) needs_subgroup = 1;
+            if (stage != ST_FS)
+                needs_subgroup = 1;
+            else if (!fswzadd_derivative(B(insn[i], 28, 8)))
+                needs_fragcoord = 1;
         }
-        if (op->id == O_S2R && (B(insn[i], 20, 8) == 0 || (B(insn[i], 20, 8) >= 0x38 && B(insn[i], 20, 8) <= 0x3c)))
+        if (op->id == O_S2R && stage == ST_FS && B(insn[i], 20, 8) == 0)
+            needs_fragcoord = 1; /* quad_place */
+        else if (op->id == O_S2R &&
+                 (B(insn[i], 20, 8) == 0 || (B(insn[i], 20, 8) >= 0x38 && B(insn[i], 20, 8) <= 0x3c)))
             lane_used = 1;
     }
     /* the lane and its masks come from the subgroup, where VOTE and SHFL see the lanes. A vertex pipeline program
@@ -3081,8 +3200,8 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
     spv_emit_shader_capability(&c->emit);
     if (stage == ST_TCS || stage == ST_TES) spv_emit_capability(&c->emit, 3); /* Tessellation */
     if (stage == ST_GS) spv_emit_capability(&c->emit, 2);                     /* Geometry */
-    if (needs_demote || (converge && stage == ST_FS)) {
-        spv_emit_capability(&c->emit, 5379); /* DemoteToHelperInvocation */
+    if (needs_demote || (has_flow && stage == ST_FS)) { /* converge needs flow; flow's helper_loop_exit asks too */
+        spv_emit_capability(&c->emit, 5379);            /* DemoteToHelperInvocation */
         spv_emit_demote_extension(&c->emit);
     }
     if (needs_f16) spv_emit_float16_capability(&c->emit);
@@ -3091,7 +3210,7 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
     if (needs_i64) spv_emit_capability(&c->emit, 11); /* Int64 */
     if (needs_subgroup || converge) spv_emit_subgroup_capabilities(&c->emit);
     if (converge) spv_emit_subgroup_arithmetic_capability(&c->emit);
-    if (quad_shfl) spv_emit_capability(&c->emit, 68); /* GroupNonUniformQuad */
+    if (needs_fine_derivatives) spv_emit_capability(&c->emit, 51); /* DerivativeControl */
     if (needs_gather_extended) spv_emit_image_gather_extended_capability(&c->emit);
     if (needs_image_query) spv_emit_image_query_capability(&c->emit);
     if (needs_glsl) c->glsl = spv_emit_glsl450_import(&c->emit);
@@ -3326,6 +3445,7 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
     if (needs_fragcoord) {
         fragcoord = spv_emit_fragcoord_input(&c->emit, vec4);
         interfaces[count++] = fragcoord;
+        c->quad_coord = fragcoord, c->quad_coord_type = vec4;
     }
     if (needs_scale) {
         c->scale_buffer = spv_emit_uniform_vec4_array(&c->emit, vec4, c->f32_type, c->u32_type, 1, SNX_VKB_RS,
@@ -3523,11 +3643,15 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
     int linear = 0;
     u32 bar_header = 0, bar_continue = 0, bar_merge = 0; /* bar_phases: the loop of phases around the flow loop */
     u32 *case_labels = NULL, *case_literals = NULL;
+    u32* region_end = NULL; /* in order with loops: the last instruction of the loop starting there, 0 for none */
+    u32 lp_start = 0, lp_end = 0, lp_header = 0, lp_cont = 0, lp_merge = 0;
     u8* block_start = NULL;
     size_t case_count = 0;
     /* every OpVariable comes before the first block's other instructions, the clip distances' stores included */
     if (has_flow)
         pc = spv_emit_function_variable_init(&c->emit, reg_ptr, spv_emit_constant_u32(&c->emit, c->u32_type, 11));
+    c->discarded = has_flow && stage == ST_FS ? spv_emit_function_variable_init(&c->emit, pred_ptr, c->false_value) : 0;
+    c->helper_rounds = has_flow && stage == ST_FS ? spv_emit_function_variable_init(&c->emit, reg_ptr, c->zero) : 0;
     for (clip = 0; clip < clip_count; clip++) {
         u32 index = spv_emit_constant_u32(&c->emit, c->u32_type, clip);
         u32 ptr = spv_emit_output_element_pointer(&c->emit, c->f32_type, clip_output, index);
@@ -3578,20 +3702,49 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                 case_labels[case_count++] = spv_emit_id(&c->emit);
             }
         linear = g_shader_linear && !has_barrier && !has_calls && !has_pexit && !dynamic_stack && !unknown_brx;
+        /* A pixel stage's jumps back make loops of blocks in order (Witch Time PR 272 and 276): reach[t] is the
+           last instruction that jumps back to t, a stretch [t, reach[t]] runs in a structured loop, and stretches
+           that overlap become one (region_end at its start). No dispatcher, no subgroup operation in the flow: AMD's
+           compilers keep a quad's derivatives in structured flow (issue 17). Lanes leave a loop on their own, so a
+           quad read inside one keeps the dispatcher, as Witch Time's do */
+        int loops_ok = linear && stage == ST_FS && g_shader_linear_loops;
         for (u32 i = 11; linear && i < n; i++) {
             if (!IDX_OK(i)) continue;
             int id = decode(insn[i])->id;
-            if (id == O_PCNT || id == O_CONT || id == O_CAL || id == O_RET || id == O_PRET)
+            u32 back = 0;
+            if (id == O_CAL || id == O_RET || id == O_PRET)
                 linear = 0;
             else if (id == O_BRA)
-                linear = bra_target(insn[i], i) > i;
-            else if (id == O_SYNC || id == O_BRK)
-                linear = pop_targets[i] > i;
+                back = bra_target(insn[i], i) <= i ? bra_target(insn[i], i) + 1 : 0;
+            else if (id == O_SYNC || id == O_BRK || id == O_CONT)
+                back = pop_targets[i] <= i ? pop_targets[i] + 1 : 0;
             else if (id == O_BRX) {
                 u32 targets[64];
                 int count = shader_brx_targets(insn, i, n, targets, 64);
                 for (int k = 0; k < count; k++)
-                    if (targets[k] <= i) linear = 0;
+                    if (targets[k] <= i && (!back || targets[k] + 1 < back)) back = targets[k] + 1;
+            }
+            if (back && !loops_ok) linear = 0;
+            if (back) {
+                if (!region_end) region_end = calloc(n, sizeof *region_end);
+                if (!region_end) abort();
+                if (region_end[back - 1] < i) region_end[back - 1] = i;
+            }
+        }
+        if (linear && region_end) { /* overlapping stretches into one, and no quad read or vote inside */
+            for (u32 s = 11; s < n; s++) {
+                if (!region_end[s]) continue;
+                u32 end = region_end[s];
+                for (u32 j = s + 1; j <= end; j++) {
+                    if (region_end[j] > end) end = region_end[j];
+                    region_end[j] = 0;
+                }
+                region_end[s] = end;
+                for (u32 j = s; j <= end; j++)
+                    if (IDX_OK(j) && (decode(insn[j])->id == O_SHFL || decode(insn[j])->id == O_VOTE ||
+                                      decode(insn[j])->id == O_FSWZADD))
+                        linear = 0;
+                s = end;
             }
         }
         if (converge) {
@@ -3667,6 +3820,16 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
             c->sampler[c->swapped - 1] = c->texture_array;
             c->swapped = 0;
         }
+        if (has_flow && linear && region_end && region_end[i]) { /* for (;;) { the stretch's blocks } */
+            lp_start = i, lp_end = region_end[i];
+            lp_header = spv_emit_id(&c->emit), lp_cont = spv_emit_id(&c->emit), lp_merge = spv_emit_id(&c->emit);
+            u32 lp_body = spv_emit_id(&c->emit);
+            spv_emit_branch(&c->emit, lp_header);
+            spv_emit_label(&c->emit, lp_header);
+            spv_emit_loop_merge(&c->emit, lp_merge, lp_cont);
+            spv_emit_branch(&c->emit, lp_body);
+            spv_emit_label(&c->emit, lp_body);
+        }
         if (has_flow && block_start[i] && linear) { /* if (pc == i) */
             u32 body = case_labels[case_index++];
             block_merge = spv_emit_id(&c->emit);
@@ -3692,7 +3855,7 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
             guard_merge = spv_emit_id(&c->emit);
             u32 condition = pred_read(c, B(w, 16, 3), B(w, 19, 1));
             if (flow_has_cc(op) && B(w, 0, 5) != 15) condition = cc_and(c, condition, cc_test(c, B(w, 0, 5)));
-            if (skip_helper) condition = cc_and(c, condition, cc_not(c, spv_emit_is_helper(&c->emit, c->bool_type)));
+            if (skip_helper) condition = cc_and(c, condition, cc_not(c, lane_dead(c)));
             spv_emit_selection_merge(&c->emit, guard_merge);
             spv_emit_branch_conditional(&c->emit, condition, execute, guard_merge);
             spv_emit_label(&c->emit, execute);
@@ -3784,9 +3947,10 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                 value = spv_emit_vec4_extract(&c->emit, c->u32_type, group, local ? sr - 0x21 : sr - 0x25);
             } else if (sr == 0 || (sr >= 0x38 && sr <= 0x3c)) {
                 /* SR_LANEID, and the EQ, LT, LE, GT and GE lane masks of a 32-lane warp */
-                u32 lane = lane_is_invocation ? spv_emit_load(&c->emit, c->u32_type, invocation_id)
-                           : lane_model       ? c->zero
-                                              : spv_emit_load(&c->emit, c->u32_type, c->subgroup_lane_input);
+                u32 lane = lane_is_invocation      ? spv_emit_load(&c->emit, c->u32_type, invocation_id)
+                           : lane_model            ? c->zero
+                           : stage == ST_FS && !sr ? quad_place(c) /* the place SHFL reads by */
+                                                   : spv_emit_load(&c->emit, c->u32_type, c->subgroup_lane_input);
                 lane = spv_emit_bitwise_and_u32(&c->emit, c->u32_type, lane,
                                                 spv_emit_constant_u32(&c->emit, c->u32_type, 31));
                 u32 one = spv_emit_constant_u32(&c->emit, c->u32_type, 1);
@@ -3811,7 +3975,7 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                     &c->emit, c->u32_type, value, spv_emit_vec4_extract(&c->emit, c->u32_type, tid, 2),
                     spv_emit_constant_u32(&c->emit, c->u32_type, 26), spv_emit_constant_u32(&c->emit, c->u32_type, 6));
             } else if (stage == ST_FS && sr == 0x13) /* SR_THREAD_KILL: all ones in a lane KIL demoted */
-                value = spv_emit_select(&c->emit, c->u32_type, spv_emit_is_helper(&c->emit, c->bool_type),
+                value = spv_emit_select(&c->emit, c->u32_type, lane_dead(c),
                                         spv_emit_constant_u32(&c->emit, c->u32_type, 0xffffffffu), c->zero);
             else if (sr == 0x11) /* SR_INVOCATION_ID */
                 value = spv_emit_load(&c->emit, c->u32_type, invocation_id);
@@ -4081,7 +4245,9 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
             u32 index = B(w, 28, 1) ? spv_emit_constant_u32(&c->emit, c->u32_type, B(w, 20, 5)) : reg_read(c, b);
             u32 mask =
                 B(w, 29, 1) ? spv_emit_constant_u32(&c->emit, c->u32_type, B(w, 34, 13)) : reg_read(c, B(w, 39, 8));
-            u32 lane_full = spv_emit_load(&c->emit, c->u32_type, c->subgroup_lane_input);
+            /* a pixel stage's lane is its place in the quad (quad_place), and it reads the quad with quad_across */
+            u32 place = stage == ST_FS ? quad_place(c) : 0;
+            u32 lane_full = stage == ST_FS ? place : spv_emit_load(&c->emit, c->u32_type, c->subgroup_lane_input);
             u32 lane = spv_emit_bitwise_and_u32(&c->emit, c->u32_type, lane_full,
                                                 spv_emit_constant_u32(&c->emit, c->u32_type, 31));
             u32 seg = spv_emit_bitwise_and_u32(
@@ -4114,50 +4280,36 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                                                     spv_emit_isub_u32(&c->emit, c->u32_type, lane, min_lane), index))
                               : spv_emit_bool_not(&c->emit, c->bool_type,
                                                   spv_emit_u_less(&c->emit, c->bool_type, max_lane, source_lane));
-            u32 host_lane =
-                spv_emit_bitwise_or_u32(&c->emit, c->u32_type,
-                                        spv_emit_bitwise_and_u32(&c->emit, c->u32_type, lane_full,
-                                                                 spv_emit_constant_u32(&c->emit, c->u32_type, ~31u)),
-                                        spv_emit_bitwise_and_u32(&c->emit, c->u32_type, source_lane,
-                                                                 spv_emit_constant_u32(&c->emit, c->u32_type, 31)));
-            u32 value = reg_read(c, a);
-            u32 shuffled = spv_emit_subgroup_shuffle_u32(&c->emit, c->u32_type, value, host_lane);
+            u32 value = reg_read(c, a), shuffled;
             if (stage == ST_FS) {
-                /* a helper or inactive source lane gives AMD garbage, where Maxwell's helpers ran the code: keep
-                   the lane's own value, as for an out-of-segment lane (black dots on the shop's characters) */
-                u32 live = subgroup_ballot_word(
-                    c, vec4_u32, host_lane,
-                    spv_emit_bool_not(&c->emit, c->bool_type, spv_emit_is_helper(&c->emit, c->bool_type)));
-                u32 bit = spv_emit_bitwise_and_u32(
-                    &c->emit, c->u32_type,
-                    spv_emit_shift_right_u32(
-                        &c->emit, c->u32_type, live,
-                        spv_emit_bitwise_and_u32(&c->emit, c->u32_type, host_lane,
-                                                 spv_emit_constant_u32(&c->emit, c->u32_type, 31))),
-                    spv_emit_constant_u32(&c->emit, c->u32_type, 1));
-                u32 source_live = spv_emit_i_not_equal(&c->emit, c->bool_type, bit, c->zero);
-                shuffled = spv_emit_select(&c->emit, c->u32_type, source_live, shuffled, value);
-            }
-            if (quad_shfl) {
-                /* a source in the lane's own quad is read with quad swaps, which run on helpers too, so a word ORed
-                   over the quad is the same in all four lanes as on Maxwell. Otherwise the helper's light list
-                   differed from its quad's, it looped apart, and its quad's derivatives broke at triangle edges
-                   (dots and lines on the costume screen's characters) */
-                u32 three = spv_emit_constant_u32(&c->emit, c->u32_type, 3);
+                /* Maxwell's helpers run the code, so a word ORed over the quad comes out the same in all four
+                   pixels; a helper with another word loops apart and breaks its quad's derivatives (the costume
+                   screen's lines). Only the quad is there to read: a source outside it keeps the pixel's own
+                   value, as an out-of-segment one does. An XOR by a constant reads one known direction */
                 u32 apart = spv_emit_bitwise_xor_u32(&c->emit, c->u32_type, source_lane, lane);
+                int k_const = mode == 3 && B(w, 28, 1) ? (int)(B(w, 20, 5) & 3) : -1;
                 u32 in_quad =
                     spv_emit_i_equal(&c->emit, c->bool_type,
                                      spv_emit_bitwise_and_u32(&c->emit, c->u32_type, apart,
                                                               spv_emit_constant_u32(&c->emit, c->u32_type, ~3u)),
                                      c->zero);
-                u32 k = spv_emit_bitwise_and_u32(&c->emit, c->u32_type, apart, three);
-                u32 quad = value;
-                for (u32 dir = 0; dir < 3; dir++)
-                    quad = spv_emit_select(&c->emit, c->u32_type,
-                                           spv_emit_i_equal(&c->emit, c->bool_type, k,
-                                                            spv_emit_constant_u32(&c->emit, c->u32_type, dir + 1)),
-                                           spv_emit_subgroup_quad_swap_u32(&c->emit, c->u32_type, value, dir), quad);
-                shuffled = spv_emit_select(&c->emit, c->u32_type, in_quad, quad, shuffled);
+                u32 across[4] = {value, 0, 0, 0};
+                if (k_const == 0 || a == 255) {
+                    for (int dir = 1; dir < 4; dir++) across[dir] = value;
+                } else
+                    quad_across(c, value, k_const, place, across);
+                shuffled = quad_pick(c, across, k_const,
+                                     spv_emit_bitwise_and_u32(&c->emit, c->u32_type, apart,
+                                                              spv_emit_constant_u32(&c->emit, c->u32_type, 3)));
+                shuffled = spv_emit_select(&c->emit, c->u32_type, in_quad, shuffled, value);
+            } else {
+                u32 host_lane = spv_emit_bitwise_or_u32(
+                    &c->emit, c->u32_type,
+                    spv_emit_bitwise_and_u32(&c->emit, c->u32_type, lane_full,
+                                             spv_emit_constant_u32(&c->emit, c->u32_type, ~31u)),
+                    spv_emit_bitwise_and_u32(&c->emit, c->u32_type, source_lane,
+                                             spv_emit_constant_u32(&c->emit, c->u32_type, 31)));
+                shuffled = spv_emit_subgroup_shuffle_u32(&c->emit, c->u32_type, value, host_lane);
             }
             pred_write(c, B(w, 48, 3), valid);
             reg_write(c, d, spv_emit_select(&c->emit, c->u32_type, valid, shuffled, value));
@@ -5768,12 +5920,14 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                 result = spv_emit_derivative(&c->emit, c->f32_type, rhs, quad == 0xa5 || quad == 0x5a);
                 if (quad == 0x66 || quad == 0x5a) result = spv_emit_fnegate(&c->emit, c->f32_type, result);
             } else {
-                /* each lane's mode, 2 bits of the swizzle by its place in the quad (the subgroup lane's low 2
-                   bits), scales A and B as Eden's EmitFSwizzleAdd (GPL-2.0-or-later) does: A * {1, -1, 1, 0} +
-                   B * {1, 1, -1, 1} */
-                u32 lane = spv_emit_bitwise_and_u32(&c->emit, c->u32_type,
-                                                    spv_emit_load(&c->emit, c->u32_type, c->subgroup_lane_input),
-                                                    spv_emit_constant_u32(&c->emit, c->u32_type, 3));
+                /* each lane's mode, 2 bits of the swizzle by its place in the quad (quad_place in a pixel stage,
+                   else the subgroup lane's low 2 bits), scales A and B as Eden's EmitFSwizzleAdd (GPL-2.0-or-later)
+                   does: A * {1, -1, 1, 0} + B * {1, 1, -1, 1} */
+                u32 lane = stage == ST_FS
+                               ? quad_place(c)
+                               : spv_emit_bitwise_and_u32(&c->emit, c->u32_type,
+                                                          spv_emit_load(&c->emit, c->u32_type, c->subgroup_lane_input),
+                                                          spv_emit_constant_u32(&c->emit, c->u32_type, 3));
                 u32 shift = spv_emit_shift_left_u32(&c->emit, c->u32_type, lane,
                                                     spv_emit_constant_u32(&c->emit, c->u32_type, 1));
                 u32 mode = spv_emit_bitwise_and_u32(
@@ -6577,8 +6731,12 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
             spv_emit_memory_barrier(&c->emit, c->u32_type, scope, 0x848u | (stage == ST_CS ? 0x100u : 0));
         } else if (op == O_KIL) {
             /* the lane goes on as a helper, so that its quad's derivatives stay defined, and nothing it writes
-               lands: what the hardware gives, and what Eden does */
-            spv_emit_demote(&c->emit);
+               lands: what the hardware gives, and what Eden does. In a program with flow it goes on as a lane that
+               only remembers it, and is discarded after the loop (DirectCtx.discarded) */
+            if (c->discarded)
+                spv_emit_store(&c->emit, c->discarded, c->true_value);
+            else
+                spv_emit_demote(&c->emit);
         } else if (op == O_EXIT) {
             u32 pexit_merge = 0;
             if (has_pexit) {
@@ -6632,21 +6790,38 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                                    spv_emit_bitcast(&c->emit, c->f32_type, reg_read(c, reg + 1)));
                 if (push && (target & 15)) alpha_test(c, push, push_pointer, alpha);
             }
-            if (!bar_phases) spv_emit_return(&c->emit);
+            if (c->discarded) { /* the lane leaves the flow, and a discarded one is discarded after it */
+                spv_emit_store(&c->emit, pc, spv_emit_constant_u32(&c->emit, c->u32_type, UINT32_MAX));
+                if (has_pexit) spv_emit_branch(&c->emit, pexit_merge);
+            } else if (!bar_phases)
+                spv_emit_return(&c->emit);
             if (has_pexit) spv_emit_label(&c->emit, pexit_merge);
         }
         /* no texture is sparse, so every texel a fetch reads is resident */
         pred_write(c, sparse_predicate(w, op), c->false_value);
         if (guard_merge) {
-            if (op != O_EXIT || bar_phases) spv_emit_branch(&c->emit, guard_merge);
+            if (op != O_EXIT || bar_phases || c->discarded) spv_emit_branch(&c->emit, guard_merge);
             spv_emit_label(&c->emit, guard_merge);
         } else if (op == O_EXIT && !has_flow)
             break;
         u32 next = next_instruction(i, n);
         if (has_flow && (next >= n || block_start[next])) {
-            if (guard_merge || op != O_EXIT || has_pexit || bar_phases)
+            if (guard_merge || op != O_EXIT || has_pexit || bar_phases || c->discarded)
                 spv_emit_branch(&c->emit, linear ? block_merge : dispatch_merge);
             if (linear) spv_emit_label(&c->emit, block_merge); /* the next block's test, or the end */
+            if (linear && lp_end == i && lp_header) {          /* again while pc points back into the stretch */
+                spv_emit_branch(&c->emit, lp_cont);
+                spv_emit_label(&c->emit, lp_cont);
+                u32 inside = spv_emit_isub_u32(&c->emit, c->u32_type, spv_emit_load(&c->emit, c->u32_type, pc),
+                                               spv_emit_constant_u32(&c->emit, c->u32_type, lp_start));
+                u32 again =
+                    cc_not(c, spv_emit_u_less(&c->emit, c->bool_type,
+                                              spv_emit_constant_u32(&c->emit, c->u32_type, lp_end - lp_start), inside));
+                again = cc_and(c, again, cc_not(c, helper_loop_exit(c))); /* a helper's loop may never end */
+                spv_emit_branch_conditional(&c->emit, again, lp_header, lp_merge);
+                spv_emit_label(&c->emit, lp_merge);
+                lp_header = 0;
+            }
         }
     }
     if (has_flow && !linear) {
@@ -6661,16 +6836,36 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
         spv_emit_branch(&c->emit, dispatch_merge);
         spv_emit_label(&c->emit, dispatch_merge);
         u32 next_pc = spv_emit_load(&c->emit, c->u32_type, pc);
+        /* A converging pixel stage leaves when every lane has finished: a lane that left early stops answering its
+           quad's derivatives and quad reads while the others go on (issue 17 on Vega; Witch Time PR 98 loops until
+           the wave is done). Finished lanes take the wait case meanwhile. Helpers vote as finished: counted, the
+           wave would wait for a helper looping on extrapolated inputs up to its 4096 passes (test build 9's GPU
+           hang on Vega), where the real pixels are what decides it; the helpers leave with them. */
+        if (converge && stage == ST_FS)
+            next_pc = spv_emit_subgroup_umin_u32(
+                &c->emit, c->u32_type,
+                spv_emit_select(&c->emit, c->u32_type, spv_emit_is_helper(&c->emit, c->bool_type),
+                                spv_emit_constant_u32(&c->emit, c->u32_type, UINT32_MAX), next_pc));
         u32 finished =
             spv_emit_i_equal(&c->emit, c->bool_type, next_pc, spv_emit_constant_u32(&c->emit, c->u32_type, UINT32_MAX));
         if (bar_phases) /* or stopped at a BAR */
             finished = spv_emit_bool_binary(
                 &c->emit, c->bool_type, 1, finished,
                 spv_emit_i_not_equal(&c->emit, c->bool_type, spv_emit_load(&c->emit, c->u32_type, bar_stop), c->zero));
+        if (c->helper_rounds) finished = cc_or(c, finished, helper_loop_exit(c));
         spv_emit_branch_conditional(&c->emit, finished, loop_merge, loop_continue);
         spv_emit_label(&c->emit, loop_continue);
         spv_emit_branch(&c->emit, loop_header);
         spv_emit_label(&c->emit, loop_merge);
+    }
+    if (c->discarded) { /* after the flow loop, or after the in-order blocks */
+        u32 kill_label = spv_emit_id(&c->emit), kept = spv_emit_id(&c->emit);
+        u32 discard = spv_emit_load(&c->emit, c->bool_type, c->discarded);
+        spv_emit_selection_merge(&c->emit, kept);
+        spv_emit_branch_conditional(&c->emit, discard, kill_label, kept);
+        spv_emit_label(&c->emit, kill_label);
+        spv_emit_kill(&c->emit);
+        spv_emit_label(&c->emit, kept);
     }
     if (bar_phases) {
         /* every invocation is here, stopped at a BAR or finished: the BAR's barrier, uniform. The pass's word says
@@ -6714,6 +6909,7 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
     spv_emit_destroy(&c->emit);
     free(c);
     free(case_labels); /* the literals and block starts too */
+    free(region_end);
     free(pop_targets);
     free(gb_at);
     ShaderInfo next = {0};

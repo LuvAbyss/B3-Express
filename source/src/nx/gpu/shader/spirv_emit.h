@@ -231,9 +231,8 @@ uint32_t spv_emit_subgroup_ballot(SpvEmitter* e, uint32_t vec4_type, uint32_t u3
 uint32_t spv_emit_subgroup_umin_u32(SpvEmitter* e, uint32_t u32_type, uint32_t value);
 void spv_emit_subgroup_arithmetic_capability(SpvEmitter* e);
 uint32_t spv_emit_subgroup_shuffle_u32(SpvEmitter* e, uint32_t u32_type, uint32_t value, uint32_t lane);
-/* OpGroupNonUniformQuadSwap, direction 0 horizontal (lane ^ 1), 1 vertical (^ 2), 2 diagonal (^ 3); the module
-   declares GroupNonUniformQuad (68) */
-uint32_t spv_emit_subgroup_quad_swap_u32(SpvEmitter* e, uint32_t u32_type, uint32_t value, uint32_t direction);
+/* OpDPdxFine or OpDPdyFine: the difference within the pixel's own pair; the module declares DerivativeControl (51) */
+uint32_t spv_emit_derivative_fine(SpvEmitter* e, uint32_t f32_type, uint32_t value, int y_axis);
 uint32_t spv_emit_vec4_insert(SpvEmitter* e, uint32_t vec4_type, uint32_t vector, uint32_t component_value,
                               uint32_t component);
 uint32_t spv_emit_vec4_construct(SpvEmitter* e, uint32_t vec4_type, const uint32_t components[4]);

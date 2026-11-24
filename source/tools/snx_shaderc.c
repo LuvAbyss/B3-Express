@@ -88,6 +88,8 @@ int main(int argc, char** argv) {
     g_shader_texture_arrays = 1;
     const char* linear = getenv("SNX_SHADER_LINEAR"); /* 0: every program with jumps in the dispatch loop */
     if (linear && !strcmp(linear, "0")) g_shader_linear = 0;
+    const char* loops = getenv("SNX_SHADER_LOOPS"); /* 0: pixel stages with loops in the dispatch loop */
+    if (loops && !strcmp(loops, "0")) g_shader_linear_loops = 0;
     DIR* directory = opendir(dir);
     if (!directory) {
         fprintf(stderr, "cannot open %s\n", dir);

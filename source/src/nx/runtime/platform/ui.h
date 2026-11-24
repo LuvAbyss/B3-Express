@@ -36,4 +36,9 @@ void ui_atlas_done(void);
 /* the controls and the menu change on the main thread while the renderer draws them on its own: both under this */
 void ui_lock(void);
 void ui_unlock(void);
+
+/* a screen of the runtime's own covers the game (shader preparation, gpu/vk/ui.c): the game gets no input meanwhile,
+   as while the menu is open. Any thread */
+void ui_hold_set(int on);
+int ui_hold(void);
 #endif

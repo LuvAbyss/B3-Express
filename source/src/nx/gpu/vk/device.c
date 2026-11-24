@@ -9,6 +9,7 @@
 #include "nx/runtime/platform/log.h"
 #include "nx/runtime/platform/plat.h"
 #include "nx/gpu/vk/vk.h"
+#include "nx/gpu/vk/nvn_res.h"
 
 int g_vk_preserve_infnan;
 int g_vk_preserve_infnan64;
@@ -61,7 +62,36 @@ static const char* vk_result_str(VkResult r) {
 int vk_ok_(VkResult r, const char* what, const char* file, int line) {
     if (r >= 0) return 1;
     WARN("vulkan: %s failed: %s (%d) at %s:%d\n", what, vk_result_str(r), (int)r, file, line);
+    if (r == VK_ERROR_DEVICE_LOST) vk_device_lost_report();
     return 0;
+}
+
+void vk_device_lost_report(void) {
+    static int reported;
+    if (__atomic_exchange_n(&reported, 1, __ATOMIC_ACQ_REL)) return;
+    if (!g_vk.has_marker && !g_vk.has_fault) {
+        WARN("vulkan: the device was lost; SNX_GPU_MARKERS=1 names the draw the GPU was in next time\n");
+        return;
+    }
+    vk_nvn_markers_report();
+    if (!g_vk.has_fault) return;
+    VkDeviceFaultCountsEXT n = {.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+    if (vkGetDeviceFaultInfoEXT(g_vk.dev, &n, NULL) != VK_SUCCESS) return;
+    VkDeviceFaultAddressInfoEXT* a = calloc(n.addressInfoCount ? n.addressInfoCount : 1, sizeof *a);
+    VkDeviceFaultVendorInfoEXT* v = calloc(n.vendorInfoCount ? n.vendorInfoCount : 1, sizeof *v);
+    VkDeviceFaultInfoEXT fi = {.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT, .pAddressInfos = a, .pVendorInfos = v};
+    n.vendorBinarySize = 0;
+    if (a && v && vkGetDeviceFaultInfoEXT(g_vk.dev, &n, &fi) >= 0) {
+        WARN("vulkan: device fault: %s\n", fi.description);
+        for (u32 i = 0; i < n.addressInfoCount; i++)
+            WARN("vulkan: device fault address: type %d at %llx (within %llx)\n", (int)a[i].addressType,
+                 (unsigned long long)a[i].reportedAddress, (unsigned long long)a[i].addressPrecision);
+        for (u32 i = 0; i < n.vendorInfoCount; i++)
+            WARN("vulkan: device fault, vendor: %s (code %llx, data %llx)\n", v[i].description,
+                 (unsigned long long)v[i].vendorFaultCode, (unsigned long long)v[i].vendorFaultData);
+    }
+    free(a);
+    free(v);
 }
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBitsEXT sev,
@@ -230,8 +260,9 @@ static int create_device(void) {
                      VK_SUBGROUP_FEATURE_ARITHMETIC_BIT)
             ? subgroup.supportedStages
             : 0;
-    g_shader_quad = (g_vk_subgroup_stages & VK_SHADER_STAGE_FRAGMENT_BIT) &&
-                    (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_QUAD_BIT);
+    LOG("vulkan: subgroups of %u, stages %x, operations %x; in pixel stages %s\n", subgroup.subgroupSize,
+        subgroup.supportedStages, subgroup.supportedOperations,
+        g_vk_subgroup_stages & VK_SHADER_STAGE_FRAGMENT_BIT ? "yes" : "no");
     g_vk_preserve_infnan = p12.shaderSignedZeroInfNanPreserveFloat32 != 0;
     g_vk_preserve_infnan64 = p12.shaderSignedZeroInfNanPreserveFloat64 != 0;
     /* 32 bit alone: a device whose denorm modes can't differ per width would need 16 and 64 bit declared too */
@@ -244,6 +275,11 @@ static int create_device(void) {
         if (l && !strcmp(l, "0")) {
             g_shader_linear = 0;
             WARN("vulkan: SNX_SHADER_LINEAR=0: every shader with jumps runs in the dispatch loop\n");
+        }
+        const char* lp = getenv("SNX_SHADER_LOOPS");
+        if (lp && !strcmp(lp, "0")) {
+            g_shader_linear_loops = 0;
+            WARN("vulkan: SNX_SHADER_LOOPS=0: pixel stages with loops run in the dispatch loop\n");
         }
         const char* e = getenv("SNX_SOFT_FTZ");
         if (e && !strcmp(e, "0")) {
@@ -322,7 +358,9 @@ static int create_device(void) {
     g_shader_stage_point_size = want->shaderTessellationAndGeometryPointSize != 0;
     g_shader_geometry = want->geometryShader != 0;
     g_shader_tessellation = want->tessellationShader != 0;
-    const char* ext[10];
+    const char* ext[12];
+    const char* markers = getenv("SNX_GPU_MARKERS");
+    int want_markers = markers && atoi(markers) > 0, has_marker = 0, has_fault = 0;
     u32 next = 0;
     int has_shader_clock = 0, has_budget = 0, has_gpl = 0, has_lib = 0, has_eds3 = 0;
     if (!g_opt_headless) ext[next++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
@@ -340,6 +378,8 @@ static int create_device(void) {
             if (!strcmp(e[i].extensionName, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME)) has_gpl = 1;
             if (!strcmp(e[i].extensionName, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME)) has_lib = 1;
             if (!strcmp(e[i].extensionName, VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME)) has_eds3 = 1;
+            if (!strcmp(e[i].extensionName, VK_AMD_BUFFER_MARKER_EXTENSION_NAME)) has_marker = 1;
+            if (!strcmp(e[i].extensionName, VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) has_fault = 1;
             /* a portability driver's subset must be enabled when it has one (MoltenVK) */
             if (!strcmp(e[i].extensionName, "VK_KHR_portability_subset")) ext[next++] = "VK_KHR_portability_subset";
         }
@@ -479,6 +519,26 @@ static int create_device(void) {
     VkPhysicalDeviceExtendedDynamicState3FeaturesEXT eeds3 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT,
         .extendedDynamicState3DepthClampEnable = VK_TRUE};
+    VkPhysicalDeviceFaultFeaturesEXT efault = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
+    if (want_markers && has_fault) { /* only when the driver offers the feature itself */
+        VkPhysicalDeviceFeatures2 f2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &efault};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &f2);
+        efault.pNext = NULL;
+        efault.deviceFaultVendorBinary = VK_FALSE;
+        if (efault.deviceFault) {
+            efault.pNext = chain;
+            chain = &efault;
+            ext[next++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
+            g_vk.has_fault = 1;
+        }
+    }
+    if (want_markers && has_marker) {
+        ext[next++] = VK_AMD_BUFFER_MARKER_EXTENSION_NAME; /* no features to enable */
+        g_vk.has_marker = 1;
+    }
+    if (want_markers)
+        LOG("vulkan: SNX_GPU_MARKERS: buffer markers %s, device fault reports %s\n",
+            g_vk.has_marker ? "on" : "not offered", g_vk.has_fault ? "on" : "not offered");
     if (g_vk.has_dyn_clamp) {
         eeds3.pNext = chain;
         chain = &eeds3;

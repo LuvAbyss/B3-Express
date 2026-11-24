@@ -3,9 +3,11 @@
 /* The on-screen controls and the game's menu (runtime/platform/ui.h) over a presented frame: the quads they give,
    blended onto the swapchain image in a pass of their own after the frame's blit. Nothing is recorded while neither
    shows */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "nx/gpu/vk/vk.h"
+#include "nx/gpu/vk/nvn_res.h"
 #include "nx/gpu/vk/ui_spv.h"
 #include "nx/runtime/platform/log.h"
 #include "nx/runtime/platform/overlay.h"
@@ -249,6 +251,31 @@ static void vertex(Vertex* v, float x, float y, float u, float t, u32 rgba) {
     v->v = t;
     v->rgba = rgba;
 }
+/* 0xRRGGBB at alpha a as the quads take it, R G B A from the low byte */
+static u32 rgba(u32 rgb, u32 a) { return (rgb >> 16 & 0xFFu) | (rgb & 0xFF00u) | (rgb & 0xFFu) << 16 | a << 24; }
+static void centred(SnxUiList* l, int sw, float y, int scale, const char* s, u32 colour) {
+    ui_text(l, ((float)sw - (float)strlen(s) * 8.0f * (float)scale) / 2.0f, y, scale, s, colour);
+}
+/* the shader preparation screen over the whole picture, while the game waits behind it (nvn_res.c) */
+static void prep_draw(SnxUiList* l, int sw, int sh) {
+    u64 done, left, given;
+    char line[96];
+    int s = sh / 540 < 1 ? 1 : sh / 540;
+    float bw = (float)sw * 0.5f, bh = 4.0f * (float)s, bx = ((float)sw - bw) / 2.0f, by = (float)sh * 0.5f;
+    if (!vk_nvn_prep_screen(&done, &left, &given)) return;
+    ui_fill(l, 0.0f, 0.0f, (float)sw, (float)sh, rgba(0x000000u, 255));
+    centred(l, sw, by - 56.0f * (float)s, s * 2, "Preparing shaders", rgba(0xE6E4DCu, 255));
+    ui_fill(l, bx, by, bw, bh, rgba(0x3E3E40u, 255));
+    if (done + left) ui_fill(l, bx, by, bw * (float)done / (float)(done + left), bh, rgba(0xD9B24Au, 255));
+    if (given < 1000 && !done)
+        snprintf(line, sizeof line, "Loading the game's shaders");
+    else
+        snprintf(line, sizeof line, "%llu of %llu", (unsigned long long)done, (unsigned long long)(done + left));
+    centred(l, sw, by + bh + 16.0f * (float)s, s, line, rgba(0xA0AAB4u, 255));
+    centred(l, sw, by + bh + 40.0f * (float)s, s,
+            "Once for this graphics card and driver. The game starts when it is done.", rgba(0x8E8C86u, 255));
+}
+
 void vk_ui_draw(VkCommandBuffer cb, VkImage sc, const int safe[4]) {
     SnxUiList list = {g_quads, 0, MAX_QUADS};
     int sw = (int)g_vk.sc_extent.width, sh = (int)g_vk.sc_extent.height, n, i, run;
@@ -263,6 +290,7 @@ void vk_ui_draw(VkCommandBuffer cb, VkImage sc, const int safe[4]) {
     if (!layout_make()) return;
     ui_lock();
     atlas_upload(cb);
+    prep_draw(&list, sw, sh);
     vpad_draw(&list, safe);
     overlay_draw(&list, sw, sh);
     ui_unlock();

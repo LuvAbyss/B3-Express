@@ -9,6 +9,8 @@
 #include "nx/runtime/loader.h"
 #include "nx/runtime/platform/log.h"
 #include "nx/runtime/platform/plat.h"
+#include "nx/gpu/vk/nvn_res.h"
+#include <string.h>
 #if !defined(_WIN32)
 #include <signal.h>
 #endif
@@ -81,6 +83,17 @@ static void report_place(void* host_pc) {
             return;
         }
     }
+    { /* a library's: which one, so a crash in a driver names it (issue 17) */
+        HMODULE m;
+        char name[MAX_PATH];
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)host_pc, &m) &&
+            GetModuleFileNameA(m, name, sizeof name)) {
+            const char* b = strrchr(name, '\\');
+            WARN("  in %s at +%llx (a library's)\n", b ? b + 1 : name, (unsigned long long)(pc - (u64)(size_t)m));
+            return;
+        }
+    }
 #elif defined(__ELF__)
     if (__ehdr_start) {
         u64 base = (u64)(size_t)__ehdr_start;
@@ -120,8 +133,10 @@ void crash_report(void* host_pc, void* fault, int sig) {
     if (t) {
         WARN("  thread %llu (%s)\n", (unsigned long long)t->id, t->name);
         kernel_dump_regs(&t->cpu);
-    } else
+    } else {
         WARN("  on one of the runtime's threads, not the game's\n");
+        vk_nvn_crash_note();
+    }
     if (g_mem) {
         mem_report(memory, sizeof memory);
         WARN("  memory: %s\n", memory);

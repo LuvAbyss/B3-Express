@@ -29,6 +29,9 @@ typedef struct {
    shared for compute; key NULL for none. The module's number, or -1 with the reason in why. Takes vk_lock */
 int vk_nvn_shader(int stage, u64 code_gva, u32 window, int compute_stub, u64 cb1_gva, u32 cb1_size,
                   const u32* cs_local, u32 shared, const NvnStageKey* key, char* why, u32 why_size);
+/* for a crash report on a runtime thread: what the thread was having the driver make, with its stages' hashes (the
+   FNV-1a of their SPIR-V, as the log and SNX_NVN_SPV_DUMP name them). Nothing when it wasn't making anything */
+void vk_nvn_crash_note(void);
 /* what a module's translation found: generic inputs read, outputs written, and whether the fragment program header
    declares colour outputs (sph word 18). 0 for no such module */
 int vk_nvn_shader_io(int mod, u32* in_mask, u32* out_mask, u32* frag_outputs);
@@ -38,6 +41,9 @@ int vk_nvn_shader_fade_cut(int mod);
 /* a vertex, fragment or compute stage the game gave a program: prepared by the workers before a draw or dispatch
    needs it. cs_local (the workgroup size) and shared are a compute stage's, NULL and 0 for the others */
 void vk_nvn_prep_add(int stage, u64 code_gva, u32 window, u64 cb1_gva, u32 cb1_size, const u32* cs_local, u32 shared);
+/* 1 while the preparation screen covers the game (vk_ui_draw draws it), with the stages prepared, still to do, and
+   the game gave */
+int vk_nvn_prep_screen(u64* done, u64* left, u64* given);
 
 /* A draw's pipeline in NVN's terms, from the bound state objects (decoded through the driver's getters) and the
    program bound to each stage. Zeroed before it is filled: it is a cache key */
@@ -189,5 +195,7 @@ u64 vk_nvn_cpu_of(u64 gpu);
 /* vertex attribute NVNformat: integer (1), signed integer (3), else 0; and whether a colour NVNformat is integer */
 u32 vk_nvn_attr_int(u32 nvn_format);
 u32 vk_nvn_color_int(u32 nvn_format);
+/* SNX_GPU_MARKERS=1: the replayed draws and dispatches the GPU started and hadn't finished, to the log */
+void vk_nvn_markers_report(void);
 
 #endif
