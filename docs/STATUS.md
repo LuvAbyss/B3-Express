@@ -27,8 +27,10 @@ never the user's save. The notes behind each section are in the `diagnostics/*/R
 - **Files:** runtime `e06153c1`; zip `e8a94dc6`, 84.2 MB, 1,016 files; notes `release/RELEASE-NOTES-0.4.0.md`.
 - **Measured:** the Vega reporter's build 11 (same translator output byte for byte): lines gone, frames 22-26 ms vs 27
   on build 10. RTX 3080: shop route clean, fight at 90 the same as build 10 (sections below). `test_launcher.py` passes.
-- **Not checked:** the new-player test on the unzipped package (`test-fresh.py --web`): another game held the GPU at
-  77% while packaging. Hand play of step 2 and the mouse camera. An update's recompile.
+- **New-player test** on the unzipped package (`test-fresh.py --web`, RTX 3080, run after packaging once the other
+  game had closed): Install from an extracted dump in 219 s, no error, next step Play (the preparation now runs in the
+  game behind its screen), then the game drew 1,200 frames and exited 0.
+- **Not checked:** hand play of step 2 and the mouse camera. An update's recompile.
 
 ## Keyboard prompts for the sticks and the D-pad (2026-11-23; installed, not committed)
 
