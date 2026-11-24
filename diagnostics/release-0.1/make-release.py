@@ -4,12 +4,12 @@ import shutil
 import zipfile
 from pathlib import Path
 
-VERSION = '0.3.6'
+VERSION = '0.4.0'
 root = Path.cwd()
 name = f'B3-Express-{VERSION}-windows-x64'
 out = root / 'release' / name
-exe = root / 'diagnostics/release-0.1/Bayo3_120-0.3.6-release.exe'  # built from d874ad0 (0.3.5 and the present slot's 50 us slack): run by script at 90, not played by hand
-assert hashlib.sha256(exe.read_bytes()).hexdigest().startswith('447f4090')
+exe = root / 'diagnostics/release-0.1/Bayo3_120-0.4.0-release.exe'  # built from ae50a1f (issue 17's Vega fix, 90 FPS frame counters, mouse camera, key prompts, launcher): the Vega fix confirmed by the reporter, the rest run by script, not played by hand
+assert hashlib.sha256(exe.read_bytes()).hexdigest().startswith('e06153c1')
 assert not (root / 'release' / (name + '.zip')).exists(), 'this version is already packaged: raise VERSION'
 if out.exists():
     shutil.rmtree(out)
