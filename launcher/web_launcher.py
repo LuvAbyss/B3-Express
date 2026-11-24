@@ -153,6 +153,7 @@ class Api:
 
     def _start_game(self, prepare):
         L.keep_last_log()
+        L.record_drivers(L.GAME / 'shader_cache')
         env = dict(os.environ, **L.ENV)
         if prepare:
             env['SNX_NVN_PREP_RUN'] = '1'
@@ -381,6 +382,12 @@ class Api:
 
 
 def main():
+    # Windows marks files unpacked from a downloaded zip, and .NET Framework then refuses pythonnet's assembly
+    # ("Failed to resolve Python.Runtime.Loader.Initialize", every start in issue 17's log): drop the mark
+    try:
+        os.remove(str(Path(sys.prefix) / 'Lib/site-packages/pythonnet/runtime/Python.Runtime.dll') + ':Zone.Identifier')
+    except OSError:  # no mark, or not NTFS
+        pass
     try:
         import webview
     except Exception:  # no pywebview in this Python: the old window

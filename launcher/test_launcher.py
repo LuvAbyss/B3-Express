@@ -289,6 +289,20 @@ _c = Path(tempfile.mkdtemp())
 assert not L.shaders_ready(_c, 7)
 (_c / 'prepared.txt').write_text('00800161c 7\n')
 assert L.shaders_ready(_c, 7)
+# a driver update the game hasn't run on yet: Windows' display drivers differ from the ones the game last started with
+_real = L.display_drivers
+L.display_drivers = lambda: 'NVIDIA GeForce RTX 3080 32.0.16.2135'
+assert L.shaders_ready(_c, 7)  # nothing recorded yet: not known to have changed
+L.record_drivers(_c)
+assert (_c / 'drivers.txt').read_text(encoding='utf8') == 'NVIDIA GeForce RTX 3080 32.0.16.2135' and L.shaders_ready(_c, 7)
+L.display_drivers = lambda: 'NVIDIA GeForce RTX 3080 32.0.16.2224'
+assert not L.shaders_ready(_c, 7)
+L.display_drivers = lambda: ''  # can't be read: the game's own check alone
+assert L.shaders_ready(_c, 7)
+L.record_drivers(_c)
+assert (_c / 'drivers.txt').read_text(encoding='utf8') == 'NVIDIA GeForce RTX 3080 32.0.16.2135'  # nothing to record
+L.display_drivers = _real
+assert isinstance(L.display_drivers(), str)
 
 # the new window's options: what is read writes back the same, every comment kept
 GAME_INI = ('; settings\r\n[Display]\r\ndocked=1\r\nresolution=1.6\r\nfsr=1.6\r\nfullscreen=1\r\nvsync=1\r\n'

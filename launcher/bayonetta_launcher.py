@@ -364,14 +364,58 @@ def game_running(name=NAME):
     return (name + '.exe').lower().encode('ascii') in out.lower()
 
 
+DISPLAY_CLASS = r'SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'
+
+
+def display_drivers():
+    """Windows' display adapters with their driver versions, '' when they can't be read. The game learns its driver
+    only once it runs, so a driver update would otherwise go unseen until the first Play after it"""
+    try:
+        import winreg
+        found, i = [], 0
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, DISPLAY_CLASS) as adapters:
+            while True:
+                try:
+                    name = winreg.EnumKey(adapters, i)
+                except OSError:
+                    break
+                i += 1
+                try:
+                    with winreg.OpenKey(adapters, name) as a:
+                        found.append(f'{winreg.QueryValueEx(a, "DriverDesc")[0]} {winreg.QueryValueEx(a, "DriverVersion")[0]}')
+                except OSError:  # Configuration, Properties: not adapters
+                    continue
+        return '; '.join(sorted(found))
+    except (ImportError, OSError):
+        return ''
+
+
+def record_drivers(cache):
+    """What display_drivers says as the game starts, for shaders_ready"""
+    drivers = display_drivers()
+    if drivers:
+        try:
+            cache.mkdir(parents=True, exist_ok=True)
+            (cache / 'drivers.txt').write_text(drivers, encoding='utf8')
+        except OSError:
+            pass
+
+
 def shaders_ready(cache, scaled):
-    """A preparation pass finished for this scale mode, and the last run's driver is the one it was for"""
+    """A preparation pass finished for this scale mode, the last run's driver is the one it was for, and Windows'
+    display drivers are the ones the game last started with (none recorded yet: not known to have changed)"""
     try:
         done = (cache / 'prepared.txt').read_text().split()
         now = (cache / 'gpu.txt').read_text().split()
     except OSError:
         return False
-    return len(done) == 2 and len(now) == 2 and done[0] == now[0] and done[1] == str(int(scaled))
+    try:
+        started = (cache / 'drivers.txt').read_text(encoding='utf8')
+    except OSError:
+        started = ''
+    drivers = display_drivers() if started else ''
+    return len(done) == 2 and len(now) == 2 and done[0] == now[0] and done[1] == str(int(scaled)) and \
+        (not drivers or drivers == started)
 
 
 def prepare_progress(cache):
@@ -384,11 +428,13 @@ def prepare_progress(cache):
 
 
 def can_prepare():
-    """The installed game has the preparation pass: an older build would just start and never report"""
+    """Play runs the preparation pass first: the installed game has it (an older build would just start and never
+    report) and doesn't prepare behind its own progress bar before the title (SNX_NVN_PREP_SCREEN, nvn_res.c)"""
     try:
-        return b'SNX_NVN_PREP_RUN' in (GAME / (NAME + '.exe')).read_bytes()
+        exe = (GAME / (NAME + '.exe')).read_bytes()
     except OSError:
         return False
+    return b'SNX_NVN_PREP_RUN' in exe and b'SNX_NVN_PREP_SCREEN' not in exe
 
 
 def scaled_mode(text):
@@ -835,11 +881,13 @@ def code_mods():
 
 
 def code_mods_print(mods=None):
-    """A fingerprint of the code patches on, and of the calls the runtime replaces (TABLE_CALLS, compiled in as
-    table calls): the game code has to be compiled again when either changes"""
+    """A fingerprint of the code patches on, of the calls the runtime replaces (TABLE_CALLS, compiled in as table
+    calls) and of its hook points (HOOK_POINTS): the game code has to be compiled again when any changes"""
     h = hashlib.sha256(b'code mods 1\n')
     if TABLE_CALLS.is_file():
         h.update(b'tablecalls\0' + TABLE_CALLS.read_bytes())
+    if HOOK_POINTS.is_file():
+        h.update(b'insnhooks\0' + HOOK_POINTS.read_bytes())
     for name, f, data in code_mods() if mods is None else mods:
         h.update(f'{name}\0{f}\0{len(data)}\0'.encode('utf8'))
         h.update(data)
@@ -1422,6 +1470,7 @@ class Launcher(LauncherTheme):
         self.preparing = can_prepare() and not shaders_ready(GAME / 'shader_cache', prep_mode(self.text))
         try:
             keep_last_log()
+            record_drivers(GAME / 'shader_cache')
             env = dict(os.environ, **ENV)
             if self.preparing:
                 env['SNX_NVN_PREP_RUN'] = '1'
