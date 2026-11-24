@@ -129,25 +129,31 @@ static void rt_undef(CPU* c, u64 pc, u32 w) {
     fatal("The game ran an instruction the recompiler cannot run (%08x at %llx). See the .log for details.", w,
           (unsigned long long)pc);
 }
-#define RT_HOOKS 64
+#define RT_HOOKS 128
+/* sorted by pc: frame counters' hooks run hundreds of times a frame */
 static struct {
     u64 pc;
     void (*fn)(CPU* RESTRICT c, u64 pc);
 } g_hooks[RT_HOOKS];
 static size_t g_hook_count;
 int rt_hook_set(u64 pc, void (*fn)(CPU* RESTRICT c, u64 pc)) {
+    size_t i;
     if (g_hook_count == RT_HOOKS) return 0;
-    g_hooks[g_hook_count].pc = pc;
-    g_hooks[g_hook_count++].fn = fn;
+    for (i = g_hook_count++; i && g_hooks[i - 1].pc > pc; --i) g_hooks[i] = g_hooks[i - 1];
+    g_hooks[i].pc = pc;
+    g_hooks[i].fn = fn;
     return 1;
 }
 static void rt_hook(CPU* c, u64 pc) {
-    size_t i;
-    for (i = 0; i < g_hook_count; ++i)
-        if (g_hooks[i].pc == pc) {
-            g_hooks[i].fn(c, pc);
-            return;
-        }
+    size_t lo = 0, hi = g_hook_count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (g_hooks[mid].pc < pc)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    if (lo < g_hook_count && g_hooks[lo].pc == pc) g_hooks[lo].fn(c, pc);
 }
 
 static void rt_brk(CPU* c, u64 pc, u32 imm) {

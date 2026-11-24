@@ -478,6 +478,11 @@ add_executable(snx-test-runtime-present runtime_present.c)
 snx_test_target(snx-test-runtime-present 11)
 add_test(NAME runtime_present COMMAND snx-test-runtime-present)
 
+# the frame counters above 60 (scene60.c): which updates count, and the hook's change to a counter's registers
+add_executable(snx-test-scene60-counters scene60_counters.c)
+snx_test_target(snx-test-scene60-counters 11)
+add_test(NAME scene60_counters COMMAND snx-test-scene60-counters)
+
 # nvdrv's IPC side (nvdrv.c), with the GPU and host1x stand-ins in the test
 add_executable(snx-test-nvdrv-service nvdrv_service.c)
 snx_test_target(snx-test-nvdrv-service 23)

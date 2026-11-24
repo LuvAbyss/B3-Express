@@ -17,9 +17,11 @@
 #include "nx/memory/mem.h"
 #include "nx/runtime/loader.h"
 #include "nx/runtime/options.h"
+#include "nx/runtime/rtapi.h"
 #include "nx/runtime/platform/log.h"
 #include "nx/runtime/platform/plat.h"
 
+#include <math.h>
 #include <string.h>
 
 #define MAIN_FROM_LOW  0x5000   /* main loads right after rtld */
@@ -50,20 +52,60 @@
 #define MOVIE_FLAGS    0x50000000u
 #define MOVIE_MISSING  0x40000000u
 #define OWED_MAX       90.0f /* 30 Hz frames: a window held for minutes must not fast-forward the scene for minutes */
-/* The demon form's double tap: after a dodge, a window of updates at [player + 0x3bc] in which a second ZR transforms.
-   The update calls the input decoder, then counts the window down by one (main+0x55a410 .. 0x55a41c): updates, not
-   time, so above 60 it closes early (Witch Time, docs/STATUS.md, found it at 120: main+0x55a41c) */
-#define LOOP_DECODER   0x55a40c /* the update's call of the decoder; it is its only caller */
-#define FN_DECODER     0x55b058 /* the input decoder (player x0) */
-#define TAP_COUNT      0x55a410 /* ldr w8, [x19, #0x3bc]; subs w8, w8, #1; b.lt; str w8, [x19, #0x3bc] */
-#define TAP_WINDOW     0x3bc    /* i32 in the player */
-#define TAP_PLAYERS    4
+
+/* Frame counters above 60. Play counts input windows, press buffers, hit-stops, Witch Time's slow-downs and rumble in
+   updates: a load, an add or subtract of a constant, a store, made for 60 updates a second. The sites are Witch Time's
+   (github.com/Zexyen/Witch-Time, GPL-3.0: tools/wtbuild/fps_counters.txt, found by their census and read one by one,
+   with the rules of runtime/game_shim_eh.c fps_ci, fps_cf and fps_fs). Each entry is the add or subtract (main
+   offset, its word), and a hook point runs before it (launcher/code-insnhooks.txt). On an update that completes no
+   60 Hz frame of play the hook raises the loaded value by the step, so the field stays and the code after it reads
+   what a field one step larger would leave: integer counters and floats counting 1.0 skip that update, other floats
+   take the update's fraction of their amount. A countdown at 0 takes the stock step */
+static const u32 k_counters[][2] = {
+    {0x81425c, 0x1e212800u}, {0x627d10, 0x1e212800u}, {0x6274ac, 0x1e212800u},
+    {0x773974, 0x1e202820u}, {0x084320, 0x1e212800u}, {0xc8a7c4, 0x1e212800u},
+    {0x64cff0, 0x1e242863u}, {0x55a838, 0x51000529u}, {0x55a8d0, 0x71000430u},
+    {0x55a8e4, 0x71000450u}, {0x55a414, 0x71000508u}, {0x55a808, 0x71000509u},
+    {0x55a81c, 0x71000549u}, {0x55a844, 0x7100058bu}, {0x55a858, 0x7100056du},
+    {0x55a86c, 0x710005aeu}, {0x55a880, 0x710005cfu}, {0x55a894, 0x710005f0u},
+    {0x55a8a8, 0x71000630u}, {0x55a8bc, 0x71000650u}, {0x55a8f8, 0x71000470u},
+    {0x55a90c, 0x71000490u}, {0x55a920, 0x710004b0u}, {0x55a934, 0x710004d0u},
+    {0x55ae90, 0x51000508u}, {0x55ac44, 0x71000508u}, {0x55ac54, 0x71000508u},
+    {0x55af04, 0x51000508u}, {0x55ac64, 0x71000508u}, {0x55ac74, 0x71000508u},
+    {0x55ac84, 0x71000508u}, {0x55acbc, 0x71000508u}, {0x55ac94, 0x71000508u},
+    {0x55aca4, 0x71000508u}, {0x55afa4, 0x1e212800u}, {0x55b014, 0x71000508u},
+    {0x55b03c, 0x71000508u}, {0x55b2c8, 0x71000509u}, {0x55b2dc, 0x71000529u},
+    {0x55b938, 0x11000529u}, {0x55b180, 0x71000508u}, {0x43574c, 0x71000508u},
+    {0x7a233c, 0x71000508u}, {0x7a238c, 0x71000508u}, {0x7a25a4, 0x71000508u},
+    {0x7a25f4, 0x71000508u}, {0x7a25b4, 0x71000508u}, {0x7a2608, 0x71000508u},
+    {0x7a2594, 0x71000508u}, {0x7a2584, 0x71000508u}, {0xc1f900, 0x710005efu},
+    {0xcc3768, 0x7100058du}, {0xcc37e8, 0x7100058du}, {0x340788, 0x1e212800u},
+    {0x422f74, 0x71000508u}, {0x43e5fc, 0x1e212800u}, {0x43e93c, 0x1e212800u},
+    {0x79bd80, 0x1e212800u}, {0x7a01d0, 0x1e212800u}, {0x086e00, 0x1e283800u},
+    {0x0dc688, 0x71000529u}, {0x0dd0c8, 0x51000508u}, {0x3b5828, 0x1e212800u},
+    {0x6e1c24, 0x7100058cu}, {0x780a10, 0x71000508u}, {0x814208, 0x71000508u},
+    {0x814224, 0x1e212800u}, {0x9202bc, 0x1e222800u}}; /* ours: the chapter select's snap, t += 0.2 */
+#define COUNTERS (sizeof k_counters / sizeof *k_counters)
+
+/* Smoothings x += k (T - x) an update close in 1.5x as fast at 90. Before each, k becomes 1 - (1 - k)^step, what updates
+   of this length add up to in a 60 Hz frame's time. Witch Time's (fps_ease, lifter/eh.rs FPS_EASE_SITES, measured on
+   the chapter select at 120: a hop's glide back to 0.25 s to 90 %). The camera manager's easing serves every camera,
+   whose rates aren't read, so it is eased only while the chapter select runs (its update this update or the last) */
+#define EASE_RING   0x91f1c8 /* fmla v0.4s, v3.4s, v1.s[0]: the chapter select's ring eases to the aim, k in s1 */
+#define EASE_MAP    0x91dba8 /* stp x29, x30, [sp, #-0x50]!: the chapter select's update starts */
+#define EASE_CAMERA 0x626404 /* add x8, x19, #0x1f0: right after the camera manager loads its rate into s0 */
+static const u32 k_eases[][2] = {{EASE_RING, 0x4f811060u}, {EASE_MAP, 0xa9bb7bfdu}, {EASE_CAMERA, 0x9107c268u}};
 
 static u64 g_main;
-static GuestFn g_mode_set, g_clock, g_step_kind, g_step_end, g_decoder;
-static f32 g_play_step = 1.0f; /* the last measured frame's step, in 60 Hz frames */
-static int g_one_step;         /* this fixed-step frame runs one logic step */
-static int g_half;             /* the last frame ran the first kind alone, so this one is the second */
+static GuestFn g_mode_set, g_clock, g_step_kind, g_step_end;
+static f32 g_play_owed;            /* 60 Hz frames of play not yet counted, under 1 */
+static int g_count_skip;           /* this update completes no 60 Hz frame: counters stay. Atomic, read on any thread */
+static f32 g_count_part = 1;       /* this update's 60 Hz frames, at most 1: the share of a float's amount */
+static f32 g_ease_step = 1;        /* this update's 60 Hz frames, the power of a smoothing's 1 - k */
+static u64 g_updates;              /* the updates the main loop's clock started */
+static u64 g_map_update = (u64)-2; /* the last update the chapter select ran in */
+static int g_one_step;             /* this fixed-step frame runs one logic step */
+static int g_half;                 /* the last frame ran the first kind alone, so this one is the second */
 static u64 g_frames_forced;
 
 static GuestFn take(u64 offset, GuestFn host) {
@@ -200,21 +242,86 @@ static void scene_clock_report(f32 k, int restart) {
     scene_s = 0;
 }
 
+/* the update the main loop's clock call starts: what the counters do in it. Fixed-step scenes keep the stock counts */
+static void count_update(f32 step, int fixed) {
+    int whole = 1;
+    f32 ease;
+    if (fixed || !(step > 0.0f)) {
+        g_play_owed = 0.0f;
+        step = 1.0f;
+    } else {
+        g_play_owed += step;
+        if (g_play_owed > 4.0f) g_play_owed = 4.0f;
+        whole = (int)g_play_owed;
+        g_play_owed -= (f32)whole;
+    }
+    ease = step;
+    if (step > 1.0f) step = 1.0f;
+    __atomic_store_n(&g_count_skip, whole == 0, __ATOMIC_RELAXED);
+    __atomic_store(&g_count_part, &step, __ATOMIC_RELAXED);
+    __atomic_store(&g_ease_step, &ease, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_updates, 1, __ATOMIC_RELAXED);
+}
+
+/* a smoothing's rate for this update's step (1 - k)^step: unchanged at 1.0 */
+static f32 ease_rate(f32 k, f32 step) { return step != 1.0f && k > 0.0f && k < 1.0f ? 1.0f - powf(1.0f - k, step) : k; }
+
+static void ease(CPU* RESTRICT c, int r) {
+    f32 step;
+    __atomic_load(&g_ease_step, &step, __ATOMIC_RELAXED);
+    c->v[r].f[0] = ease_rate(c->v[r].f[0], step);
+}
+
+static void ease_hook(CPU* RESTRICT c, u64 pc) {
+    u64 n = __atomic_load_n(&g_updates, __ATOMIC_RELAXED);
+    if (pc == g_main + EASE_RING)
+        ease(c, 1);
+    else if (pc == g_main + EASE_MAP)
+        __atomic_store_n(&g_map_update, n, __ATOMIC_RELAXED);
+    else if (n - __atomic_load_n(&g_map_update, __ATOMIC_RELAXED) <=
+             1) /* the camera's and the map's order isn't known */
+        ease(c, 0);
+}
+
+/* the hook's change to the registers before the add or subtract w (1 when it made one) */
+static int counter_adjust(CPU* RESTRICT c, u32 w, int skip, f32 part) {
+    u32 n = (w >> 5) & 31;
+    if ((w & 0x9fc00000u) == 0x11000000u) { /* add or subtract (immediate), 32-bit, unshifted */
+        u32 v = (u32)c->x[n], k = (w >> 10) & 0xfffu, sub = (w >> 30) & 1u;
+        if (!skip || (sub && v == 0)) return 0;
+        c->x[n] = (u64)(sub ? v + k : v - k);
+        return 1;
+    }
+    if ((w & 0xffe0ec00u) == 0x1e202800u) { /* fadd or fsub, single */
+        f32 a = c->v[(w >> 16) & 31].f[0], share = a == 1.0f || a == -1.0f ? (skip ? 0.0f : 1.0f) : part;
+        if (share == 1.0f) return 0;
+        c->v[n].f[0] += ((w >> 12) & 1u ? -a : a) * (share - 1.0f);
+        return 1;
+    }
+    return 0;
+}
+
+static void counter(CPU* RESTRICT c, u64 pc) {
+    u32 w;
+    f32 part;
+    memcpy(&w, GP(pc), sizeof w);
+    __atomic_load(&g_count_part, &part, __ATOMIC_RELAXED);
+    (void)counter_adjust(c, w, __atomic_load_n(&g_count_skip, __ATOMIC_RELAXED), part);
+}
+
 static void clock_update(CPU* RESTRICT c, u64 pc) {
     static f32 owed;
     static int was_fixed;
     u64 clock = c->x[0];
-    int fixed = (u32)c->x[1] == 0;
+    int fixed = (u32)c->x[1] == 0, loop = c->x[30] == g_main + LOOP_CLOCK + 4;
     f32 carry = load_f32(clock + CLOCK_CARRY), sum = load_f32(clock + CLOCK_SUM);
     i32 count;
     memcpy(&count, GP(clock + CLOCK_COUNT), sizeof count);
     keep_movie_flag(c);
     g_one_step = fixed && c->v[0].f[0] == 1.0f; /* s0 is 4.0 in the game's 15 FPS mode */
     g_clock(c, pc);
-    if (!fixed && g_vi_hz > VI_REFRESH_HZ) {
-        measured_floor(clock, carry, sum, count);
-        g_play_step = load_f32(clock + CLOCK_STEP);
-    }
+    if (!fixed && g_vi_hz > VI_REFRESH_HZ) measured_floor(clock, carry, sum, count);
+    if (loop && g_vi_hz > VI_REFRESH_HZ) count_update(load_f32(clock + CLOCK_STEP), fixed);
     if (fixed) {
         u32 flags = state_flags();
         /* in 30 Hz frames: a display frame at g_vi_hz is 30 / g_vi_hz of one */
@@ -254,44 +361,31 @@ static void step_end(CPU* RESTRICT c, u64 pc) {
         c->x[21] &= ~PASS_TWO;
 }
 
-/* The game counts the window down by 1 right after this returns, when it is 1 or more. Above 60 the count takes the
-   whole 60 Hz frames of game time due instead: the step adds up per player, and before the game's 1 the window gets
-   back what it shouldn't lose. As Witch Time's integer counters (B2's rules): never past 0 in one update */
-static void decoder(CPU* RESTRICT c, u64 pc) {
-    static struct {
-        u64 player;
-        f32 owed;
-    } due[TAP_PLAYERS];
-    u64 player = c->x[0];
-    i32 n, whole;
-    int i;
-    g_decoder(c, pc);
-    if (g_vi_hz <= VI_REFRESH_HZ || !player) return;
-    for (i = 0; i < TAP_PLAYERS - 1 && due[i].player && due[i].player != player; i++) {}
-    if (due[i].player != player) {
-        due[i].player = player;
-        due[i].owed = 0.0f;
-    }
-    due[i].owed += g_play_step;
-    if (due[i].owed > 4.0f) due[i].owed = 4.0f;
-    whole = (i32)due[i].owed;
-    due[i].owed -= (f32)whole;
-    memcpy(&n, GP(player + TAP_WINDOW), sizeof n);
-    if (n < 1) return;
-    LOG_LIMIT(1, "scene60: the double tap's window (%d) counts game time at %u Hz\n", n, g_vi_hz);
-    n = n - (whole < n ? whole : n) + 1; /* the game's 1 comes next */
-    memcpy(GP(player + TAP_WINDOW), &n, sizeof n);
-}
-
-/* do the words at offset read as these? */
-static int words(u64 offset, const u32* want, int n) {
-    int i;
-    for (i = 0; i < n; i++) {
+/* every counter's word where it's known, then its hook point */
+static void counters_init(void) {
+    size_t i, set = 0;
+    for (i = 0; i < COUNTERS; i++) {
         u32 w = 0;
-        memcpy(&w, GP(g_main + offset + 4 * (u64)i), sizeof w);
-        if (w != want[i]) return 0;
+        memcpy(&w, GP(g_main + k_counters[i][0]), sizeof w);
+        if (w != k_counters[i][1]) {
+            LOG("scene60: main+0x%x isn't the counter it knows: play's windows and timers stay counted in frames\n",
+                k_counters[i][0]);
+            return;
+        }
     }
-    return 1;
+    for (i = 0; i < COUNTERS; i++) set += (size_t)rt_hook_set(g_main + k_counters[i][0], counter);
+    LOG("scene60: %u of %u frame counters count play's time\n", (unsigned)set, (unsigned)COUNTERS);
+    for (i = 0; i < sizeof k_eases / sizeof *k_eases; i++) {
+        u32 w = 0;
+        memcpy(&w, GP(g_main + k_eases[i][0]), sizeof w);
+        if (w != k_eases[i][1]) {
+            LOG("scene60: main+0x%x isn't the smoothing it knows: the chapter select eases by frames\n", k_eases[i][0]);
+            return;
+        }
+    }
+    for (set = 0, i = 0; i < sizeof k_eases / sizeof *k_eases; i++)
+        set += (size_t)rt_hook_set(g_main + k_eases[i][0], ease_hook);
+    LOG("scene60: %u of 3 smoothings of the chapter select follow play's time\n", (unsigned)set);
 }
 
 /* does the word at offset call target? */
@@ -320,12 +414,8 @@ void scene60_init(void) {
     g_step_kind = take(FN_STEP_KIND, step_kind);
     g_step_end = take(FN_STEP_END, step_end);
     if (g_opt_frame_rate > VI_REFRESH_HZ) {
-        static const u32 count[4] = {0xb943be68u, 0x71000508u, 0x5400004bu, 0xb903be68u};
         g_vi_hz = (unsigned)g_opt_frame_rate;
-        if (calls(LOOP_DECODER, FN_DECODER) && words(TAP_COUNT, count, 4))
-            g_decoder = take(FN_DECODER, decoder);
-        else
-            LOG("scene60: the double tap's window isn't where it's known: it stays counted in frames\n");
+        counters_init();
     }
     LOG("scene60: title, menus, cutscenes%s at %u, main at %llx\n", g_vi_hz > VI_REFRESH_HZ ? " and play" : "", g_vi_hz,
         (unsigned long long)g_main);
