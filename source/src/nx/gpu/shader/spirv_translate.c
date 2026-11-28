@@ -334,6 +334,12 @@ static u32 quad_pick(DirectCtx* c, const u32 across[4], int k_const, u32 k) {
     return r;
 }
 
+/* A tessellation stage runs as a warp of one lane, lane 0: SHFL gives the lane its own value and VOTE its own
+   predicate. A host subgroup's other lanes are other vertices there. Bayonetta 3's cloud evaluation stages gather a
+   value from the four lanes of their group (SHFL.IDX 0-3, segment 4), and with a real shuffle every vertex took its
+   neighbours' noise: the clouds of erasure came apart in blocks (issue 18, Witch Time PR 219 found the same) */
+static int lone_lane(int stage) { return stage == ST_TCS || stage == ST_TES; }
+
 static u32 subgroup_ballot_word(DirectCtx* c, u32 vec4_u32, u32 lane, u32 predicate) {
     u32 mask = spv_emit_subgroup_ballot(&c->emit, vec4_u32, c->u32_type, predicate);
     u32 word = spv_emit_shift_right_u32(&c->emit, c->u32_type, lane, spv_emit_constant_u32(&c->emit, c->u32_type, 5));
@@ -2990,7 +2996,7 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                B(insn[i], op->id == O_TEX_B ? 37 : 55, 3) == 6))))
             needs_derivatives = 1;
         if (stage == ST_FS && helper_side_effect(op->id)) needs_demote = 1;
-        if (op->id == O_VOTE || (op->id == O_SHFL && stage != ST_FS)) needs_subgroup = 1;
+        if (!lone_lane(stage) && (op->id == O_VOTE || (op->id == O_SHFL && stage != ST_FS))) needs_subgroup = 1;
         if (op->id == O_SHFL && stage == ST_FS) /* quad_across */
             needs_derivatives = needs_fine_derivatives = needs_fragcoord = 1;
         if (op->id == O_FSWZADD) { /* a swizzle other than a derivative's reads the lane in its quad */
@@ -4194,6 +4200,12 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
             product = high ? integer_mul_high(c, lhs, rhs, signed_lhs, signed_rhs)
                            : spv_emit_imul_u32(&c->emit, c->u32_type, lhs, rhs);
             reg_write(c, d, mad ? spv_emit_iadd_u32(&c->emit, c->u32_type, product, addend) : product);
+        } else if (op == O_VOTE && lone_lane(stage)) { /* ALL and ANY are the predicate, EQ always holds */
+            u32 value = pred_read(c, B(w, 39, 3), B(w, 42, 1));
+            if (B(w, 48, 2) < 3) pred_write(c, B(w, 45, 3), B(w, 48, 2) == 2 ? c->true_value : value);
+            reg_write(c, d,
+                      spv_emit_select(&c->emit, c->u32_type, value, spv_emit_constant_u32(&c->emit, c->u32_type, 1),
+                                      c->zero));
         } else if (op == O_VOTE) {
             u32 value = pred_read(c, B(w, 39, 3), B(w, 42, 1));
             u32 lane = spv_emit_load(&c->emit, c->u32_type, c->subgroup_lane_input);
@@ -4247,7 +4259,9 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                 B(w, 29, 1) ? spv_emit_constant_u32(&c->emit, c->u32_type, B(w, 34, 13)) : reg_read(c, B(w, 39, 8));
             /* a pixel stage's lane is its place in the quad (quad_place), and it reads the quad with quad_across */
             u32 place = stage == ST_FS ? quad_place(c) : 0;
-            u32 lane_full = stage == ST_FS ? place : spv_emit_load(&c->emit, c->u32_type, c->subgroup_lane_input);
+            u32 lane_full = stage == ST_FS     ? place
+                            : lone_lane(stage) ? c->zero
+                                               : spv_emit_load(&c->emit, c->u32_type, c->subgroup_lane_input);
             u32 lane = spv_emit_bitwise_and_u32(&c->emit, c->u32_type, lane_full,
                                                 spv_emit_constant_u32(&c->emit, c->u32_type, 31));
             u32 seg = spv_emit_bitwise_and_u32(
@@ -4302,6 +4316,8 @@ u32* shader_to_spirv(const u8* code, u32 max_bytes, int stage, ShaderInfo* si, s
                                      spv_emit_bitwise_and_u32(&c->emit, c->u32_type, apart,
                                                               spv_emit_constant_u32(&c->emit, c->u32_type, 3)));
                 shuffled = spv_emit_select(&c->emit, c->u32_type, in_quad, shuffled, value);
+            } else if (lone_lane(stage)) {
+                shuffled = value;
             } else {
                 u32 host_lane = spv_emit_bitwise_or_u32(
                     &c->emit, c->u32_type,

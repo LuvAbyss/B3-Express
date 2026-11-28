@@ -650,7 +650,8 @@ typedef struct {
     int stage, compute;
     u64 code, cb;
     u32 window, cb_size, cs_local[3], shared;
-    int mod; /* -2 not yet, -1 failed, else the module (no key: what its translation reads and writes) */
+    u32 tess; /* an evaluation stage's domain, spacing and output, as register 0xC8 holds them (prog_tess) */
+    int mod;  /* -2 not yet, -1 failed, else the module (no key: what its translation reads and writes) */
     int nvar;
     struct {
         NvnStageKey key;
@@ -677,6 +678,32 @@ static ProgRec* prog_slot(u64 obj, int make) { /* lock held */
 static u32 rd32(const u8* p) {
     u32 v;
     memcpy(&v, p, 4);
+    return v;
+}
+/* An evaluation stage's mode, which NVN keeps in the program's control section at 0x738 as OpenGL enums: primitive
+   (GL_ISOLINES 0x8E7A, GL_TRIANGLES 4, GL_QUADS 7), spacing (GL_EQUAL, GL_FRACTIONAL_ODD 0x8E7B, _EVEN 0x8E7C),
+   point mode, vertex order (GL_CW 0x900, GL_CCW 0x901); the offset from Witch Time (nvn_gl.c). Returned as register
+   0xC8 encodes it, which the translator reads (domain bits 0-1, spacing 4-5, output 8-9: points 0, lines 1, triangles
+   clockwise 2, counterclockwise 3). Without it every evaluation stage was isolines drawn as points: the clouds of
+   erasure, triangles the console fills, came out as a lattice of single pixels (issue 18). The order is swapped:
+   OpenGL's domain origin is lower left, Vulkan's (the pipelines' default) upper left, and the replay's viewport is
+   flipped the OpenGL way */
+static u32 prog_tess(const u8* p) {
+    static PMutex lk = PMUTEX_INIT;
+    static u32 seen[8][4];
+    static u32 nseen;
+    u32 prim = rd32(p), spacing = rd32(p + 4), points = rd32(p + 8), order = rd32(p + 12), i;
+    u32 domain = prim == 4 ? 1 : prim == 7 ? 2 : 0;
+    u32 out = points ? 0 : domain == 0 ? 1 : order == 0x900 ? 3 : 2;
+    u32 v = domain | (spacing == 0x8E7B ? 1u : spacing == 0x8E7C ? 2u : 0u) << 4 | out << 8;
+    pm_lock(&lk);
+    for (i = 0; i < nseen && memcmp(seen[i], p, 16); i++) {}
+    if (i == nseen && nseen < 8) { /* each mode once: what the game's evaluation stages ask for */
+        memcpy(seen[nseen++], p, 16);
+        LOG("nvn-cmdlist: an evaluation stage's mode: primitive %x, spacing %x, points %u, order %x: 0xC8 %03x\n", prim,
+            spacing, points, order, v);
+    }
+    pm_unlock(&lk);
     return v;
 }
 static void prog_shaders(CPU* RESTRICT c, const NvnFn* f) { /* (program, count, NVNshaderData*) */
@@ -721,6 +748,7 @@ static void prog_shaders(CPU* RESTRICT c, const NvnFn* f) { /* (program, count, 
             s->code = data + 0x30;
             s->window = 0x50 + len;
             s->cb = data + w4;
+            if (s->stage == ST_TES) s->tess = prog_tess(ctl + 0x738);
         }
         if (!s->cb_size) s->cb = 0;
         rec.n++;
@@ -750,8 +778,18 @@ static void why_count(char (*why)[64], u64* n, const char* what) { /* a table of
 static u64 g_var_made, g_var_fail, g_var_full;
 static int stage_load(ProgStage* s, const NvnStageKey* key) { /* lock held: s translated for key, -1 if it can't be */
     char why[64];
-    int mod = vk_nvn_shader(s->stage, s->code, s->window, s->compute, s->cb, s->cb_size, s->cs_local, s->shared, key,
-                            why, sizeof why);
+    NvnStageKey k;
+    int mod;
+    if (s->stage == ST_TES) { /* the translator reads an evaluation stage's mode from rt_int, which no draw key sets */
+        if (key)
+            k = *key;
+        else
+            memset(&k, 0, sizeof k);
+        k.rt_int = s->tess;
+        key = &k;
+    }
+    mod = vk_nvn_shader(s->stage, s->code, s->window, s->compute, s->cb, s->cb_size, s->cs_local, s->shared, key, why,
+                        sizeof why);
     if (mod < 0) why_count(g_mod_why, g_mod_why_n, why);
     return mod;
 }

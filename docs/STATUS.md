@@ -19,6 +19,92 @@ never the user's save. The notes behind each section are in the `diagnostics/*/R
 | Played | the AMD fixes on the RX 6700 XT (2026-11-16) and on an NVIDIA card (2026-11-17). Issue 17's fix by the reporter on Vega (2026-11-24) |
 | Next | 90 FPS step 2 and the mouse camera by hand; the clouds on Vega (issue 17's last report); FSR 3.1: plan below, not started |
 
+## Tessellated draws get the game's mode: the clouds were drawn as points (issue 18, 2026-11-28; installed (rollback install-20261128b), fixed in the user's chapter 3 play)
+
+- 2026-11-28: the user played chapter 3 with it installed: "the bug is fix". The clouds are solid, so the winding
+  is right.
+
+- The user's F6 captures with the one-lane fix (below) still showed the fog's teal squares. The cloud targets
+  (520x360) held rows of single pixels, enlarged into 2.6-pixel squares in the scene. With the two other
+  pattern-binding stages skipped (`SNX_NVN_SKIP_SHADER=293a5492,e3f05257`), the dots stayed.
+- Mechanism: the translator takes an evaluation stage's domain, spacing and output from register 0xC8
+  (`ShaderInfo.rt_int_mask`). The NVN path has no registers and never set it. So every evaluation stage was 0:
+  isolines with equal spacing, drawn as points. NVN keeps the mode in the program's control section at 0x738, as
+  OpenGL enums (primitive, spacing, point mode, vertex order). Witch Time reads the same offset (`nvn_gl.c`).
+- Fix: `cmdlist.c` `prog_tess` reads it in `nvnProgramSetShaders`, and `stage_load` gives it to every translation of
+  an evaluation stage. Clockwise and counter-clockwise are swapped: OpenGL's domain origin is lower left and the
+  pipelines keep Vulkan's upper left, with the viewport flipped the OpenGL way (what Witch Time does with a
+  lower-left origin). Each distinct mode is logged once.
+- Checked: built without warnings (runtime `f1162087`, formatted; the run below used `5f75c7d1`, which differs only in
+  one line's whitespace). A 60 s headless run in the test copy logged the game's one
+  mode: `GL_TRIANGLES`, `GL_EQUAL`, not points, `GL_CCW`, register value `0x201`. The run exited 0 with production
+  saves unchanged and no crash lines (`diagnostics/issue18-20261126/tessmode2`).
+- Not done: not seen in the game. No unattended route draws tessellation. The triangle winding follows the reasoning
+  above, and if it is wrong, culled clouds would vanish instead of dotting. The scene's 50 % checker
+  (`capture-20261128`) may be the same points through other stages. Not yet checked after this fix.
+
+## Clouds of erasure: tessellation stages run as one lane (issue 18, 2026-11-28; installed (rollback install-20261128))
+
+- The fog in chapter 3 (Pharmacy street, the boss fight) is the clouds of erasure, drawn as tessellated patches.
+  The session loads 3 control and 3 evaluation stages throughout the chapter.
+- Mechanism: two evaluation stages (`36f7bac6`, `ef699a02` before the fix) each gather a value from the 4 lanes of
+  their group with 78 `SHFL.IDX` (lanes 0-3, segment of 4). The translator made them host subgroup shuffles
+  (`needs_subgroup`), where the other lanes are other vertices: each vertex took its neighbours' noise. Witch Time
+  found the same in these stages (#207, PR 219) and translates tessellation stages as one lane.
+- Fix: `spirv_translate.c` `lone_lane`. In tessellation stages SHFL gives the lane's own value and VOTE its own
+  predicate, lane 0. They no longer need subgroups, so the lane model applies to them.
+- Checked: the game's tessellation stages, dumped in a headless run. The two cloud stages now have 0 shuffle
+  instructions (78 before), and all 9 pass `spirv-val` (vulkan1.3). The other 7 are byte-identical. The runs exited 0
+  and production saves were unchanged.
+- Not done: not seen in the game (no unattended route reaches chapter 3). Witch Time's other two fixes are not
+  ported: the 520x360 cloud pass drawn at the scene's scale, and the mist reading scaled depth. They only matter
+  above 1.0x. Vertex stages with SHFL still use real shuffles.
+
+## Chapter 3 at 60: where a frame goes (2026-11-28; launcher change made)
+
+- The user's chapter 3 session at 60 FPS (log of 2026-11-28 19:01, 1.6x): the boss fight (1300-1480 s) runs at
+  median 20-21 ms, p99 24-26 ms. The GPU is not the limit.
+- Mechanism: a game sync is released only once the render thread has recorded the window before it
+  (`gpu.c` `g_gpu_host_wait`, `cmdlist.c` `rt_thread`). In the boss fight the game polls `nvnSyncWait` ~95,000
+  times a frame, 10.4 ms in all. The render thread is idle 9.9 ms, then records 10.3 ms. The game's work and our
+  recording come one after the other: ~10 + ~10 ms.
+- Recording in the boss fight, a frame: lists 9.1 ms, draw setup 8.4. The draws' own 6.4 ms: descriptor sets 2.5
+  (driver 1.2), commands 2.0, textures ready 1.1. Plus mirror 1.1. About 1,300 draws a frame. Dynamic state was
+  already sent only on change.
+- Background load during the session: Microsoft Edge Game Assist was running again. With it ended, draw setup went
+  from 2.70 to 2.43 ms on average (perf-noga runs, 2026-11-28). It comes back with Windows until uninstalled. With the game closed, the CPU sat at 13%:
+  Riot Client ~40% of a core, openlua-desktop's WebView2 ~22%, Steam's web helper 15%, Opera 20%, HellForge 8%.
+- The launcher's clock-ring went on drawing behind the game. Its WebView2 used about 560 CPU seconds from
+  18:35 (game 18:35-19:02), and 0% once idle. Fix: `launcher/ui/index.html` draws it only while the game isn't running.
+- Not done: a CPU profile of the boss fight (`profile=1`) to see what the game's ~10 ms and the render thread's
+  ~10 ms are made of. No change to the replay was made without it. Fog walls (issue 18) are unchanged.
+
+## Object fade reaches the stages with flow again (issue 18, 2026-11-27; installed 2026-11-28)
+
+Since issue 17's fix (`1a88671`, in 0.4.0) a pixel stage with flow defers its discard: KIL only sets
+`DirectCtx.discarded` (`if (p) discarded = true`), and the program's end does `if (discarded) kill`.
+`gpu/vk/dither.c` only knew a compare whose result branches straight to a block that discards, so in 0.4.0 the
+Object fade setting skipped every such stage: the fade stayed the game's checkerboard whatever the setting, as the
+issue 18 reporter (0.4.0) wrote.
+
+- **Mechanism:** dither.c now also counts a block that only stores true to a flag as a discard, when the program
+  branches to a kill on a load of that flag. Nothing else changed in the recognition or the patch.
+- **Files:** `source/src/nx/gpu/vk/dither.c`; `source/src/nx/gpu/vk/nvn_res.c` (`prep_key` also writes
+  `SNX_NVN_SPV_DUMP`, so a preparation pass dumps every stage, not only the ones drawn).
+- **Measured offline:** all 3,738 pixel stages, dumped by a preparation pass at fade 0 (scratchpad harness around
+  `dither_patch`): matched before 189 stages (211 compares), after 426 (448), 237 added, none lost. All 1,278 patched
+  modules (3 modes) pass `spirv-val --target-env vulkan1.3` (SPIRV-Tools v2026.4).
+- **Measured in the game** (isolated-cam, RTX 3080, headless): a full preparation at fade 3 with the fix, 5,797 stages,
+  over 400 fade stages changed, no failed pipelines (`diagnostics/issue18-20261126/fix1/prep-new.log`). The New Game
+  route to frame 24000 (`fix1/`): exit 0, saves unchanged, no failed pipelines. The route draws almost no fading object.
+- **The runtime in `output/` (`792e79f2`) predates `1a88671`**, so the user's own play was never affected; its
+  preparation changes as many stages (`fix1/prep-old.log`).
+- **The butterfly wings' dots are not this.** They show on the Switch too (4K footage, 2026-11-27), and on the
+  installed runtime, where the fade reaches every pattern stage. Their stage isn't found: a scan for other
+  screen-position patterns found none (the other masks are the translator's denormal and helper-lane code).
+- **Not done:** hand play at fade 3 on 0.4.0-based runtime in a scene with fading objects; finding the wings' stage
+  needs a capture in the game with them on screen (`SNX_NVN_SKIP_SHADER` to bisect).
+
 ## Release 0.4.0 (2026-11-25)
 
 - **Contents:** issue 17's Vega fix (pixel loops as structured loops, `1a88671`), 90 FPS step 2's frame counters and
