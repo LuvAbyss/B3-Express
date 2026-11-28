@@ -29,6 +29,7 @@ enum {
     OP_TYPE_FLOAT = 22,
     OP_TYPE_VECTOR = 23,
     OP_TYPE_POINTER = 32,
+    OP_CONSTANT_TRUE = 41,
     OP_CONSTANT_FALSE = 42,
     OP_CONSTANT = 43,
     OP_CONSTANT_COMPOSITE = 44,
@@ -208,7 +209,8 @@ int dither_patch(uint32_t** spv_io, size_t* words_io, int mode, float fade_test,
     Mod m;
     Patch p;
     uint8_t *t = NULL, *ta = NULL, *tf = NULL, *held = NULL, *cur = NULL, *regs = NULL, *whole = NULL, *kill = NULL;
-    uint32_t* root = NULL;
+    uint8_t* flag = NULL;
+    uint32_t *root = NULL, *from = NULL;
     uint32_t i, j, k, fc = 0, last_decor = 0, mem_model = 0, entry_ins = 0, entry_fn = 0, label = 0;
     Match match[MAX_MATCH];
     AndUse ands[MAX_AND];
@@ -240,8 +242,8 @@ int dither_patch(uint32_t** spv_io, size_t* words_io, int mode, float fade_test,
     if (!fc || m.body == m.n || !entry_ins) goto done;
     t = calloc(m.bound, 1), ta = calloc(m.bound, 1), tf = calloc(m.bound, 1), held = malloc(m.bound);
     cur = calloc(m.bound, 1), regs = calloc(m.bound, 1), whole = calloc(m.bound, 1), kill = calloc(m.bound, 1);
-    root = malloc(m.bound * sizeof *root);
-    if (!t || !ta || !tf || !held || !cur || !regs || !whole || !kill || !root) goto done;
+    root = malloc(m.bound * sizeof *root), from = calloc(m.bound, sizeof *from), flag = calloc(m.bound, 1);
+    if (!t || !ta || !tf || !held || !cur || !regs || !whole || !kill || !root || !from || !flag) goto done;
     /* the pattern's coordinate: And(x, 63) with x from FragCoord.x or .y */
     for (i = m.body; i < m.n; i++)
         if (op_of(&m, i) == OP_LOAD && arg(&m, i)[2] == fc && id_ok(&m, arg(&m, i)[1])) whole[arg(&m, i)[1]] = 1;
@@ -280,6 +282,25 @@ int dither_patch(uint32_t** spv_io, size_t* words_io, int mode, float fade_test,
         uint32_t op = op_of(&m, i);
         if (op == OP_LABEL) label = arg(&m, i)[0];
         if ((op == OP_KILL || op == OP_TERMINATE || op == OP_DEMOTE) && id_ok(&m, label)) kill[label] = 1;
+    }
+    /* In a program with flow the translator defers a discard (spirv_translate.c DirectCtx.discarded): a block only
+       sets a flag to true, and the program's end branches to a kill on that flag. Such a block counts as a discard */
+    for (i = m.body; i < m.n; i++) { /* the flags the end discards on: from[] maps a load to its variable */
+        const uint32_t* a = arg(&m, i);
+        if (op_of(&m, i) == OP_LOAD && len_of(&m, i) == 4 && id_ok(&m, a[1]) && id_ok(&m, a[2]))
+            from[a[1]] = a[2];
+        else if (op_of(&m, i) == OP_BRANCH_COND && len_of(&m, i) >= 4 && id_ok(&m, a[0]) && id_ok(&m, a[1]) &&
+                 kill[a[1]] && from[a[0]])
+            flag[from[a[0]]] = 1;
+    }
+    for (i = m.body; i + 2 < m.n; i++) {
+        const uint32_t* s = arg(&m, i + 1);
+        uint32_t q;
+        if (op_of(&m, i) != OP_LABEL || op_of(&m, i + 1) != OP_STORE || op_of(&m, i + 2) != OP_BRANCH ||
+            len_of(&m, i + 1) != 3 || !id_ok(&m, s[0]) || !flag[s[0]])
+            continue;
+        for (q = 0; q < m.body; q++)
+            if (op_of(&m, q) == OP_CONSTANT_TRUE && arg(&m, q)[1] == s[1]) kill[arg(&m, i)[0]] = 1;
     }
     /* compares of the texel with a value not from it, whose result reaches a branch to a discard */
     for (i = m.body; i < m.n; i++) {
@@ -458,6 +479,6 @@ int dither_patch(uint32_t** spv_io, size_t* words_io, int mode, float fade_test,
     }
 done:
     free(m.at), free(p.w), free(t), free(ta), free(tf), free(held), free(cur), free(regs), free(whole), free(kill);
-    free(root);
+    free(root), free(from), free(flag);
     return (int)(nmatch ? found : 0);
 }

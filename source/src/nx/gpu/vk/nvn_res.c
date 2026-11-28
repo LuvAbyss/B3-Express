@@ -596,6 +596,7 @@ static int prep_key(const PrepJob* j, const NvnStageKey* key, u32* in_mask) {
     if (!spv) return 0;
     *in_mask = si.in_mask;
     u32 h = spv_fnv(spv, words);
+    spv_dump(h, j->stage, spv, words, j->mem, j->window, 0, 0); /* a preparation pass dumps every stage */
     {
         static int show = -1; /* SNX_NVN_PREP_LOG=1: each prepared stage's SPIR-V hash, to match against draws' */
         if (show < 0) show = getenv("SNX_NVN_PREP_LOG") && getenv("SNX_NVN_PREP_LOG")[0] == '1';
