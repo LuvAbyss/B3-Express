@@ -846,7 +846,9 @@ select { background: var(--raise); border: 1px solid var(--line); border-radius:
     g.save(); g.rotate(t * 0.011 + 2); g.beginPath(); g.moveTo(0, 0); g.lineTo(0, -95); g.stroke(); g.restore();
     g.fillStyle = 'rgba(226,194,126,0.8)'; g.beginPath(); g.arc(0, 0, 4, 0, Math.PI * 2); g.fill(); g.restore();
   }
-  if (still) draw(0); else (function loop(ms) { if (!document.hidden) draw(ms / 1000); requestAnimationFrame(loop); })(0);
+  /* still while the game runs: behind the game it went on drawing at the display's rate (2026-11-28: its WebView2 used
+     about 560 CPU seconds over a 26-minute session) */
+  if (still) draw(0); else (function loop(ms) { if (!document.hidden && !(last && last.running)) draw(ms / 1000); requestAnimationFrame(loop); })(0);
 
   /* ---- start once pywebview has put its bridge in */
   function start() { api = window.pywebview.api; route(); tick(); checkUpdate(true); if (location.hash !== '#mods') loadMods().catch(() => {}); }
