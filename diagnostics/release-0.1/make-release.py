@@ -4,12 +4,12 @@ import shutil
 import zipfile
 from pathlib import Path
 
-VERSION = '0.4.0'
+VERSION = '0.4.1'
 root = Path.cwd()
 name = f'B3-Express-{VERSION}-windows-x64'
 out = root / 'release' / name
-exe = root / 'diagnostics/release-0.1/Bayo3_120-0.4.0-release.exe'  # built from ae50a1f (issue 17's Vega fix, 90 FPS frame counters, mouse camera, key prompts, launcher): the Vega fix confirmed by the reporter, the rest run by script, not played by hand
-assert hashlib.sha256(exe.read_bytes()).hexdigest().startswith('e06153c1')
+exe = root / 'diagnostics/release-0.1/Bayo3_120-0.4.1-release.exe'  # built from 26d2f8e (issue 18's fog fix: tessellated draws get the game's mode, the object fade in stages with flow): the fog fix played by the user in chapter 3, the fade run by script
+assert hashlib.sha256(exe.read_bytes()).hexdigest().startswith('30bb177f')
 assert not (root / 'release' / (name + '.zip')).exists(), 'this version is already packaged: raise VERSION'
 if out.exists():
     shutil.rmtree(out)

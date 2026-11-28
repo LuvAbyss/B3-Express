@@ -19,6 +19,21 @@ never the user's save. The notes behind each section are in the `diagnostics/*/R
 | Played | the AMD fixes on the RX 6700 XT (2026-11-16) and on an NVIDIA card (2026-11-17). Issue 17's fix by the reporter on Vega (2026-11-24) |
 | Next | 90 FPS step 2 and the mouse camera by hand; the clouds on Vega (issue 17's last report); FSR 3.1: plan below, not started |
 
+## Release 0.4.1 (2026-11-28)
+
+- **Contents:** issue 18's fog fix, tessellated draws getting the game's mode, with tessellation stages as one lane
+  (`26d2f8e`). Object fade reaching stages with flow again (`c78b4a6`). The launcher clock kept still while the game
+  runs (`eda751b`).
+- **Files:** runtime `30bb177f` (the installed `f1162087`'s code, formatted, with the commit stamp); zip `3f457840`,
+  84.2 MB, 1,016 files; notes `release/RELEASE-NOTES-0.4.1.md`.
+- **Measured:** the user played chapter 3 on `f1162087`: the clouds are solid.
+- **New-player test** on the unzipped package (`test-fresh.py --web`, RTX 3080, the GPU at 32 % from other programs):
+  Install from an extracted dump in 211 s, no error, next step Play. The game logged the evaluation stage's mode
+  (`0xC8 201`), ran the shader preparation behind its screen (5,797 stages, done at 41.5 s, 33.7 ms of each 77.9 ms
+  stage waiting for `vk_lock`), drew 600 frames and exited 0, with no pipeline failing. 0.4.0's run drew 1,200: its
+  stages were already in the driver's cache, and this release changes several hundred of them.
+- **Not checked:** an update from 0.4.0 (its recompile), and hand play of the fade setting.
+
 ## Tessellated draws get the game's mode: the clouds were drawn as points (issue 18, 2026-11-28; installed (rollback install-20261128b), fixed in the user's chapter 3 play)
 
 - 2026-11-28: the user played chapter 3 with it installed: "the bug is fix". The clouds are solid, so the winding
